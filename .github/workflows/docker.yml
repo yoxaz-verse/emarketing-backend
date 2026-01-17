@@ -32,4 +32,4 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/yoxaz-verse/emailmarketing-backend:latest
+          tags: ghcr.io/yoxaz-verse/emarketing-backend:latest
