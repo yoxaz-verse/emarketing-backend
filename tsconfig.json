@@ -1,0 +1,16 @@
+{
+    "compilerOptions": {
+      "target": "ES2022",
+      "module": "NodeNext",
+          "resolveJsonModule": true,
+"moduleResolution": "NodeNext",
+      "strict": true,
+      "skipLibCheck": true,
+      "forceConsistentCasingInFileNames": true,   
+      
+      "typeRoots": ["./node_modules/@types", "./src/types"]
+
+    },
+    "include": ["src"]
+  }
+  

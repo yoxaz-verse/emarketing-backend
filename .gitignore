@@ -1,0 +1,54 @@
+# =========================
+# Node / npm
+# =========================
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# =========================
+# Environment files
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# Build outputs
+# =========================
+dist/
+build/
+coverage/
+
+# =========================
+# OS / Editor junk
+# =========================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# =========================
+# Logs
+# =========================
+logs/
+*.log
+
+# =========================
+# Docker
+# =========================
+*.tar
+*.tar.gz
+
+# =========================
+# Large binaries (IMPORTANT)
+# =========================
+*.dmg
+*.zip
+*.exe
+*.iso
+
+# =========================
+# n8n / workflows (DO NOT TRACK)
+# =========================
+n8n_workflows/
