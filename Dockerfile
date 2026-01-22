@@ -11,6 +11,8 @@ COPY . .
 # ---------- Runtime stage ----------
 FROM node:24-alpine
 
+RUN apk add --no-cache curl
+
 WORKDIR /app
 ENV NODE_ENV=production
 
@@ -20,7 +22,5 @@ COPY --from=builder /app/src ./src
 
 EXPOSE 3000
 
-HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
-  CMD wget -qO- http://localhost:3000/ping || exit 1
 
 CMD ["npm", "run", "start"]
