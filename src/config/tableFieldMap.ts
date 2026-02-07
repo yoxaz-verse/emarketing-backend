@@ -579,4 +579,30 @@ export const TABLE_FIELD_MAP: Record<
       behavior: 'readonly',
     },
   },
+  password_reset_tokens: {
+    id: {
+      db: 'id',
+      behavior: 'readonly',
+    },
+    email: {
+      db: 'email',
+      behavior: 'plain',
+    },
+    otp_hash: {
+      db: 'otp_hash',
+      behavior: 'plain',
+    },
+    expires_at: {
+      db: 'expires_at',
+      behavior: 'plain',
+    },
+    verified: {
+      db: 'verified',
+      behavior: 'plain',
+    },
+    created_at: {
+      db: 'created_at',
+      behavior: 'readonly',
+    },
+  },
 };

@@ -4,6 +4,11 @@ import { signToken } from '../utils/jwt.js';
 import { supabaseAdmin } from '../utils/supabaseAdmin.js';
 import { requireAuthLite } from '../middleware/requireAuthLite.js';
 import type { Request, Response } from 'express';
+import {
+  requestPasswordReset,
+  verifyResetOTP,
+  resetPassword
+} from '../services/auth/passwordReset.service';
 
 const router = Router();
 
@@ -52,6 +57,45 @@ router.post('/login', async (req, res) => {
   } catch (err) {
     console.error('LOGIN ERROR:', err);
     return res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+router.post('/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email is required' });
+
+    const result = await requestPasswordReset(email);
+    return res.json(result);
+  } catch (err: any) {
+    console.error('FORGOT PASSWORD ERROR:', err);
+    return res.status(500).json({ error: 'Failed to process request' });
+  }
+});
+
+router.post('/verify-reset-otp', async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+    if (!email || !otp) return res.status(400).json({ error: 'Email and code are required' });
+
+    const result = await verifyResetOTP(email, otp);
+    return res.json(result);
+  } catch (err: any) {
+    console.error('VERIFY OTP ERROR:', err);
+    return res.status(400).json({ error: err.message });
+  }
+});
+
+router.post('/reset-password', async (req, res) => {
+  try {
+    const { email, new_password } = req.body;
+    if (!email || !new_password) return res.status(400).json({ error: 'Email and new password are required' });
+
+    const result = await resetPassword(email, new_password);
+    return res.json(result);
+  } catch (err: any) {
+    console.error('RESET PASSWORD ERROR:', err);
+    return res.status(400).json({ error: err.message });
   }
 });
 
