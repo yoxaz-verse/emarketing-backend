@@ -20,6 +20,15 @@ export async function getOrCreateDraftCampaign(operatorId: string) {
     .select()
     .single();
 
+  if (data) {
+    await supabase.from('system_events').insert({
+      type: 'campaign_created',
+      entity: 'campaign',
+      entity_id: data.id,
+      message: `New campaign created: ${data.name}`
+    });
+  }
+
   return data;
 }
 
@@ -42,7 +51,7 @@ export async function assignSequenceToCampaign(
 
   if (!leads?.length) return;
 
-  const rows = leads.map(l => ({
+  const rows = leads.map((l: any) => ({
     campaign_id: campaign.id,
     lead_id: l.id,
     status: 'queued'

@@ -28,3 +28,18 @@ export async function getSequenceAnalytics() {
 
   return data;
 }
+
+export async function getNotifications(limit = 20) {
+  const { data, error } = await supabase
+    .from('system_events')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    console.error('[NOTIFICATIONS FETCH ERROR]', error);
+    return [];
+  }
+
+  return data ?? [];
+}

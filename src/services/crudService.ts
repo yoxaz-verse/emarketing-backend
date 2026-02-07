@@ -26,7 +26,7 @@ export async function listRows(
   const rows = (data ?? []).map((row: Record<string, unknown>) =>
     transformForRead(table, row)
   );
-  
+
 
   // ✅ DOMAIN-SAFE EXTENSION POINT
   return await resolveAfterRead(table, rows);
@@ -60,7 +60,7 @@ export async function updateRow(
   id: string,
   payload: Record<string, any>
 ) {
-  payload = await runBeforeWrite(table, payload, 'update');
+  payload = await runBeforeWrite(table, payload, 'update', id);
   const data = await transformForWrite(table, payload);
   console.log('[Update DATA]', table, data);
 

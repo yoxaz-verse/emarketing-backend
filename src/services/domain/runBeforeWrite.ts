@@ -7,12 +7,17 @@ import { handleInboxBeforeWrite } from './inboxLifeCycle';
 import { handleLeadsBeforeWrite } from './leadLifeCycle';
 import { handleSmtpAccountBeforeWrite } from './smtpAccountsLifeCycle';
 import { handleUserBeforeWrite } from './userLifeCycle';
+import { handleVoiceAgentsBeforeWrite } from './voiceAgentLifeCycle';
 
 export async function runBeforeWrite(
   table: AllowedTable,
   payload: Record<string, any>,
-  mode: 'create' | 'update'
+  mode: 'create' | 'update',
+  id?: string
 ) {
+  if (table === 'voice_agents') {
+    return handleVoiceAgentsBeforeWrite(payload, mode, id);
+  }
   if (table === 'users') {
     return handleUserBeforeWrite(payload, mode);
   }
@@ -26,7 +31,7 @@ export async function runBeforeWrite(
   if (table === 'smtp_accounts') {
     return handleSmtpAccountBeforeWrite(payload, mode);
   }
- 
+
   if (table === 'leads') {
     return handleLeadsBeforeWrite(payload, mode);
   }

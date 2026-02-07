@@ -475,4 +475,108 @@ export const TABLE_FIELD_MAP: Record<
 
 
 
+  voice_agents: {
+    id: {
+      db: 'id',
+      behavior: 'readonly',
+    },
+    name: {
+      db: 'name',
+      behavior: 'plain',
+    },
+    status: {
+      db: 'status',
+      behavior: 'plain',
+    },
+    languages: {
+      db: 'languages',
+      behavior: 'plain',
+    },
+    persona_type: {
+      db: 'persona_type',
+      behavior: 'plain',
+    },
+    assigned_number: {
+      db: 'assigned_number',
+      behavior: 'plain',
+    },
+  },
+  campaign_voice_agents: {
+    id: {
+      db: 'id',
+      behavior: 'readonly',
+    },
+    campaign_id: {
+      db: 'campaign_id',
+      behavior: 'plain',
+    },
+    voice_agent_id: {
+      db: 'voice_agent_id',
+      behavior: 'plain',
+    },
+    active: {
+      db: 'active',
+      behavior: 'plain',
+    },
+    priority: {
+      db: 'priority',
+      behavior: 'plain',
+    },
+  },
+  voice_calls: {
+    id: {
+      db: 'id',
+      behavior: 'readonly',
+    },
+    voice_agent_id: {
+      db: 'voice_agent_id',
+      behavior: 'plain',
+    },
+    campaign_id: {
+      db: 'campaign_id',
+      behavior: 'plain',
+    },
+    lead_id: {
+      db: 'lead_id',
+      behavior: 'plain',
+    },
+    outcome: {
+      db: 'outcome',
+      behavior: 'plain',
+    },
+    created_at: {
+      db: 'created_at',
+      behavior: 'readonly',
+    },
+  },
+  system_events: {
+    id: {
+      db: 'id',
+      behavior: 'readonly',
+    },
+    type: {
+      db: 'type',
+      behavior: 'plain',
+    },
+    entity: {
+      db: 'entity',
+      behavior: 'plain',
+    },
+    entity_id: {
+      db: 'entity_id',
+      behavior: 'plain',
+    },
+    message: {
+      db: 'message',
+      behavior: 'plain',
+    },
+    meta: {
+      db: 'meta',
+      behavior: 'plain',
+    },
+    created_at: {
+      db: 'created_at',
+      behavior: 'readonly',
+    },
+  },
 };

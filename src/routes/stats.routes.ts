@@ -2,7 +2,8 @@ import { Router } from 'express';
 import {
   getOverviewStats,
   getInboxAnalytics,
-  getSequenceAnalytics
+  getSequenceAnalytics,
+  getNotifications
 } from '../services/analyticsService.js';
 
 import { requireAuth } from '../middleware/requireAuth.js';
@@ -24,6 +25,12 @@ router.get('/inboxes', async (_req, res) => {
 
 router.get('/sequences', async (_req, res) => {
   const data = await getSequenceAnalytics();
+  res.json(data);
+});
+
+
+router.get('/notifications', async (_req, res) => {
+  const data = await getNotifications();
   res.json(data);
 });
 

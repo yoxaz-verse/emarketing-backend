@@ -43,7 +43,7 @@ export async function attachLeadsToCampaign(
   }
 
   const existingLeadIds = new Set(
-    (existing ?? []).map((r) => r.lead_id)
+    (existing ?? []).map((r: any) => r.lead_id)
   );
 
   /* -------------------------------------------------------
@@ -123,6 +123,14 @@ export async function startCampaign(campaignId: string) {
     started_at: new Date().toISOString(),
   });
 
+  // 🔒 LOG EVENT
+  await supabase.from('system_events').insert({
+    type: 'campaign_started',
+    entity: 'campaign',
+    entity_id: campaignId,
+    message: `Campaign started`
+  });
+
   // 4️⃣ Initialize campaign leads (if you already do this)
   await initializeCampaignLeads(campaignId);
 }
@@ -151,5 +159,13 @@ async function initializeCampaignLeads(campaignId: string) {
 export async function pauseCampaign(campaignId: string) {
   await updateRow("campaigns", campaignId, {
     status: "paused",
+  });
+
+  // 🔒 LOG EVENT
+  await supabase.from('system_events').insert({
+    type: 'campaign_paused',
+    entity: 'campaign',
+    entity_id: campaignId,
+    message: `Campaign paused`
   });
 }

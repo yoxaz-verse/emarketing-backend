@@ -12,6 +12,7 @@ import {
 } from '../services/execution.service';
 import { supabase } from '../supabase';
 import { handleReply } from '../services/replyIngestService';
+import { initiateCampaignVoiceCall } from '../services/voice/voiceExecution.service';
 
 const router = Router();
 
@@ -128,16 +129,32 @@ router.post('/system/reset-inbox-counters', async (req, res) => {
 router.post('/bounce', async (req, res) => {
   const { email, type, reason } = req.body;
   await handleBounce(email, type, reason);
-  res.json({ success:true });
+  res.json({ success: true });
 });
 
 // Campaign Step 12 - Bounces 
 router.post('/reply', async (req, res) => {
   await handleReply(req.body);
-  res.json({ success:true });
+  res.json({ success: true });
+});
+
+// Campaign Phase 13 - Voice Call Initiation
+router.post('/start-voice-call', async (req, res) => {
+  try {
+    const { campaign_lead_id } = req.body;
+    if (!campaign_lead_id) {
+      return res.status(400).json({ error: 'campaign_lead_id is required' });
+    }
+
+    const result = await initiateCampaignVoiceCall(campaign_lead_id);
+    res.json(result);
+  } catch (err: any) {
+    console.error('[START VOICE CALL ERROR]', err);
+    res.status(400).json({ error: err.message });
+  }
 });
 
 
-  
+
 
 export default router;
