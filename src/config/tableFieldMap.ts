@@ -160,8 +160,106 @@ export const TABLE_FIELD_MAP: Record<
       db: 'is_active',
       behavior: 'plain',
     },
+    graph_json: {
+      db: 'graph_json',
+      behavior: 'plain',
+    },
+    status: {
+      db: 'status',
+      behavior: 'plain',
+    },
     created_at: {
       db: 'created_at',
+      behavior: 'readonly',
+    },
+    updated_at: {
+      db: 'updated_at',
+      behavior: 'readonly',
+    },
+  },
+  agents: {
+    id: {
+      db: 'id',
+      behavior: 'readonly',
+    },
+    name: {
+      db: 'name',
+      behavior: 'plain',
+    },
+    provider: {
+      db: 'provider',
+      behavior: 'plain',
+    },
+    endpoint: {
+      db: 'endpoint',
+      behavior: 'plain',
+    },
+    headers_config: {
+      db: 'headers_config',
+      behavior: 'plain',
+    },
+    created_at: {
+      db: 'created_at',
+      behavior: 'readonly',
+    },
+  },
+  sequence_runs: {
+    id: {
+      db: 'id',
+      behavior: 'readonly',
+    },
+    sequence_id: {
+      db: 'sequence_id',
+      behavior: 'plain',
+    },
+    status: {
+      db: 'status',
+      behavior: 'plain',
+    },
+    context_json: {
+      db: 'context_json',
+      behavior: 'plain',
+    },
+    started_at: {
+      db: 'started_at',
+      behavior: 'readonly',
+    },
+    updated_at: {
+      db: 'updated_at',
+      behavior: 'readonly',
+    },
+  },
+  sequence_run_steps: {
+    id: {
+      db: 'id',
+      behavior: 'readonly',
+    },
+    run_id: {
+      db: 'run_id',
+      behavior: 'plain',
+    },
+    node_id: {
+      db: 'node_id',
+      behavior: 'plain',
+    },
+    status: {
+      db: 'status',
+      behavior: 'plain',
+    },
+    output_json: {
+      db: 'output_json',
+      behavior: 'plain',
+    },
+    error: {
+      db: 'error',
+      behavior: 'plain',
+    },
+    scheduled_for: {
+      db: 'scheduled_for',
+      behavior: 'plain',
+    },
+    completed_at: {
+      db: 'completed_at',
       behavior: 'readonly',
     },
   },

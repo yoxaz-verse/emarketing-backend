@@ -5,6 +5,7 @@ import statsRoutes from './routes/stats.routes';
 import adminRoutes from './routes/admin.routes';
 import replyRoutes from './routes/reply.routes';
 import sequencesRoutes from './routes/sequences.routes';
+import agentsRoutes from './routes/agents.routes';
 import operatorRoutes from './routes/operator.routes';
 import authRoutes from './routes/auth.routes';
 import usersRoutes from './routes/users.routes';
@@ -13,6 +14,7 @@ import campaignRoutes from './routes/campaign.routes';
 import campaignInboxRoutes from './routes/campaign.inboxes.routes';
 import validationRoutes from './routes/validation.routes';
 import executionRoutes from './routes/execution.routes';
+import { startSequenceRunner } from './worker/sequenceRunner';
 
 dotenv.config();
 
@@ -39,6 +41,7 @@ app.use('/users', usersRoutes);
 app.use('/execution', executionRoutes);
 app.use('/operator', operatorRoutes);
 app.use('/sequences', sequencesRoutes);
+app.use('/agents', agentsRoutes);
 app.use('/reply', replyRoutes);
 app.use('/stats', statsRoutes);
 app.use('/admin', adminRoutes);
@@ -50,3 +53,4 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
 });
 
+startSequenceRunner();
