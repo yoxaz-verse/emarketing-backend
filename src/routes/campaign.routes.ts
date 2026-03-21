@@ -44,14 +44,24 @@ router.post('/:id/leads/attach', async (req, res) => {
 
 // Campaign Step 5 , 13 here we go again
 router.post('/:id/start', async (req, res) => {
-  await startCampaign(req.params.id);
-  res.json({ success: true });
+  try {
+    await startCampaign(req.params.id);
+    res.json({ success: true });
+  } catch (err: any) {
+    console.error('[START CAMPAIGN ERROR]', err);
+    res.status(500).json({ error: err.message ?? 'Failed to start campaign' });
+  }
 });
 
 // Campaign Step 12
 router.post('/:id/pause', async (req, res) => {
-  await pauseCampaign(req.params.id);
-  res.json({ success: true });
+  try {
+    await pauseCampaign(req.params.id);
+    res.json({ success: true });
+  } catch (err: any) {
+    console.error('[PAUSE CAMPAIGN ERROR]', err);
+    res.status(500).json({ error: err.message ?? 'Failed to pause campaign' });
+  }
 });
 
 export default router;

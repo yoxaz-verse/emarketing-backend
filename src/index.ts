@@ -20,7 +20,10 @@ dotenv.config();
 
 const app = express();
 
-app.use(cors());
+app.use(cors({
+  origin: ['http://localhost:3000', 'http://localhost:3001'],
+  credentials: true,
+}));
 app.get('/ping', (_req, res) => {
   console.log('✅ PING HIT');
   res.json({ ok: true });

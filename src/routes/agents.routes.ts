@@ -33,7 +33,14 @@ router.get('/', async (_req, res) => {
       .select('*')
       .order('created_at', { ascending: false });
 
-    if (error) throw error;
+    if (error) {
+      // If table doesn't exist, return empty array instead of failing
+      if (error.message?.includes('Could not find the table') || error.code === 'PGRST205') {
+        console.warn('[AGENT LIST WARNING] agents table missing. Return [].');
+        return res.json([]);
+      }
+      throw error;
+    }
     res.json(data ?? []);
   } catch (err: any) {
     console.error('[AGENT LIST ERROR]', err);

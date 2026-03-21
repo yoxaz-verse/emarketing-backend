@@ -12,15 +12,27 @@ export async function listRows(
   table: AllowedTable,
   filters: Record<string, any> = {}
 ) {
+  const applyFilters = (baseQuery: ReturnType<typeof supabase.from>) => {
+    let nextQuery = baseQuery;
+    for (const [key, value] of Object.entries(filters)) {
+      nextQuery = nextQuery.eq(key, value);
+    }
+    return nextQuery;
+  };
+
   const select = buildSelect(table);
+  let query = applyFilters(supabase.from(table).select(select));
 
-  let query = supabase.from(table).select(select);
-
-  for (const [key, value] of Object.entries(filters)) {
-    query = query.eq(key, value);
+  let { data, error } = await query;
+  if (error && (error.code === 'PGRST205' || error.message?.includes('Could not find the table'))) {
+    console.warn(`[CRUD LIST WARNING] Table ${table} missing in schema. Return [].`);
+    return [];
   }
-
-  const { data, error } = await query;
+  if (error && error.code === '42703' && table === 'sequences') {
+    console.warn('[CRUD LIST WARNING] Missing column in sequences, falling back to *', error);
+    query = applyFilters(supabase.from(table).select('*'));
+    ({ data, error } = await query);
+  }
   if (error) throw error;
 
   const rows = (data ?? []).map((row: Record<string, unknown>) =>

@@ -160,10 +160,6 @@ export const TABLE_FIELD_MAP: Record<
       db: 'is_active',
       behavior: 'plain',
     },
-    graph_json: {
-      db: 'graph_json',
-      behavior: 'plain',
-    },
     status: {
       db: 'status',
       behavior: 'plain',

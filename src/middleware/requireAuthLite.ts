@@ -11,16 +11,27 @@ type JwtPayload = {
 
 export function requireAuthLite() {
   return (req: Request, res: Response, next: NextFunction): void => {
+    let token = '';
     const authHeader = req.headers.authorization;
-    console.log('[requireAuthLite] Auth Header:', authHeader);
 
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      console.log('[requireAuthLite] No Bearer token');
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.slice(7);
+    } else if (req.headers.cookie) {
+      // ✅ Manual Parse Cookies (avoiding extra deps like cookie-parser)
+      const cookies = Object.fromEntries(
+        req.headers.cookie.split('; ').map((c) => {
+          const [key, ...v] = c.split('=');
+          return [key, v.join('=')];
+        })
+      );
+      token = cookies['auth_token'];
+    }
+
+    if (!token) {
+      console.log('[requireAuthLite] No token found in header or cookies');
       res.status(401).json({ error: 'UNAUTHORIZED' });
       return;
     }
-
-    const token = authHeader.slice(7);
 
     try {
       const payload = jwt.verify(
