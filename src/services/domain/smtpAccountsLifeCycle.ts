@@ -1,10 +1,12 @@
 // lifecycle/handleSmtpAccountBeforeWrite.ts
 
 import { encryptSecret } from '../../utils/sendEncryption';
+import { supabase } from '../../supabase';
 
 export async function handleSmtpAccountBeforeWrite(
   payload: Record<string, any>,
-  mode: 'create' | 'update'
+  mode: 'create' | 'update',
+  id?: string
 ) {
   // Required fields
   if (!payload.host) throw new Error('SMTP host is required');
@@ -13,6 +15,30 @@ export async function handleSmtpAccountBeforeWrite(
 
   if (mode === 'create' && !payload.password) {
     throw new Error('SMTP password is required');
+  }
+
+  // Normalize username for stable uniqueness checks
+  const normalizedUsername = String(payload.username).trim().toLowerCase();
+  payload.username = normalizedUsername;
+
+  // Enforce uniqueness at service layer (DB index should still be added)
+  const duplicateQuery = supabase
+    .from('smtp_accounts')
+    .select('id')
+    .eq('username', normalizedUsername)
+    .limit(1);
+
+  const { data: duplicate, error: duplicateError } =
+    mode === 'update' && id
+      ? await duplicateQuery.neq('id', id).maybeSingle()
+      : await duplicateQuery.maybeSingle();
+
+  if (duplicateError) {
+    throw new Error(`Failed to validate SMTP username uniqueness: ${duplicateError.message}`);
+  }
+
+  if (duplicate) {
+    throw new Error('SMTP username already exists. Please use a unique username/email.');
   }
 
   // Normalize encryption

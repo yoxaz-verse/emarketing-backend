@@ -32,8 +32,6 @@ export function transformForRead(
   table: AllowedTable,
   row: Record<string, any>
 ) {
-    console.log("transformForRead");
-    
   const fields = TABLE_FIELD_MAP[table];
   const result: Record<string, any> = {};
 

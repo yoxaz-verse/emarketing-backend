@@ -13,12 +13,74 @@ import { getEffectiveOperatorId } from '../utils/getEffectiveOperatorId.js';
 
 const router = Router();
 
-// router.use(requireAuth('operator'));
+router.use(requireAuth('viewer'));
 
 router.post('/leads/upload', async (req: Request, res: Response) => {
-  const operatorId = getEffectiveOperatorId(req);
-  await uploadLeads(operatorId, req.body.leads);
-  res.json({ success: true });
+  const requestBody = req.body ?? {};
+  const inputRows = requestBody.rows ?? requestBody.leads ?? [];
+  const mapping = requestBody.mapping ?? {};
+  let operatorId: string | null = null;
+  const authCtx = req.auth;
+
+  try {
+    operatorId = getEffectiveOperatorId(req);
+    console.info('[LEADS_UPLOAD_SANITY]', {
+      stage: 'before_upload',
+      authRole: authCtx?.role ?? null,
+      authType: authCtx?.type ?? null,
+      authOperatorId: authCtx?.operator_id ?? null,
+      resolvedOperatorId: operatorId,
+      rowCount: Array.isArray(inputRows) ? inputRows.length : 0,
+      mappedFields: Object.keys(mapping),
+    });
+
+    const report = await uploadLeads(operatorId, requestBody);
+    console.info('[LEADS_UPLOAD_SANITY]', {
+      stage: 'upload_success',
+      authRole: authCtx?.role ?? null,
+      resolvedOperatorId: operatorId,
+      insertedCount: report.insertedCount,
+      duplicateCount: report.duplicateCount,
+      invalidCount: report.invalidCount,
+      statusBranch: 200,
+    });
+    return res.json(report);
+  } catch (err: any) {
+    console.error('[LEADS_UPLOAD_ERROR]', {
+      stage: 'upload',
+      operatorId,
+      rowCount: Array.isArray(inputRows) ? inputRows.length : 0,
+      mappedFields: Object.keys(mapping),
+      message: err?.message ?? 'Unknown error',
+      code: err?.code ?? null,
+    });
+
+    const msg = String(err?.message ?? '').toLowerCase();
+    let status = 500;
+    if (msg.includes('operator_id is required')) status = 400;
+    else if (msg.includes('unauthenticated') || msg.includes('authentication')) status = 401;
+    else if (
+      msg.includes('forbidden') ||
+      msg.includes('insufficient permissions') ||
+      msg.includes('operator access required')
+    ) {
+      status = 403;
+    }
+
+    console.info('[LEADS_UPLOAD_SANITY]', {
+      stage: 'upload_error',
+      authRole: authCtx?.role ?? null,
+      authOperatorId: authCtx?.operator_id ?? null,
+      resolvedOperatorId: operatorId,
+      statusBranch: status,
+      errorMessage: err?.message ?? 'Unknown error',
+    });
+
+    return res.status(status).json({
+      success: false,
+      error: err?.message || 'Lead import failed',
+    });
+  }
 });
 
 // router.post('/campaign/assign-sequence', async (req, res) => {
@@ -58,5 +120,3 @@ router.get('/replies', async (req, res) => {
 });
 
 export default router;
-
-

@@ -1,4 +1,8 @@
 import { supabase } from '../supabase';
+import {
+  getSendingLimitsConfig,
+  resolveInboxEffectiveLimits,
+} from './sendingLimitsConfig.service';
 
 /**
  * READ-ONLY DECISION ENGINE
@@ -9,6 +13,7 @@ import { supabase } from '../supabase';
  * - Does NOT mutate business state
  */
 export async function getNextSend() {
+  const sendingLimits = await getSendingLimitsConfig();
   /**
    * 1. Pick one active inbox
    * (simple strategy for now; rotation can come later)
@@ -26,21 +31,7 @@ export async function getNextSend() {
   /**
    * 2. Resolve inbox limits (warmup-aware)
    */
-  let dailyLimit = inbox.daily_limit;
-  let hourlyLimit = inbox.hourly_limit;
-
-  if (inbox.warmup_enabled) {
-    const { data: warmup } = await supabase
-      .from('warmup_schedule')
-      .select('*')
-      .eq('day', inbox.warmup_day)
-      .single();
-
-    if (warmup) {
-      dailyLimit = warmup.daily_limit;
-      hourlyLimit = warmup.hourly_limit;
-    }
-  }
+  const { dailyLimit, hourlyLimit } = resolveInboxEffectiveLimits(inbox, sendingLimits);
 
   /**
    * 3. DOMAIN-LEVEL THROTTLING (HARD SAFETY)
@@ -59,7 +50,7 @@ export async function getNextSend() {
         .select('id')
         .eq('sending_domain', inbox.sending_domain);
 
-      const inboxIds = domainInboxes?.map(i => i.id) ?? [];
+      const inboxIds = domainInboxes?.map((i: { id: string }) => i.id) ?? [];
 
       if (inboxIds.length > 0) {
         const today = new Date().toISOString().slice(0, 10);

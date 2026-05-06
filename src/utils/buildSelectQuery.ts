@@ -7,7 +7,29 @@ export function buildSelect(table: string) {
   const base: string[] = [];
   const relations: string[] = [];
 
+  const leadOptionalColumns = new Set([
+    'validation_status',
+    'disposable',
+    'role_based',
+    'free_provider',
+    'risk_score',
+    'suggestion',
+    'mx_records',
+    'provider',
+  ]);
+
+  const includeLeadOptionalColumns =
+    process.env.ENABLE_LEAD_VALIDATION_COLUMNS === 'true';
+
   for (const [key, def] of Object.entries(fields)) {
+    if (
+      table === 'leads' &&
+      leadOptionalColumns.has(def.db) &&
+      !includeLeadOptionalColumns
+    ) {
+      continue;
+    }
+
     // always select base column
     base.push(def.db);
 

@@ -1,6 +1,6 @@
-import nodemailer from 'nodemailer';
 import { supabase } from '../supabase';
 import { decryptSecret } from '../utils/sendEncryption';
+import { createSmtpTransport } from './email/smtpTransport';
 
 type GraphNode = {
   id: string;
@@ -184,14 +184,13 @@ async function sendEmail(node: GraphNode, contact: any) {
     throw new Error('No valid SMTP account configured.');
   }
 
-  const transporter = nodemailer.createTransport({
+  const transporter = createSmtpTransport({
+    provider: smtp.provider,
     host: smtp.host,
     port: smtp.port,
-    secure: smtp.port === 465,
-    auth: {
-      user: smtp.username,
-      pass: decryptSecret(smtp.password),
-    },
+    username: smtp.username,
+    password: decryptSecret(smtp.password),
+    encryption: smtp.encryption,
   });
 
   const from = node.data?.from || smtp.username;

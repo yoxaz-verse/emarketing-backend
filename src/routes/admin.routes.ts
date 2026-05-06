@@ -7,6 +7,10 @@ import {
   enableSequence,
   listOperators
 } from '../services/adminService.js';
+import {
+  getSendingLimitsConfig,
+  updateSendingLimitsConfig,
+} from '../services/sendingLimitsConfig.service.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 
 const router = Router();
@@ -58,6 +62,24 @@ router.get('/operators', async (_req, res) => {
   }
 
   res.json(data);
+});
+
+router.get('/sending-limits', async (_req, res) => {
+  try {
+    const config = await getSendingLimitsConfig();
+    res.json(config);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message ?? 'Failed to load sending limits' });
+  }
+});
+
+router.put('/sending-limits', async (req, res) => {
+  try {
+    const config = await updateSendingLimitsConfig(req.body);
+    res.json(config);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message ?? 'Failed to update sending limits' });
+  }
 });
 
 export default router;

@@ -2,10 +2,18 @@
 import { Router } from 'express';
 import { ALLOWED_TABLES } from '../config/allowedTables';
 import { deleteRow, insertRow, listRows, updateRow } from '../services/crudService';
+import { requireAuth } from '../middleware/requireAuth';
 
 const router = Router();
 
-// router.use(requireAuth('operator'));
+router.use(requireAuth('viewer'));
+
+const ADMIN_ONLY_TABLES = new Set<string>([
+  'users',
+  'api_keys',
+  'system_events',
+  'password_reset_tokens',
+]);
 
 function validateTable(table: string) {
   if (!ALLOWED_TABLES.includes(table as any)) {
@@ -14,12 +22,21 @@ function validateTable(table: string) {
   return table as any;
 }
 
+function assertTablePermission(req: any, table: string) {
+  const role = String(req?.auth?.role ?? '');
+  const isAdmin = role === 'admin' || role === 'superadmin';
+  if (ADMIN_ONLY_TABLES.has(table) && !isAdmin) {
+    throw new Error('Insufficient permissions');
+  }
+}
+
 router.get('/:table', async (req, res) => {
   try {
     console.log("CRUD CALLED of", req.params.table);
     console.log("Query is ", req.query);
 
     const table = validateTable(req.params.table);
+    assertTablePermission(req, table);
     const rows = await listRows(table, req.query);
 
     res.json(rows);
@@ -34,6 +51,7 @@ router.get('/:table', async (req, res) => {
 router.post('/:table', async (req, res) => {
   try {
     const table = validateTable(req.params.table);
+    assertTablePermission(req, table);
     await insertRow(table, req.body);
     res.json({ success: true });
   } catch (err: any) {
@@ -45,6 +63,7 @@ router.post('/:table', async (req, res) => {
 router.put('/:table/:id', async (req, res) => {
   try {
     const table = validateTable(req.params.table);
+    assertTablePermission(req, table);
 
     console.log('[CRUD UPDATE]', table, req.params.id, req.body);
 
@@ -62,6 +81,7 @@ router.put('/:table/:id', async (req, res) => {
 router.delete('/:table/:id', async (req, res) => {
   try {
     const table = validateTable(req.params.table);
+    assertTablePermission(req, table);
 
     await deleteRow(table, req.params.id);
 

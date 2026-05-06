@@ -2,7 +2,7 @@ import { supabase } from "../../supabase";
 import { supabaseAdmin } from "../../utils/supabaseAdmin";
 import { hashPassword, verifyPassword } from "../../utils/password";
 import { decryptSecret } from "../../utils/sendEncryption";
-import nodemailer from 'nodemailer';
+import { createSmtpTransport } from "../email/smtpTransport";
 
 /**
  * Generate a 6-digit numeric OTP
@@ -59,14 +59,13 @@ export async function requestPasswordReset(email: string) {
     }
 
     try {
-        const transporter = nodemailer.createTransport({
+        const transporter = createSmtpTransport({
+            provider: smtp.provider,
             host: smtp.host,
             port: smtp.port,
-            secure: smtp.port === 465,
-            auth: {
-                user: smtp.username,
-                pass: decryptSecret(smtp.password),
-            },
+            username: smtp.username,
+            password: decryptSecret(smtp.password),
+            encryption: smtp.encryption,
         });
 
         await transporter.sendMail({

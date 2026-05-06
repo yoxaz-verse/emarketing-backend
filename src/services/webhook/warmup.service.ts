@@ -1,21 +1,9 @@
 import { supabase } from "../../supabase";
-
-type WarmupStep = {
-  day: number;
-  daily_limit: number;
-  hourly_limit: number;
-};
+import { getSendingLimitsConfig } from '../sendingLimitsConfig.service';
 
 export async function advanceInboxWarmup() {
-  // 1. Fetch warmup config (single row / json column / table)
-  const { data: warmupConfigRow, error: configError } = await supabase
-    .from('warmup_config')
-    .select('steps')
-    .single();
-
-  if (configError || !warmupConfigRow) return;
-
-  const steps = warmupConfigRow.steps as WarmupStep[];
+  const config = await getSendingLimitsConfig();
+  const steps = config.warmup_steps;
 
   // 2. Fetch inboxes in warmup
   const { data: inboxes } = await supabase
@@ -35,8 +23,8 @@ export async function advanceInboxWarmup() {
 
   for (const inbox of inboxes) {
     // Safety guards
-    if (inbox.consecutive_failures >= 3) continue;
-    if (inbox.health_score < 70) continue;
+    if (inbox.consecutive_failures > config.warmup_advance_max_consecutive_failures) continue;
+    if (inbox.health_score < config.warmup_advance_min_health_score) continue;
 
     const currentDay = inbox.warmup_day ?? 1;
     const nextDay = currentDay + 1;
@@ -48,8 +36,8 @@ export async function advanceInboxWarmup() {
       .from('inboxes')
       .update({
         warmup_day: nextDay,
-        daily_send_limit: step.daily_limit,
-        hourly_send_limit: step.hourly_limit,
+        daily_limit: step.daily_limit,
+        hourly_limit: step.hourly_limit,
       })
       .eq('id', inbox.id);
   }

@@ -1,7 +1,7 @@
 import { supabase } from '../supabase';
 import { decryptSecret } from '../utils/sendEncryption';
 import { updateRow } from './crudService';
-import nodemailer from 'nodemailer';
+import { createSmtpTransport } from './email/smtpTransport';
 
 
   
@@ -88,6 +88,7 @@ import nodemailer from 'nodemailer';
     const { data: smtp, error: smtpError } = await supabase
       .from('smtp_accounts')
       .select(`
+        provider,
         host,
         port,
         username,
@@ -137,14 +138,13 @@ import nodemailer from 'nodemailer';
     /* -------------------------------------------------------
        5️⃣ Send email
     ------------------------------------------------------- */
-    const transporter = nodemailer.createTransport({
+    const transporter = createSmtpTransport({
+      provider: smtp.provider,
       host: smtp.host,
       port: smtp.port,
-      secure: smtp.encryption === 'ssl',
-      auth: {
-        user: smtp.username,
-        pass: decryptSecret(smtp.password),
-      },
+      username: smtp.username,
+      password: decryptSecret(smtp.password),
+      encryption: smtp.encryption,
     });
   
     const info = await transporter.sendMail({

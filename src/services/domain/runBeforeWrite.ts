@@ -22,14 +22,14 @@ export async function runBeforeWrite(
     return handleUserBeforeWrite(payload, mode);
   }
   if (table === 'inboxes') {
-    return handleInboxBeforeWrite(payload, mode);
+    return handleInboxBeforeWrite(payload, mode, id);
   }
 
   if (table === 'campaigns') {
     return handleCampaignBeforeWrite(payload, mode);
   }
   if (table === 'smtp_accounts') {
-    return handleSmtpAccountBeforeWrite(payload, mode);
+    return handleSmtpAccountBeforeWrite(payload, mode, id);
   }
 
   if (table === 'leads') {

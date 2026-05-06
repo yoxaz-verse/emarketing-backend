@@ -1,5 +1,10 @@
 import { Router } from 'express'
-import { runEmailEligibilityValidation } from '../services/validation/lead.email.validation'
+import {
+  getEmailValidationRunHistory,
+  getEmailValidationRunStatus,
+  resetStuckAndRerunValidation,
+  runEmailEligibilityValidation,
+} from '../services/validation/lead.email.validation'
 import { validateSmtpAccount } from '../services/validation/smtp.validation';
 import { inspectSendingDomain } from '../services/validation/domain.validation';
 import { supabase } from '../supabase';
@@ -8,6 +13,10 @@ const router = Router()
 
 // Campaign Step 2 Email validation (ASYNC / WORKER STYLE)
 router.post('/lead', runEmailEligibilityValidation)
+router.post('/lead/start', runEmailEligibilityValidation)
+router.post('/lead/reset-stuck-rerun', resetStuckAndRerunValidation)
+router.get('/lead/status', getEmailValidationRunStatus)
+router.get('/lead/history', getEmailValidationRunHistory)
 
 // Explicit SMTP validation (user clicks "Test SMTP")
 router.post('/smtp-accounts/:id', async (req, res) => {
@@ -36,16 +45,33 @@ router.post('/smtp-accounts/:id', async (req, res) => {
       });
     }
   
-    const result = await inspectSendingDomain(domain);
-  
+    const { data: domainRow, error: domainRowError } = await supabase
+      .from('sending_domains')
+      .select('dkim_selector')
+      .eq('id', domain_id)
+      .single();
+
+    if (domainRowError) {
+      console.warn('[DOMAIN VALIDATION] dkim_selector lookup failed, falling back to auto-detect only', domainRowError.message);
+    }
+
+    const result = await inspectSendingDomain(
+      domain,
+      domainRowError ? null : domainRow?.dkim_selector ?? null
+    );
+
+    const healthScore =
+      (result.hasSpf ? 33 : 0) +
+      (result.hasDkim ? 33 : 0) +
+      (result.hasDmarc ? 34 : 0);
+
     await supabase
       .from('sending_domains')
       .update({
         spf_verified: result.hasSpf,
         dkim_verified: result.hasDkim,
         dmarc_verified: result.hasDmarc,
-        health_score:
-          result.hasSpf && result.hasDkim && result.hasDmarc ? 100 : 60,
+        health_score: healthScore,
       })
       .eq('id', domain_id);
   

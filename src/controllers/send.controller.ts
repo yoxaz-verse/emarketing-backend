@@ -32,7 +32,7 @@ export async function preSendCheck(
     .eq('id', campaignId)
     .single()
 
-  const decision = canSendEmail({
+  const decision = await canSendEmail({
     lead,
     inbox,
     domain,

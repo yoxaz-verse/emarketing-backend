@@ -37,8 +37,60 @@ export const TABLE_FIELD_MAP: Record<
       db: 'first_name',
       behavior: 'plain',
     },
+    last_name: {
+      db: 'last_name',
+      behavior: 'plain',
+    },
     company: {
       db: 'company',
+      behavior: 'plain',
+    },
+    country: {
+      db: 'country',
+      behavior: 'plain',
+    },
+    job_title: {
+      db: 'job_title',
+      behavior: 'plain',
+    },
+    phone: {
+      db: 'phone',
+      behavior: 'plain',
+    },
+    linkedin_url: {
+      db: 'linkedin_url',
+      behavior: 'plain',
+    },
+    website: {
+      db: 'website',
+      behavior: 'plain',
+    },
+    company_description: {
+      db: 'company_description',
+      behavior: 'plain',
+    },
+    industry: {
+      db: 'industry',
+      behavior: 'plain',
+    },
+    employee_size: {
+      db: 'employee_size',
+      behavior: 'plain',
+    },
+    source: {
+      db: 'source',
+      behavior: 'plain',
+    },
+    notes: {
+      db: 'notes',
+      behavior: 'plain',
+    },
+    tags: {
+      db: 'tags',
+      behavior: 'plain',
+    },
+    lead_status: {
+      db: 'lead_status',
       behavior: 'plain',
     },
 
@@ -65,6 +117,38 @@ export const TABLE_FIELD_MAP: Record<
     },
     email_checked_at: {
       db: 'email_checked_at',
+      behavior: 'readonly',
+    },
+    validation_status: {
+      db: 'validation_status',
+      behavior: 'readonly',
+    },
+    disposable: {
+      db: 'disposable',
+      behavior: 'readonly',
+    },
+    role_based: {
+      db: 'role_based',
+      behavior: 'readonly',
+    },
+    free_provider: {
+      db: 'free_provider',
+      behavior: 'readonly',
+    },
+    risk_score: {
+      db: 'risk_score',
+      behavior: 'readonly',
+    },
+    suggestion: {
+      db: 'suggestion',
+      behavior: 'readonly',
+    },
+    mx_records: {
+      db: 'mx_records',
+      behavior: 'readonly',
+    },
+    provider: {
+      db: 'provider',
       behavior: 'readonly',
     },
 
@@ -318,6 +402,10 @@ export const TABLE_FIELD_MAP: Record<
     },
     dkim_verified: {
       db: 'dkim_verified',
+      behavior: 'plain',
+    },
+    dkim_selector: {
+      db: 'dkim_selector',
       behavior: 'plain',
     },
     dmarc_verified: {
@@ -698,5 +786,37 @@ export const TABLE_FIELD_MAP: Record<
       db: 'created_at',
       behavior: 'readonly',
     },
+  },
+  validation_runs: {
+    id: { db: 'id', behavior: 'readonly' },
+    type: { db: 'type', behavior: 'plain' },
+    status: { db: 'status', behavior: 'plain' },
+    started_at: { db: 'started_at', behavior: 'readonly' },
+    finished_at: { db: 'finished_at', behavior: 'readonly' },
+    triggered_by: { db: 'triggered_by', behavior: 'readonly' },
+    scope: { db: 'scope', behavior: 'readonly' },
+    total_targeted: { db: 'total_targeted', behavior: 'readonly' },
+    processed_count: { db: 'processed_count', behavior: 'readonly' },
+    success_count: { db: 'success_count', behavior: 'readonly' },
+    risky_count: { db: 'risky_count', behavior: 'readonly' },
+    invalid_count: { db: 'invalid_count', behavior: 'readonly' },
+    failed_count: { db: 'failed_count', behavior: 'readonly' },
+    last_error: { db: 'last_error', behavior: 'readonly' },
+    created_at: { db: 'created_at', behavior: 'readonly' },
+    updated_at: { db: 'updated_at', behavior: 'readonly' },
+  },
+  lead_folders: {
+    id: { db: 'id', behavior: 'readonly' },
+    name: { db: 'name', behavior: 'plain' },
+    operator_id: { db: 'operator_id', behavior: 'plain' },
+    created_by: { db: 'created_by', behavior: 'plain' },
+    created_at: { db: 'created_at', behavior: 'readonly' },
+    updated_at: { db: 'updated_at', behavior: 'readonly' },
+  },
+  lead_folder_memberships: {
+    id: { db: 'id', behavior: 'readonly' },
+    folder_id: { db: 'folder_id', behavior: 'plain' },
+    lead_id: { db: 'lead_id', behavior: 'plain' },
+    created_at: { db: 'created_at', behavior: 'readonly' },
   },
 };

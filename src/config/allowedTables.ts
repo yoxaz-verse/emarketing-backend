@@ -20,7 +20,10 @@ export const ALLOWED_TABLES = [
   'campaign_voice_agents',
   'voice_calls',
   'system_events',
-  'password_reset_tokens'
+  'password_reset_tokens',
+  'validation_runs',
+  'lead_folders',
+  'lead_folder_memberships'
 ] as const;
 
 export type AllowedTable = typeof ALLOWED_TABLES[number];
