@@ -1,9 +1,8 @@
 // src/worker/email/eligibility.worker.ts
 
 import { supabase } from '../../supabase';
-import { processLeadValidation, type LeadValidationRow } from './eligibility.processor';
+import { processLeadValidationSafely, type LeadValidationRow } from './eligibility.processor';
 import { logger } from '../../services/logging/logger';
-import { markRunOutcome } from '../../services/validation/validation.run.service';
 
 export async function runEligibilityWorker(
   limit: number = 100,
@@ -38,23 +37,11 @@ export async function runEligibilityWorker(
     .in('id', leadIds);
 
   for (const lead of typedLeads) {
-    try {
-      await processLeadValidation(lead);
-    } catch (err: any) {
-      logger.error('legacy_worker_lead_processing_failed', {
-        leadId: lead.id,
-        error: err?.message ?? 'unknown_error',
-      });
-
-      await supabase
-        .from('leads')
-        .update({
-          eligibility_processing: false,
-        })
-        .eq('id', lead.id);
-      if (lead.validation_run_id) {
-        await markRunOutcome(lead.validation_run_id, 'failed');
-      }
-    }
+    await processLeadValidationSafely(lead);
   }
+
+  logger.info('legacy_worker_batch_completed', {
+    runId: runId ?? null,
+    leadCount: typedLeads.length,
+  });
 }

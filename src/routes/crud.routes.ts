@@ -1,7 +1,7 @@
 // src/routes/crud.ts
 import { Router } from 'express';
 import { ALLOWED_TABLES } from '../config/allowedTables';
-import { deleteRow, insertRow, listRows, updateRow } from '../services/crudService';
+import { deleteRow, deleteRowsBulk, insertRow, listRows, updateRow } from '../services/crudService';
 import { requireAuth } from '../middleware/requireAuth';
 
 const router = Router();
@@ -74,6 +74,21 @@ router.put('/:table/:id', async (req, res) => {
     console.error('[CRUD UPDATE ERROR]', err);
     res.status(400).json({
       error: err.message ?? 'Update failed',
+    });
+  }
+});
+
+router.post('/:table/bulk-delete', async (req, res) => {
+  try {
+    const table = validateTable(req.params.table);
+    assertTablePermission(req, table);
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    const result = await deleteRowsBulk(table, ids);
+    res.json({ success: true, deletedCount: result.deletedCount });
+  } catch (err: any) {
+    console.error('[CRUD BULK DELETE ERROR]', err);
+    res.status(400).json({
+      error: err.message ?? 'Bulk delete failed',
     });
   }
 });

@@ -13,16 +13,19 @@ export async function handleCampaignLeadsBeforeWrite(
 
   const { data: leads } = await supabase
     .from('leads')
-    .select('id, email_eligibility')
+    .select('id, email_eligibility, is_used, is_blocked')
     .in('id', leadIds)
 
   const invalid = leads?.filter(
-    l => l.email_eligibility !== 'eligible'
+    l =>
+      !['eligible', 'risky'].includes(String(l.email_eligibility ?? '').toLowerCase()) ||
+      l.is_used === true ||
+      l.is_blocked === true
   )
 
   if (invalid?.length) {
     throw new Error(
-      'Blocked: Only eligible leads can be attached to campaigns'
+      'Blocked: Only eligible or risky leads can be attached to campaigns'
     )
   }
 }

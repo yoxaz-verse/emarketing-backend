@@ -1,5 +1,6 @@
 import { Role, ROLE_HIERARCHY } from '../../auth/roles';
 import { supabase } from '../../supabase';
+import { supabaseAdmin } from '../../utils/supabaseAdmin';
 
 function isValidRole(role: any): role is Role {
   return role in ROLE_HIERARCHY;
@@ -36,13 +37,27 @@ export async function handleUserBeforeWrite(
 
     // 🚫 REMOVED listUsers check (it returns admin by default in some client versions/configs)
     // Create new auth user directly
+    const incomingPassword = typeof payload.password === 'string' ? payload.password.trim() : '';
+    if (!incomingPassword) {
+      throw new Error(
+        'Password is required when creating users. Set a password so the user can sign in via email/password.'
+      );
+    }
+
     const { data, error } =
-      await supabase.auth.admin.createUser({
+      await supabaseAdmin.auth.admin.createUser({
         email: payload.email,
+        password: incomingPassword,
         email_confirm: true,
       });
 
-    if (error) throw error;
+    if (error || !data?.user?.id) {
+      console.error('[USER_CREATE_AUTH_FAILED]', {
+        email: payload.email,
+        reason: error?.message ?? 'unknown_error',
+      });
+      throw error ?? new Error('Failed to create auth user');
+    }
     payload.auth_user_id = data.user.id;
   }
 

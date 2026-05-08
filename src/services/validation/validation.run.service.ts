@@ -110,6 +110,15 @@ export async function markRunFailed(runId: string, errorMessage: string): Promis
     .eq('id', runId);
 }
 
+export async function touchValidationRun(runId: string): Promise<void> {
+  await supabase
+    .from('validation_runs')
+    .update({
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', runId);
+}
+
 export async function getLatestValidationRun(): Promise<ValidationRunRow | null> {
   const { data, error } = await supabase
     .from('validation_runs')

@@ -34,6 +34,7 @@ const COMMON_PROVIDER_TYPOS: Record<string, string> = {
   'outlok.com': 'outlook.com',
   'yaho.com': 'yahoo.com',
 };
+const DNS_TIMEOUT_MS = Math.max(1_000, Number(process.env.EMAIL_VALIDATION_DNS_TIMEOUT_MS ?? 5_000));
 
 export type ValidationStatus = 'valid' | 'risky' | 'invalid';
 export type LegacyEligibilityStatus = 'eligible' | 'risky' | 'blocked';
@@ -77,25 +78,59 @@ export function getSuggestion(domain: string): string | null {
 
 async function lookupMx(domain: string): Promise<MxLookupResult> {
   const cacheKey = `email:mx:${domain}`;
+  const cacheGetStartedAt = Date.now();
   const cached = await cacheGet<MxLookupResult>(cacheKey);
+  logger.info('validation_stage_timing', {
+    stage: 'cache_get',
+    target: 'mx',
+    domain,
+    hit: Boolean(cached),
+    durationMs: Date.now() - cacheGetStartedAt,
+  });
   if (cached) return cached;
 
   try {
-    const mx = await dns.resolveMx(domain);
+    const mxLookupStartedAt = Date.now();
+    const mx = await Promise.race([
+      dns.resolveMx(domain),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => {
+          const timeoutError = new Error(`dns_lookup_timeout_${DNS_TIMEOUT_MS}ms`);
+          (timeoutError as Error & { code?: string }).code = 'ETIMEOUT';
+          reject(timeoutError);
+        }, DNS_TIMEOUT_MS);
+      }),
+    ]);
+    logger.info('validation_stage_timing', {
+      stage: 'mx_lookup',
+      domain,
+      timedOut: false,
+      durationMs: Date.now() - mxLookupStartedAt,
+    });
     const result: MxLookupResult = {
       records: mx.map((r) => r.exchange.toLowerCase()).sort(),
       timeout: false,
     };
+    const cacheSetStartedAt = Date.now();
     await cacheSet(cacheKey, result);
+    logger.info('validation_stage_timing', {
+      stage: 'cache_set',
+      target: 'mx',
+      domain,
+      durationMs: Date.now() - cacheSetStartedAt,
+    });
     return result;
   } catch (error: any) {
     const code = error?.code as string | undefined;
-    const isTimeout = code === 'ETIMEOUT' || code === 'EAI_AGAIN';
+    const message = String(error?.message ?? '');
+    const isTimeout = code === 'ETIMEOUT' || code === 'EAI_AGAIN' || message.startsWith('dns_lookup_timeout_');
 
     logger.warn('mx_lookup_failed', {
       domain,
       code: code ?? 'unknown',
       timeout: isTimeout,
+      timeoutMs: DNS_TIMEOUT_MS,
+      error: message,
     });
 
     if (isTimeout) {
@@ -108,21 +143,49 @@ async function lookupMx(domain: string): Promise<MxLookupResult> {
 
 async function isDisposableDomain(domain: string): Promise<boolean> {
   const cacheKey = `email:disposable:${domain}`;
+  const cacheGetStartedAt = Date.now();
   const cached = await cacheGet<boolean>(cacheKey);
+  logger.info('validation_stage_timing', {
+    stage: 'cache_get',
+    target: 'disposable',
+    domain,
+    hit: typeof cached === 'boolean',
+    durationMs: Date.now() - cacheGetStartedAt,
+  });
   if (typeof cached === 'boolean') return cached;
 
   const result = disposableDomains.has(domain);
+  const cacheSetStartedAt = Date.now();
   await cacheSet(cacheKey, result);
+  logger.info('validation_stage_timing', {
+    stage: 'cache_set',
+    target: 'disposable',
+    domain,
+    durationMs: Date.now() - cacheSetStartedAt,
+  });
   return result;
 }
 
 async function detectProviderCached(mxHosts: string[]): Promise<string | null> {
   const key = `email:provider:${mxHosts.join(',')}`;
+  const cacheGetStartedAt = Date.now();
   const cached = await cacheGet<string | null>(key);
+  logger.info('validation_stage_timing', {
+    stage: 'cache_get',
+    target: 'provider',
+    hit: cached !== null,
+    durationMs: Date.now() - cacheGetStartedAt,
+  });
   if (cached !== null) return cached;
 
   const provider = detectProvider(mxHosts);
+  const cacheSetStartedAt = Date.now();
   await cacheSet(key, provider);
+  logger.info('validation_stage_timing', {
+    stage: 'cache_set',
+    target: 'provider',
+    durationMs: Date.now() - cacheSetStartedAt,
+  });
   return provider;
 }
 

@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import {
+  forceUnlockAndRerunValidation,
   getEmailValidationRunHistory,
   getEmailValidationRunStatus,
   resetStuckAndRerunValidation,
@@ -15,6 +16,7 @@ const router = Router()
 router.post('/lead', runEmailEligibilityValidation)
 router.post('/lead/start', runEmailEligibilityValidation)
 router.post('/lead/reset-stuck-rerun', resetStuckAndRerunValidation)
+router.post('/lead/force-unlock-rerun', forceUnlockAndRerunValidation)
 router.get('/lead/status', getEmailValidationRunStatus)
 router.get('/lead/history', getEmailValidationRunHistory)
 

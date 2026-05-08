@@ -40,6 +40,19 @@ function normalizeFilters(filters: Record<string, any>): Record<string, any> {
   return out;
 }
 
+function isLeadsRelationCacheError(error: any): boolean {
+  const code = String(error?.code ?? '');
+  const message = String(error?.message ?? '');
+  return (
+    code === 'PGRST200' ||
+    message.includes("Could not find a relationship between 'leads' and 'lead_folders'") ||
+    message.includes("Could not find a relationship between 'leads' and 'operators'") ||
+    message.includes("schema cache")
+  );
+}
+
+const enableLeadValidationColumns = process.env.ENABLE_LEAD_VALIDATION_COLUMNS === 'true';
+
 export async function listRows(
   table: AllowedTable,
   filters: Record<string, any> = {}
@@ -82,11 +95,11 @@ export async function listRows(
         nextQuery = nextQuery.eq('email_eligibility', eligibility);
       }
 
-      if (validationStatus) {
+      if (enableLeadValidationColumns && validationStatus) {
         nextQuery = nextQuery.eq('validation_status', validationStatus);
       }
 
-      if (provider) {
+      if (enableLeadValidationColumns && provider) {
         nextQuery = nextQuery.eq('provider', provider);
       }
 
@@ -94,12 +107,12 @@ export async function listRows(
         nextQuery = nextQuery.eq('source', source);
       }
 
-      if (riskMin !== undefined) {
+      if (enableLeadValidationColumns && riskMin !== undefined) {
         const min = Number(riskMin);
         if (!Number.isNaN(min)) nextQuery = nextQuery.gte('risk_score', min);
       }
 
-      if (riskMax !== undefined) {
+      if (enableLeadValidationColumns && riskMax !== undefined) {
         const max = Number(riskMax);
         if (!Number.isNaN(max)) nextQuery = nextQuery.lte('risk_score', max);
       }
@@ -180,16 +193,19 @@ export async function listRows(
   if (
     error &&
     table === 'leads' &&
-    (error.code === '42703' || error.message?.includes('column leads.'))
+    (
+      error.code === '42703' ||
+      error.message?.includes('column leads.') ||
+      isLeadsRelationCacheError(error)
+    )
   ) {
-    console.warn(
-      '[CRUD LIST WARNING] Missing leads validation columns, falling back to legacy lead select',
-      error.message
-    );
+    console.warn('[CRUD_LIST_LEADS_FALLBACK_NON_RELATION]', {
+      reasonCode: String(error?.code ?? ''),
+      reasonMessage: String(error?.message ?? ''),
+      selectMode: 'non_relation',
+    });
     query = applyFilters(
-      supabase.from(table).select(
-        'id,email,first_name,company,operator_id,email_eligibility,email_eligibility_reason,eligibility_processing,email_checked_at,created_at,retry_count,permanently_failed'
-      )
+      supabase.from(table).select(buildSelect('leads', { includeRelations: false }))
     );
     ({ data, error } = await query);
   }
@@ -248,4 +264,34 @@ export async function deleteRow(
     .eq('id', id);
 
   if (error) throw error;
+}
+
+export async function deleteRowsBulk(
+  table: AllowedTable,
+  ids: string[]
+) {
+  const uniqueIds = Array.from(new Set((ids ?? []).filter((id): id is string => typeof id === 'string' && id.trim().length > 0)));
+  if (uniqueIds.length === 0) {
+    return { deletedCount: 0 };
+  }
+
+  const { data: existingRows, error: fetchError } = await supabase
+    .from(table)
+    .select('id')
+    .in('id', uniqueIds);
+
+  if (fetchError) throw fetchError;
+  const existingIds = (existingRows ?? []).map((row: any) => row.id).filter(Boolean);
+
+  if (existingIds.length === 0) {
+    return { deletedCount: 0 };
+  }
+
+  const { error } = await supabase
+    .from(table)
+    .delete()
+    .in('id', existingIds);
+
+  if (error) throw error;
+  return { deletedCount: existingIds.length };
 }

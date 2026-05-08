@@ -1,6 +1,7 @@
 import { TABLE_FIELD_MAP } from "../config/tableFieldMap";
 
-export function buildSelect(table: string) {
+export function buildSelect(table: string, options?: { includeRelations?: boolean }) {
+  const includeRelations = options?.includeRelations ?? true;
   const fields = TABLE_FIELD_MAP[table];
   if (!fields) return '*';
 
@@ -33,7 +34,7 @@ export function buildSelect(table: string) {
     // always select base column
     base.push(def.db);
 
-    if (def.behavior === 'relation' && def.relation) {
+    if (includeRelations && def.behavior === 'relation' && def.relation) {
       const { table, valueKey, labelKey } = def.relation;
 
       relations.push(

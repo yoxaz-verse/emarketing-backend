@@ -14,7 +14,11 @@ const router = Router();
 
 router.post('/login', async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required', code: 'MISSING_CREDENTIALS' });
+    }
 
     // 1️⃣ Authenticate via Supabase Auth
     const { data, error } = await supabaseAdmin.auth.signInWithPassword({
@@ -23,7 +27,13 @@ router.post('/login', async (req, res) => {
     });
 
     if (error || !data.user) {
-      return res.status(401).json({ error: 'Invalid credentials' });
+      console.warn('[AUTH_LOGIN_INVALID_CREDENTIALS]', {
+        email,
+        code: error?.code ?? 'unknown',
+        message: error?.message ?? 'unknown',
+        status: error?.status ?? null,
+      });
+      return res.status(401).json({ error: 'Invalid credentials', code: 'INVALID_CREDENTIALS' });
     }
 
     const authUserId = data.user.id;
@@ -37,7 +47,14 @@ router.post('/login', async (req, res) => {
 
     // 🚫 User not provisioned or disabled
     if (userError || !user || user.active !== true) {
-      return res.status(401).json({ error: 'UNAUTHORIZED' });
+      console.warn('[AUTH_LOGIN_UNAUTHORIZED_USER]', {
+        email,
+        authUserId,
+        hasUser: Boolean(user),
+        active: user?.active ?? null,
+        dbError: userError?.message ?? null,
+      });
+      return res.status(401).json({ error: 'UNAUTHORIZED', code: 'UNAUTHORIZED_USER' });
     }
 
     // 3️⃣ Issue YOUR JWT
@@ -54,9 +71,12 @@ router.post('/login', async (req, res) => {
         operator_id: user.operator_id,
       },
     });
-  } catch (err) {
-    console.error('LOGIN ERROR:', err);
-    return res.status(500).json({ error: 'Login failed' });
+  } catch (err: any) {
+    console.error('[AUTH_LOGIN_ERROR]', {
+      message: err?.message ?? 'unknown',
+      stack: err?.stack ?? null,
+    });
+    return res.status(500).json({ error: 'Login failed', code: 'LOGIN_INTERNAL_ERROR' });
   }
 });
 

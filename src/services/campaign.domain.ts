@@ -26,8 +26,17 @@ export async function attachLeadsToCampaign(
   }
 
   if (!Array.isArray(leadIds) || leadIds.length === 0) {
-    return { inserted: 0 };
+    return {
+      requested: 0,
+      inserted: 0,
+      detached: 0,
+      skipped_existing: 0,
+      skipped_ineligible: 0,
+      skipped_missing: 0,
+    };
   }
+  const dedupedLeadIds = Array.from(new Set(leadIds.map((id) => String(id))));
+  const requested = dedupedLeadIds.length;
 
   /* -------------------------------------------------------
      1️⃣ Fetch existing campaign_leads
@@ -36,31 +45,67 @@ export async function attachLeadsToCampaign(
     .from('campaign_leads')
     .select('lead_id')
     .eq('campaign_id', campaignId)
-    .in('lead_id', leadIds);
+    .in('lead_id', dedupedLeadIds);
 
   if (fetchError) {
     throw fetchError;
   }
 
-  const existingLeadIds = new Set(
-    (existing ?? []).map((r: any) => r.lead_id)
+  const existingLeadIds = new Set((existing ?? []).map((r: any) => r.lead_id));
+
+  const { data: leadRows, error: leadFetchError } = await supabase
+    .from('leads')
+    .select('id, email_eligibility, is_used, is_blocked')
+    .in('id', dedupedLeadIds);
+
+  if (leadFetchError) {
+    throw leadFetchError;
+  }
+
+  const allowedStatuses = new Set(['eligible', 'risky']);
+  const leadStateMap = new Map(
+    (leadRows ?? []).map((row: any) => [
+      String(row.id),
+      {
+        eligibility: String(row.email_eligibility ?? '').toLowerCase(),
+        isUsed: row.is_used === true,
+        isBlocked: row.is_blocked === true,
+      },
+    ])
   );
 
   /* -------------------------------------------------------
      2️⃣ Determine new leads only
   ------------------------------------------------------- */
-  const newLeadIds = leadIds.filter(
-    (id) => !existingLeadIds.has(id)
-  );
+  const foundLeadIds = new Set((leadRows ?? []).map((row: any) => String(row.id)));
+  const missingLeadIds = dedupedLeadIds.filter((id) => !foundLeadIds.has(id));
+  const newLeadIds = dedupedLeadIds.filter((id) => !existingLeadIds.has(id) && foundLeadIds.has(id));
+  const eligibleLeadIds = newLeadIds.filter((id) => {
+    const state = leadStateMap.get(String(id));
+    if (!state) return false;
+    if (!allowedStatuses.has(state.eligibility)) return false;
+    if (state.isUsed || state.isBlocked) return false;
+    return true;
+  });
+  const skippedExisting = requested - newLeadIds.length;
+  const skippedIneligible = newLeadIds.length - eligibleLeadIds.length;
+  const skippedMissing = missingLeadIds.length;
 
-  if (newLeadIds.length === 0) {
-    return { inserted: 0 };
+  if (eligibleLeadIds.length === 0) {
+    return {
+      requested,
+      inserted: 0,
+      detached: 0,
+      skipped_existing: skippedExisting,
+      skipped_ineligible: skippedIneligible,
+      skipped_missing: skippedMissing,
+    };
   }
 
   /* -------------------------------------------------------
      3️⃣ Build rows (NEW leads ONLY)
   ------------------------------------------------------- */
-  const rows = newLeadIds.map((leadId) => ({
+  const rows = eligibleLeadIds.map((leadId) => ({
     campaign_id: campaignId,
     lead_id: leadId,
     status: 'queued',
@@ -79,7 +124,79 @@ export async function attachLeadsToCampaign(
   }
 
   return {
+    requested,
     inserted: rows.length,
+    detached: 0,
+    skipped_existing: skippedExisting,
+    skipped_ineligible: skippedIneligible,
+    skipped_missing: skippedMissing,
+  };
+}
+
+export async function detachLeadsFromCampaign(
+  campaignId: string,
+  leadIds: string[]
+) {
+  if (!campaignId) {
+    throw new Error('campaignId is required');
+  }
+
+  if (!Array.isArray(leadIds) || leadIds.length === 0) {
+    return {
+      requested: 0,
+      inserted: 0,
+      detached: 0,
+      skipped_existing: 0,
+      skipped_ineligible: 0,
+      skipped_missing: 0,
+    };
+  }
+
+  const dedupedLeadIds = Array.from(new Set(leadIds.map((id) => String(id))));
+  const requested = dedupedLeadIds.length;
+
+  const { data: existing, error: existingError } = await supabase
+    .from('campaign_leads')
+    .select('lead_id')
+    .eq('campaign_id', campaignId)
+    .in('lead_id', dedupedLeadIds);
+
+  if (existingError) {
+    throw existingError;
+  }
+
+  const existingLeadIds = new Set((existing ?? []).map((row: any) => String(row.lead_id)));
+  const toDetachIds = dedupedLeadIds.filter((id) => existingLeadIds.has(id));
+  const skippedMissing = requested - toDetachIds.length;
+
+  if (toDetachIds.length === 0) {
+    return {
+      requested,
+      inserted: 0,
+      detached: 0,
+      skipped_existing: 0,
+      skipped_ineligible: 0,
+      skipped_missing: skippedMissing,
+    };
+  }
+
+  const { error: detachError } = await supabase
+    .from('campaign_leads')
+    .delete()
+    .eq('campaign_id', campaignId)
+    .in('lead_id', toDetachIds);
+
+  if (detachError) {
+    throw detachError;
+  }
+
+  return {
+    requested,
+    inserted: 0,
+    detached: toDetachIds.length,
+    skipped_existing: 0,
+    skipped_ineligible: 0,
+    skipped_missing: skippedMissing,
   };
 }
 
@@ -115,6 +232,19 @@ export async function startCampaign(campaignId: string) {
 
   if (!inboxes || inboxes.length === 0) {
     throw new Error('Cannot start campaign without assigned inboxes');
+  }
+
+  const { count: campaignLeadCount, error: campaignLeadCountError } = await supabase
+    .from('campaign_leads')
+    .select('id', { count: 'exact', head: true })
+    .eq('campaign_id', campaignId);
+
+  if (campaignLeadCountError) {
+    throw campaignLeadCountError;
+  }
+
+  if (!campaignLeadCount || campaignLeadCount === 0) {
+    throw new Error('Cannot start campaign without attached campaign leads');
   }
 
   // 3️⃣ Transition campaign to running

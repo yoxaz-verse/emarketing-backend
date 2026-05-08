@@ -15,13 +15,14 @@ router.get('/', async (_req, res) => {
 
     let countsByFolder = new Map<string, number>();
     if (folderIds.length > 0) {
-      const { data: members, error: membersError } = await supabase
-        .from('lead_folder_memberships')
+      const { data: assignedLeads, error: assignedLeadsError } = await supabase
+        .from('leads')
         .select('folder_id')
         .in('folder_id', folderIds);
-      if (membersError) throw membersError;
-      for (const m of members ?? []) {
-        countsByFolder.set(m.folder_id, (countsByFolder.get(m.folder_id) ?? 0) + 1);
+      if (assignedLeadsError) throw assignedLeadsError;
+      for (const lead of assignedLeads ?? []) {
+        if (!lead.folder_id) continue;
+        countsByFolder.set(lead.folder_id, (countsByFolder.get(lead.folder_id) ?? 0) + 1);
       }
     }
 
@@ -91,12 +92,20 @@ router.post('/:id/members', async (req, res) => {
       return res.status(400).json({ success: false, error: 'lead_ids array is required' });
     }
 
-    const rows = leadIds.map((leadId: string) => ({ folder_id: req.params.id, lead_id: leadId }));
     const { error } = await supabase
-      .from('lead_folder_memberships')
-      .upsert(rows, { onConflict: 'folder_id,lead_id', ignoreDuplicates: true });
+      .from('leads')
+      .update({ folder_id: req.params.id })
+      .in('id', leadIds);
     if (error) throw error;
-    return res.json({ success: true, inserted: rows.length });
+
+    const { count, error: countError } = await supabase
+      .from('leads')
+      .select('id', { count: 'exact', head: true })
+      .eq('folder_id', req.params.id)
+      .in('id', leadIds);
+    if (countError) throw countError;
+
+    return res.json({ success: true, inserted: count ?? 0 });
   } catch (err: any) {
     return res.status(400).json({ success: false, error: err.message ?? 'Failed to add members' });
   }
@@ -105,10 +114,10 @@ router.post('/:id/members', async (req, res) => {
 router.delete('/:id/members/:leadId', async (req, res) => {
   try {
     const { error } = await supabase
-      .from('lead_folder_memberships')
-      .delete()
-      .eq('folder_id', req.params.id)
-      .eq('lead_id', req.params.leadId);
+      .from('leads')
+      .update({ folder_id: null })
+      .eq('id', req.params.leadId)
+      .eq('folder_id', req.params.id);
     if (error) throw error;
     return res.json({ success: true });
   } catch (err: any) {
@@ -119,13 +128,13 @@ router.delete('/:id/members/:leadId', async (req, res) => {
 router.get('/:id/members', async (req, res) => {
   try {
     const { data, error } = await supabase
-      .from('lead_folder_memberships')
-      .select('lead_id')
+      .from('leads')
+      .select('id')
       .eq('folder_id', req.params.id);
     if (error) throw error;
     return res.json({
       success: true,
-      lead_ids: (data ?? []).map((d: any) => d.lead_id),
+      lead_ids: (data ?? []).map((d: any) => d.id),
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message ?? 'Failed to list members' });

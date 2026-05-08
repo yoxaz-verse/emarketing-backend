@@ -22,8 +22,7 @@ export const ALLOWED_TABLES = [
   'system_events',
   'password_reset_tokens',
   'validation_runs',
-  'lead_folders',
-  'lead_folder_memberships'
+  'lead_folders'
 ] as const;
 
 export type AllowedTable = typeof ALLOWED_TABLES[number];

@@ -96,12 +96,11 @@ export const TABLE_FIELD_MAP: Record<
 
     operator_id: {
       db: 'operator_id',
-      behavior: 'relation',
-      relation: {
-        table: 'operators',
-        valueKey: 'id',
-        labelKey: 'name',
-      },
+      behavior: 'plain',
+    },
+    folder_id: {
+      db: 'folder_id',
+      behavior: 'plain',
     },
     email_eligibility: {
       db: 'email_eligibility',
@@ -812,11 +811,5 @@ export const TABLE_FIELD_MAP: Record<
     created_by: { db: 'created_by', behavior: 'plain' },
     created_at: { db: 'created_at', behavior: 'readonly' },
     updated_at: { db: 'updated_at', behavior: 'readonly' },
-  },
-  lead_folder_memberships: {
-    id: { db: 'id', behavior: 'readonly' },
-    folder_id: { db: 'folder_id', behavior: 'plain' },
-    lead_id: { db: 'lead_id', behavior: 'plain' },
-    created_at: { db: 'created_at', behavior: 'readonly' },
   },
 };

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/requireAuth';
 import {
   attachLeadsToCampaign,
+  detachLeadsFromCampaign,
   startCampaign,
   pauseCampaign
 } from '../services/campaign.domain';
@@ -50,13 +51,21 @@ router.post('/:id/leads/attach-folder', async (req, res) => {
     }
 
     const { data: members, error: memberError } = await supabase
-      .from('lead_folder_memberships')
-      .select('lead_id')
+      .from('leads')
+      .select('id')
       .in('folder_id', folderIds);
     if (memberError) throw memberError;
-    const leadIds = Array.from(new Set((members ?? []).map((m: any) => String(m.lead_id))));
+    const leadIds: string[] = Array.from(new Set((members ?? []).map((m: any) => String(m.id))));
     if (leadIds.length === 0) {
-      return res.json({ success: true, inserted: 0 });
+      return res.json({
+        success: true,
+        requested: 0,
+        inserted: 0,
+        detached: 0,
+        skipped_existing: 0,
+        skipped_ineligible: 0,
+        skipped_missing: 0,
+      });
     }
 
     const result = await attachLeadsToCampaign(campaignId, leadIds);
@@ -69,6 +78,55 @@ router.post('/:id/leads/attach-folder', async (req, res) => {
   } catch (err: any) {
     console.error('[ATTACH FOLDER LEADS ERROR]', err);
     return res.status(500).json({ error: err.message ?? 'Failed to attach folder leads' });
+  }
+});
+
+router.post('/:id/leads/detach', async (req, res) => {
+  try {
+    const campaignId = req.params.id;
+    const { lead_ids } = req.body;
+
+    if (!Array.isArray(lead_ids)) {
+      return res.status(400).json({
+        error: 'lead_ids must be an array',
+      });
+    }
+
+    const result = await detachLeadsFromCampaign(campaignId, lead_ids);
+    return res.json({
+      success: true,
+      ...result,
+    });
+  } catch (err: any) {
+    console.error('[DETACH LEADS ERROR]', err);
+    return res.status(500).json({
+      error: err.message ?? 'Failed to detach leads',
+    });
+  }
+});
+
+// Compatibility path for clients that may include trailing slash.
+router.post('/:id/leads/detach/', async (req, res) => {
+  try {
+    const campaignId = req.params.id;
+    const { lead_ids } = req.body;
+
+    if (!Array.isArray(lead_ids)) {
+      return res.status(400).json({
+        error: 'lead_ids must be an array',
+      });
+    }
+
+    const result = await detachLeadsFromCampaign(campaignId, lead_ids);
+    return res.json({
+      success: true,
+      ...result,
+    });
+  } catch (err: any) {
+    console.error('[DETACH LEADS ERROR]', err);
+    return res.status(500).json({
+      error: err.message ?? 'Failed to detach leads',
+    });
   }
 });
 

@@ -16,9 +16,29 @@ import validationRoutes from './routes/validation.routes';
 import executionRoutes from './routes/execution.routes';
 import leadFoldersRoutes from './routes/lead.folders.routes';
 import { startSequenceRunner } from './worker/sequenceRunner';
-import { startEmailValidationQueueWorker } from './worker/email/eligibility.bullmq.worker';
 
 dotenv.config();
+
+function maskSupabaseProjectRef(rawUrl?: string): string {
+  if (!rawUrl) return 'missing';
+  try {
+    const hostname = new URL(rawUrl).hostname;
+    const projectRef = hostname.split('.')[0] ?? '';
+    if (!projectRef) return 'unknown';
+    if (projectRef.length <= 8) return `${projectRef.slice(0, 3)}***`;
+    return `${projectRef.slice(0, 4)}***${projectRef.slice(-4)}`;
+  } catch {
+    return 'invalid';
+  }
+}
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[UNHANDLED_REJECTION]', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('[UNCAUGHT_EXCEPTION]', error);
+});
 
 const app = express();
 const entrypoint = process.argv[1] ?? 'unknown';
@@ -38,16 +58,12 @@ console.info('[BACKEND_RUNTIME]', {
   sourceOfTruth: 'ts',
   smtpValidationFlow: 'deterministic-root-cause-v1',
   inboxUniquenessFlow: 'normalize-check-plus-db-unique-v1',
+  supabaseProjectRef: maskSupabaseProjectRef(process.env.SUPABASE_URL),
 });
 
-const validationModeConfigured = process.env.EMAIL_VALIDATION_QUEUE_MODE;
-const validationModeEffective = validationModeConfigured === 'bullmq' ? 'bullmq' : 'legacy';
-const bullmqFallbackToLegacy = process.env.EMAIL_VALIDATION_BULLMQ_FALLBACK_TO_LEGACY !== 'false';
 console.info('[EMAIL_VALIDATION_RUNTIME]', {
-  configuredMode: validationModeConfigured ?? 'unset',
-  effectiveMode: validationModeEffective,
-  redisConfigured: Boolean(process.env.REDIS_URL),
-  bullmqFallbackToLegacy,
+  executionMode: 'inline_sync',
+  redisRequired: false,
   staleMinutes: Number(process.env.EMAIL_VALIDATION_STALE_MINUTES ?? 10),
 });
 
@@ -86,5 +102,8 @@ app.listen(PORT, '0.0.0.0', () => {
   });
 });
 
-startSequenceRunner();
-startEmailValidationQueueWorker();
+try {
+  startSequenceRunner();
+} catch (error) {
+  console.error('[SEQUENCE_RUNNER_BOOT_ERROR]', error);
+}
