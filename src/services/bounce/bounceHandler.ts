@@ -1,10 +1,17 @@
 import { classifyBounce } from './bounceClassifier'
+import type { SupabaseClient } from '@supabase/supabase-js'
+
+type BouncePayload = {
+  email: string
+  body: string
+  supabase: SupabaseClient
+}
 
 export async function handleBounce({
   email,
   body,
   supabase,
-}) {
+}: BouncePayload) {
   const type = classifyBounce(body)
 
   if (type === 'hard') {

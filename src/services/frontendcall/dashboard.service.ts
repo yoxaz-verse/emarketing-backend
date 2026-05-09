@@ -1,5 +1,16 @@
 import { supabase } from "../../supabase";
 
+type CampaignLead = {
+  status: string | null
+}
+
+type CampaignDashboardRow = {
+  id: string
+  name: string
+  status: string
+  campaign_leads: CampaignLead[] | null
+}
+
 export async function getCampaignDashboard(operatorId: string) {
     const { data } = await supabase
       .from('campaigns')
@@ -14,7 +25,7 @@ export async function getCampaignDashboard(operatorId: string) {
       `)
       .eq('operator_id', operatorId);
   
-    return (data ?? []).map(c => {
+    return ((data ?? []) as CampaignDashboardRow[]).map((c) => {
       const leads = c.campaign_leads || [];
   
       return {
@@ -22,9 +33,9 @@ export async function getCampaignDashboard(operatorId: string) {
         name: c.name,
         status: c.status,
         total_leads: leads.length,
-        completed: leads.filter(l => l.status === 'completed').length,
-        failed: leads.filter(l => l.status === 'failed').length,
-        queued: leads.filter(l => l.status === 'queued').length,
+        completed: leads.filter((l) => l.status === 'completed').length,
+        failed: leads.filter((l) => l.status === 'failed').length,
+        queued: leads.filter((l) => l.status === 'queued').length,
       };
     });
   }
