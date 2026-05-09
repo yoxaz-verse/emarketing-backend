@@ -13,14 +13,14 @@ export async function handleCampaignLeadsBeforeWrite(
 
   const { data: leads } = await supabase
     .from('leads')
-    .select('id, email_eligibility, is_used, is_blocked')
+    .select('id, email_eligibility, permanently_failed')
     .in('id', leadIds)
 
   const invalid = leads?.filter(
     l =>
       !['eligible', 'risky'].includes(String(l.email_eligibility ?? '').toLowerCase()) ||
-      l.is_used === true ||
-      l.is_blocked === true
+      String(l.email_eligibility ?? '').toLowerCase() === 'blocked' ||
+      l.permanently_failed === true
   )
 
   if (invalid?.length) {

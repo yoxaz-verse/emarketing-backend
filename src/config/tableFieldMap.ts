@@ -461,6 +461,14 @@ export const TABLE_FIELD_MAP: Record<
       db: 'hourly_limit',
       behavior: 'plain', // fallback cap
     },
+    warmup_enabled: {
+      db: 'warmup_enabled',
+      behavior: 'plain',
+    },
+    warmup_day: {
+      db: 'warmup_day',
+      behavior: 'plain',
+    },
     health_score: {
       db: 'health_score',
       behavior: 'readonly',

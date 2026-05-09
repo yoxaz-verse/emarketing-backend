@@ -2,6 +2,7 @@ import { supabase } from '../supabase';
 import { decryptSecret } from '../utils/sendEncryption';
 import { updateRow } from './crudService';
 import { createSmtpTransport } from './email/smtpTransport';
+import { getSendingLimitsConfig, resolveInboxEffectiveLimits } from './sendingLimitsConfig.service';
 
 
   
@@ -46,7 +47,9 @@ import { createSmtpTransport } from './email/smtpTransport';
         current_step,
         assigned_inbox_id,
         leads:lead_id (
-          email
+          id,
+          email,
+          email_eligibility
         )
       `)
       .eq('id', campaignLeadId)
@@ -73,13 +76,85 @@ import { createSmtpTransport } from './email/smtpTransport';
         id,
         email_address,
         smtp_account_id,
-        sending_domain_id
+        sending_domain_id,
+        daily_limit,
+        hourly_limit,
+        warmup_enabled,
+        warmup_day
       `)
       .eq('id', campaignLead.assigned_inbox_id)
       .single();
   
     if (inboxError || !inbox) {
       throw new Error('Inbox not found');
+    }
+
+    const leadEligibility = String(campaignLead?.leads?.email_eligibility ?? '').toLowerCase();
+    if (leadEligibility === 'risky') {
+      const config = await getSendingLimitsConfig();
+      const { dailyLimit } = resolveInboxEffectiveLimits(inbox as any, config);
+      const riskyPercent = Math.max(0, Math.min(100, Number(config.risky_daily_percent_limit ?? 20)));
+      const allowedRiskyPerDay = Math.max(0, Math.floor((dailyLimit * riskyPercent) / 100));
+      const today = new Date().toISOString().slice(0, 10);
+
+      const { data: sentTodayLogs, error: sentTodayLogsError } = await supabase
+        .from('email_logs')
+        .select('lead_id')
+        .eq('inbox_id', inbox.id)
+        .eq('status', 'sent')
+        .gte('sent_at', today);
+
+      if (sentTodayLogsError) {
+        throw sentTodayLogsError;
+      }
+
+      const sentLeadIds = Array.from(
+        new Set((sentTodayLogs ?? []).map((row: any) => String(row?.lead_id ?? '')).filter(Boolean))
+      );
+
+      let riskySentToday = 0;
+      if (sentLeadIds.length > 0) {
+        const { data: riskySentLeads, error: riskySentLeadsError } = await supabase
+          .from('leads')
+          .select('id')
+          .in('id', sentLeadIds)
+          .eq('email_eligibility', 'risky');
+
+        if (riskySentLeadsError) {
+          throw riskySentLeadsError;
+        }
+        riskySentToday = (riskySentLeads ?? []).length;
+      }
+
+      if (riskySentToday >= allowedRiskyPerDay) {
+        await supabase.from('campaign_leads').update({
+          status: 'paused',
+          status_reason: 'risky_daily_cap_reached',
+        }).eq('id', campaignLeadId).eq('status', 'processing');
+
+        await supabase.from('system_events').insert({
+          type: 'RISKY_CAP_REACHED',
+          entity: 'inbox',
+          entity_id: inbox.id,
+          message: `Risky send cap reached for inbox ${inbox.email_address}`,
+          meta: {
+            campaign_lead_id: campaignLeadId,
+            inbox_id: inbox.id,
+            risky_percent_limit: riskyPercent,
+            daily_limit: dailyLimit,
+            allowed_risky_per_day: allowedRiskyPerDay,
+            risky_sent_today: riskySentToday,
+          },
+        });
+
+        return {
+          skipped: true,
+          reason: 'risky_daily_cap_reached',
+          inbox_id: inbox.id,
+          allowed_risky_per_day: allowedRiskyPerDay,
+          risky_sent_today: riskySentToday,
+        };
+      }
     }
   
     /* -------------------------------------------------------
@@ -405,6 +480,62 @@ export async function resetInboxCounters(
   }
 
   await supabase.from('inboxes').update(updates);
+}
+
+export async function requeueRiskyPausedLeads() {
+  const { data: runningCampaigns, error: campaignError } = await supabase
+    .from('campaigns')
+    .select('id')
+    .eq('status', 'running');
+
+  if (campaignError) {
+    throw campaignError;
+  }
+
+  const campaignIds = (runningCampaigns ?? []).map((row: any) => String(row.id)).filter(Boolean);
+  if (campaignIds.length === 0) {
+    return { updated: 0 };
+  }
+
+  const { data: pausedLeads, error: pausedLeadsError } = await supabase
+    .from('campaign_leads')
+    .select('id')
+    .in('campaign_id', campaignIds)
+    .eq('status', 'paused')
+    .eq('status_reason', 'risky_daily_cap_reached');
+
+  if (pausedLeadsError) {
+    throw pausedLeadsError;
+  }
+
+  const leadIds = (pausedLeads ?? []).map((row: any) => String(row.id)).filter(Boolean);
+  if (leadIds.length === 0) {
+    return { updated: 0 };
+  }
+
+  const { error: updateError } = await supabase
+    .from('campaign_leads')
+    .update({
+      status: 'queued',
+      status_reason: null,
+    })
+    .in('id', leadIds);
+
+  if (updateError) {
+    throw updateError;
+  }
+
+  await supabase.from('system_events').insert({
+    type: 'RISKY_REQUEUE_DAILY',
+    entity: 'campaign_leads',
+    message: `Daily risky-cap recovery requeued ${leadIds.length} lead(s).`,
+    meta: {
+      updated: leadIds.length,
+      campaign_count: campaignIds.length,
+    },
+  });
+
+  return { updated: leadIds.length };
 }
 
 

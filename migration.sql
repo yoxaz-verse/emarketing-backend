@@ -24,3 +24,16 @@ CREATE TABLE IF NOT EXISTS campaign_voice_agents (
 -- 3) ALTER TABLE: voice_calls
 -- Adding voice_agent_id (nullable, FK → voice_agents.id)
 ALTER TABLE voice_calls ADD COLUMN IF NOT EXISTS voice_agent_id UUID REFERENCES voice_agents(id);
+
+-- 4) ALTER TABLE: leads
+-- Add persistent usage flag used by campaign lead attach logic.
+ALTER TABLE leads
+ADD COLUMN IF NOT EXISTS is_used BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Backfill usage flag for existing data.
+UPDATE leads l
+SET is_used = EXISTS (
+  SELECT 1
+  FROM campaign_leads cl
+  WHERE cl.lead_id = l.id
+);

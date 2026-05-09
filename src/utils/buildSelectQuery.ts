@@ -1,7 +1,8 @@
 import { TABLE_FIELD_MAP } from "../config/tableFieldMap";
 
-export function buildSelect(table: string, options?: { includeRelations?: boolean }) {
+export function buildSelect(table: string, options?: { includeRelations?: boolean; excludeColumns?: string[] }) {
   const includeRelations = options?.includeRelations ?? true;
+  const excluded = new Set(options?.excludeColumns ?? []);
   const fields = TABLE_FIELD_MAP[table];
   if (!fields) return '*';
 
@@ -28,6 +29,10 @@ export function buildSelect(table: string, options?: { includeRelations?: boolea
       leadOptionalColumns.has(def.db) &&
       !includeLeadOptionalColumns
     ) {
+      continue;
+    }
+
+    if (excluded.has(def.db)) {
       continue;
     }
 

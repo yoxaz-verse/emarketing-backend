@@ -53,6 +53,26 @@ function isLeadsRelationCacheError(error: any): boolean {
 
 const enableLeadValidationColumns = process.env.ENABLE_LEAD_VALIDATION_COLUMNS === 'true';
 
+function isMissingInboxesWarmupColumns(error: any): boolean {
+  const code = String(error?.code ?? '');
+  const message = String(error?.message ?? '');
+  return (
+    code === '42703' &&
+    (
+      message.includes('column inboxes.warmup_enabled') ||
+      message.includes('column inboxes.warmup_day')
+    )
+  );
+}
+
+function applyLegacyInboxWarmupDefaults(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...row,
+    warmup_enabled: typeof row.warmup_enabled === 'boolean' ? row.warmup_enabled : false,
+    warmup_day: Number.isFinite(Number(row.warmup_day)) ? Number(row.warmup_day) : 1,
+  };
+}
+
 export async function listRows(
   table: AllowedTable,
   filters: Record<string, any> = {}
@@ -209,6 +229,32 @@ export async function listRows(
     );
     ({ data, error } = await query);
   }
+  if (
+    error &&
+    table === 'inboxes' &&
+    isMissingInboxesWarmupColumns(error)
+  ) {
+    console.warn('[CRUD_LIST_INBOXES_FALLBACK_LEGACY_WARMUP_COLUMNS]', {
+      reasonCode: String(error?.code ?? ''),
+      reasonMessage: String(error?.message ?? ''),
+      selectMode: 'exclude_warmup_columns',
+    });
+
+    query = applyFilters(
+      supabase.from(table).select(buildSelect('inboxes', {
+        excludeColumns: ['warmup_enabled', 'warmup_day'],
+      }))
+    );
+
+    ({ data, error } = await query);
+
+    if (!error) {
+      data = (data ?? []).map((row: Record<string, unknown>) =>
+        applyLegacyInboxWarmupDefaults(row)
+      );
+    }
+  }
+
   if (error) throw error;
 
   const rows = (data ?? []).map((row: Record<string, unknown>) =>

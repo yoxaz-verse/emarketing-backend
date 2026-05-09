@@ -9,6 +9,7 @@ import {
   markCampaignLeadSent,
   resetInboxCounters,
   markCampaignLeadFailed,
+  requeueRiskyPausedLeads,
 } from '../services/execution.service';
 import { supabase } from '../supabase';
 import { handleReply } from '../services/replyIngestService';
@@ -122,6 +123,16 @@ router.post('/system/reset-inbox-counters', async (req, res) => {
   await resetInboxCounters(resetHourly, resetDaily);
 
   res.json({ success: true });
+});
+
+router.post('/system/requeue-risky-paused', async (_req, res) => {
+  try {
+    const result = await requeueRiskyPausedLeads();
+    res.json({ success: true, ...result });
+  } catch (err: any) {
+    console.error('[REQUEUE RISKY PAUSED ERROR]', err);
+    res.status(400).json({ error: err.message ?? 'Failed to requeue risky paused leads' });
+  }
 });
 
 

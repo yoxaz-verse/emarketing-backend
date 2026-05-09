@@ -16,6 +16,7 @@ import validationRoutes from './routes/validation.routes';
 import executionRoutes from './routes/execution.routes';
 import leadFoldersRoutes from './routes/lead.folders.routes';
 import { startSequenceRunner } from './worker/sequenceRunner';
+import { supabase } from './supabase';
 
 dotenv.config();
 
@@ -43,12 +44,14 @@ process.on('uncaughtException', (error) => {
 const app = express();
 const entrypoint = process.argv[1] ?? 'unknown';
 const runtimeMode = entrypoint.includes('/dist/') ? 'compiled-js' : 'typescript-source';
+const schemaGuardVersion = 'attach-schema-guard-v1';
 const bootFingerprint = {
   startedAt: new Date().toISOString(),
   node: process.version,
   pid: process.pid,
   entrypoint,
   runtimeMode,
+  schemaGuardVersion,
   authGuardMode: 'role-hierarchy-v1',
   operatorRouteGuard: "requireAuth('viewer')",
 };
@@ -73,7 +76,14 @@ app.use(cors({
 }));
 
 app.get('/ping', (_req, res) => {
-  res.json({ ok: true });
+  res.json({
+    ok: true,
+    runtimeMode,
+    schemaGuardVersion,
+    entrypoint,
+    startedAt: bootFingerprint.startedAt,
+    pid: process.pid,
+  });
 });
 
 app.use(express.json());
@@ -93,13 +103,38 @@ app.use('/admin', adminRoutes);
 
 const PORT = Number(process.env.PORT) || 3000;
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
-  console.info('[BACKEND_BOOT_OK]', {
-    port: PORT,
-    runtimeMode,
-    entrypoint,
+async function assertAttachLeadSchema() {
+  const { error } = await supabase
+    .from('leads')
+    .select('id,email_eligibility,permanently_failed,is_used')
+    .limit(1);
+
+  if (!error) return;
+
+  const message = String(error?.message ?? '');
+  const code = String(error?.code ?? '');
+  throw new Error(
+    `Attach schema guard failed: leads table missing required columns (id,email_eligibility,permanently_failed,is_used). code=${code} message=${message}`
+  );
+}
+
+async function boot() {
+  await assertAttachLeadSchema();
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on port ${PORT}`);
+    console.info('[BACKEND_BOOT_OK]', {
+      port: PORT,
+      runtimeMode,
+      entrypoint,
+      schemaGuardVersion,
+    });
   });
+}
+
+void boot().catch((error) => {
+  console.error('[BACKEND_BOOT_FATAL]', error);
+  process.exit(1);
 });
 
 try {

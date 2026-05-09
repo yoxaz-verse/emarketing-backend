@@ -3,6 +3,7 @@ import { requireAuth } from '../middleware/requireAuth';
 import {
   attachLeadsToCampaign,
   detachLeadsFromCampaign,
+  syncCampaignInboxes,
   startCampaign,
   pauseCampaign
 } from '../services/campaign.domain';
@@ -13,6 +14,8 @@ const router = Router();
 
 import express from 'express';
 import { supabase } from '../supabase';
+
+console.log('[ATTACH_FIX_V2] campaign routes loaded (attach uses permanently_failed, not is_blocked)');
 
 router.post('/:id/leads/attach', async (req, res) => {
   try {
@@ -126,6 +129,39 @@ router.post('/:id/leads/detach/', async (req, res) => {
     console.error('[DETACH LEADS ERROR]', err);
     return res.status(500).json({
       error: err.message ?? 'Failed to detach leads',
+    });
+  }
+});
+
+router.post('/:id/inboxes/sync', async (req, res) => {
+  try {
+    const campaignId = req.params.id;
+    const selectedInboxIds = Array.isArray(req.body?.selected_inbox_ids)
+      ? req.body.selected_inbox_ids
+      : null;
+
+    if (!selectedInboxIds) {
+      return res.status(400).json({
+        error: 'selected_inbox_ids must be an array',
+      });
+    }
+
+    const result = await syncCampaignInboxes(campaignId, selectedInboxIds);
+    return res.json({
+      success: true,
+      ...result,
+    });
+  } catch (err: any) {
+    console.error('[SYNC CAMPAIGN INBOXES ERROR]', err);
+    if (err?.code === 'INBOX_LOCK_CONFLICT') {
+      return res.status(409).json({
+        error: err.message ?? 'Inbox lock conflict',
+        code: 'INBOX_LOCK_CONFLICT',
+        conflicts: Array.isArray(err?.details) ? err.details : [],
+      });
+    }
+    return res.status(500).json({
+      error: err.message ?? 'Failed to sync campaign inboxes',
     });
   }
 });

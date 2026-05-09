@@ -55,7 +55,7 @@ export async function attachLeadsToCampaign(
 
   const { data: leadRows, error: leadFetchError } = await supabase
     .from('leads')
-    .select('id, email_eligibility, is_used, is_blocked')
+    .select('id, email_eligibility, permanently_failed')
     .in('id', dedupedLeadIds);
 
   if (leadFetchError) {
@@ -63,13 +63,14 @@ export async function attachLeadsToCampaign(
   }
 
   const allowedStatuses = new Set(['eligible', 'risky']);
-  const leadStateMap = new Map(
+  const leadStateMap = new Map<string, { eligibility: string; isBlocked: boolean }>(
     (leadRows ?? []).map((row: any) => [
       String(row.id),
       {
         eligibility: String(row.email_eligibility ?? '').toLowerCase(),
-        isUsed: row.is_used === true,
-        isBlocked: row.is_blocked === true,
+        isBlocked:
+          String(row.email_eligibility ?? '').toLowerCase() === 'blocked' ||
+          row.permanently_failed === true,
       },
     ])
   );
@@ -84,7 +85,7 @@ export async function attachLeadsToCampaign(
     const state = leadStateMap.get(String(id));
     if (!state) return false;
     if (!allowedStatuses.has(state.eligibility)) return false;
-    if (state.isUsed || state.isBlocked) return false;
+    if (state.isBlocked) return false;
     return true;
   });
   const skippedExisting = requested - newLeadIds.length;
@@ -121,6 +122,16 @@ export async function attachLeadsToCampaign(
 
   if (insertError) {
     throw insertError;
+  }
+
+  if (eligibleLeadIds.length > 0) {
+    const { error: markUsedError } = await supabase
+      .from('leads')
+      .update({ is_used: true })
+      .in('id', eligibleLeadIds);
+    if (markUsedError) {
+      throw markUsedError;
+    }
   }
 
   return {
@@ -190,6 +201,27 @@ export async function detachLeadsFromCampaign(
     throw detachError;
   }
 
+  const { data: stillAttachedRows, error: stillAttachedError } = await supabase
+    .from('campaign_leads')
+    .select('lead_id')
+    .in('lead_id', toDetachIds);
+
+  if (stillAttachedError) {
+    throw stillAttachedError;
+  }
+
+  const stillAttachedSet = new Set((stillAttachedRows ?? []).map((row: any) => String(row.lead_id)));
+  const nowUnusedLeadIds = toDetachIds.filter((id) => !stillAttachedSet.has(String(id)));
+  if (nowUnusedLeadIds.length > 0) {
+    const { error: markUnusedError } = await supabase
+      .from('leads')
+      .update({ is_used: false })
+      .in('id', nowUnusedLeadIds);
+    if (markUnusedError) {
+      throw markUnusedError;
+    }
+  }
+
   return {
     requested,
     inserted: 0,
@@ -197,6 +229,122 @@ export async function detachLeadsFromCampaign(
     skipped_existing: 0,
     skipped_ineligible: 0,
     skipped_missing: skippedMissing,
+  };
+}
+
+export async function syncCampaignInboxes(
+  campaignId: string,
+  selectedInboxIds: string[]
+) {
+  if (!campaignId) {
+    throw new Error('campaignId is required');
+  }
+
+  if (!Array.isArray(selectedInboxIds)) {
+    throw new Error('selected_inbox_ids must be an array');
+  }
+
+  const dedupedSelectedInboxIds = Array.from(
+    new Set(selectedInboxIds.map((id) => String(id)).filter(Boolean))
+  );
+
+  const { data: existingRows, error: existingError } = await supabase
+    .from('campaign_inboxes')
+    .select('id, inbox_id')
+    .eq('campaign_id', campaignId);
+
+  if (existingError) {
+    throw existingError;
+  }
+
+  const existingInboxIds = new Set(
+    (existingRows ?? []).map((row: any) => String(row.inbox_id))
+  );
+  const selectedSet = new Set(dedupedSelectedInboxIds);
+
+  const toAttach = dedupedSelectedInboxIds.filter((id) => !existingInboxIds.has(id));
+  const toDetachRows = (existingRows ?? []).filter(
+    (row: any) => !selectedSet.has(String(row.inbox_id))
+  );
+  const unchanged = dedupedSelectedInboxIds.length - toAttach.length;
+
+  if (toAttach.length > 0) {
+    const unlockedStatuses = new Set(['paused', 'completed', 'ended', 'cancelled', 'canceled']);
+    const { data: lockRows, error: lockError } = await supabase
+      .from('campaign_inboxes')
+      .select(`
+        inbox_id,
+        campaign_id,
+        campaigns!inner (
+          id,
+          name,
+          status
+        ),
+        inboxes (
+          id,
+          email_address
+        )
+      `)
+      .in('inbox_id', toAttach)
+      .neq('campaign_id', campaignId);
+
+    if (lockError) {
+      throw lockError;
+    }
+
+    const conflicts = (lockRows ?? [])
+      .map((row: any) => {
+        const status = String(row?.campaigns?.status ?? '').toLowerCase();
+        if (unlockedStatuses.has(status)) return null;
+        return {
+          inbox_id: String(row?.inbox_id ?? ''),
+          email_address: String(row?.inboxes?.email_address ?? ''),
+          blocking_campaign_id: String(row?.campaigns?.id ?? ''),
+          blocking_campaign_name: String(row?.campaigns?.name ?? ''),
+          blocking_status: String(row?.campaigns?.status ?? ''),
+        };
+      })
+      .filter(Boolean);
+
+    if (conflicts.length > 0) {
+      const error = new Error('Some inboxes are locked by other active campaigns');
+      (error as any).code = 'INBOX_LOCK_CONFLICT';
+      (error as any).details = conflicts;
+      throw error;
+    }
+  }
+
+  if (toAttach.length > 0) {
+    const insertPayload = toAttach.map((inboxId) => ({
+      campaign_id: campaignId,
+      inbox_id: inboxId,
+    }));
+    const { error: attachError } = await supabase
+      .from('campaign_inboxes')
+      .insert(insertPayload);
+    if (attachError) {
+      throw attachError;
+    }
+  }
+
+  if (toDetachRows.length > 0) {
+    const detachIds = toDetachRows.map((row: any) => String(row.id));
+    const { error: detachError } = await supabase
+      .from('campaign_inboxes')
+      .delete()
+      .in('id', detachIds);
+    if (detachError) {
+      throw detachError;
+    }
+  }
+
+  return {
+    campaign_id: campaignId,
+    selected: dedupedSelectedInboxIds.length,
+    attached: toAttach.length,
+    detached: toDetachRows.length,
+    unchanged,
+    errors: [] as string[],
   };
 }
 

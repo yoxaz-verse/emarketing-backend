@@ -11,6 +11,7 @@ export type SendingLimitsConfig = {
   min_domain_health_score: number;
   warmup_advance_min_health_score: number;
   warmup_advance_max_consecutive_failures: number;
+  risky_daily_percent_limit: number;
   warmup_steps: WarmupStep[];
   updated_at?: string;
 };
@@ -20,6 +21,7 @@ const DEFAULT_CONFIG: SendingLimitsConfig = {
   min_domain_health_score: 60,
   warmup_advance_min_health_score: 70,
   warmup_advance_max_consecutive_failures: 2,
+  risky_daily_percent_limit: 20,
   warmup_steps: [
     { day: 1, daily_limit: 20, hourly_limit: 5 },
     { day: 2, daily_limit: 30, hourly_limit: 8 },
@@ -69,6 +71,10 @@ function sanitizeConfig(raw: any): SendingLimitsConfig {
       Number.isFinite(Number(raw?.warmup_advance_max_consecutive_failures))
         ? Number(raw.warmup_advance_max_consecutive_failures)
         : DEFAULT_CONFIG.warmup_advance_max_consecutive_failures,
+    risky_daily_percent_limit:
+      Number.isFinite(Number(raw?.risky_daily_percent_limit))
+        ? Number(raw.risky_daily_percent_limit)
+        : DEFAULT_CONFIG.risky_daily_percent_limit,
     warmup_steps: sanitizeSteps(raw?.warmup_steps),
     updated_at: raw?.updated_at,
   };
@@ -80,12 +86,16 @@ function validateConfig(payload: SendingLimitsConfig) {
     'min_domain_health_score',
     'warmup_advance_min_health_score',
     'warmup_advance_max_consecutive_failures',
+    'risky_daily_percent_limit',
   ] as const;
 
   for (const key of numericKeys) {
     const value = Number(payload[key]);
     if (!Number.isFinite(value)) throw new Error(`${key} must be a number`);
     if (key.includes('health_score') && (value < 0 || value > 100)) {
+      throw new Error(`${key} must be between 0 and 100`);
+    }
+    if (key === 'risky_daily_percent_limit' && (value < 0 || value > 100)) {
       throw new Error(`${key} must be between 0 and 100`);
     }
     if (key === 'warmup_advance_max_consecutive_failures' && value < 0) {
@@ -146,6 +156,7 @@ export async function updateSendingLimitsConfig(
     min_domain_health_score: Number(payload.min_domain_health_score),
     warmup_advance_min_health_score: Number(payload.warmup_advance_min_health_score),
     warmup_advance_max_consecutive_failures: Number(payload.warmup_advance_max_consecutive_failures),
+    risky_daily_percent_limit: Number(payload.risky_daily_percent_limit),
     warmup_steps: sanitizeSteps(payload.warmup_steps),
   };
 
