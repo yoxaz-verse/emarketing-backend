@@ -15,6 +15,7 @@ import campaignInboxRoutes from './routes/campaign.inboxes.routes';
 import validationRoutes from './routes/validation.routes';
 import executionRoutes from './routes/execution.routes';
 import leadFoldersRoutes from './routes/lead.folders.routes';
+import webhookRoutes from './routes/webhook.routes';
 import { startSequenceRunner } from './worker/sequenceRunner';
 import { supabase } from './supabase';
 
@@ -100,6 +101,7 @@ app.use('/agents', agentsRoutes);
 app.use('/reply', replyRoutes);
 app.use('/stats', statsRoutes);
 app.use('/admin', adminRoutes);
+app.use('/', webhookRoutes);
 
 const PORT = Number(process.env.PORT) || 3000;
 
@@ -118,8 +120,40 @@ async function assertAttachLeadSchema() {
   );
 }
 
+async function checkSendingLimitsScheduleSchema() {
+  const { error } = await supabase
+    .from('sending_limits_config')
+    .select('schedule_enabled,schedule_timezone,allowed_weekdays,send_window_start,send_window_end')
+    .limit(1);
+
+  if (!error) {
+    console.info('[SENDING_LIMITS_SCHEMA_CHECK_OK]', {
+      table: 'sending_limits_config',
+      requiredScheduleColumns: true,
+    });
+    return;
+  }
+
+  const message = String(error?.message ?? '');
+  const code = String(error?.code ?? '');
+  if (
+    message.toLowerCase().includes('column') ||
+    message.toLowerCase().includes('does not exist')
+  ) {
+    console.error('[SENDING_LIMITS_SCHEMA_CHECK_FAILED]', {
+      code,
+      message,
+      fix: 'Apply migration 20260511_add_send_schedule_to_sending_limits_config.sql and restart backend.',
+    });
+    return;
+  }
+
+  console.warn('[SENDING_LIMITS_SCHEMA_CHECK_WARN]', { code, message });
+}
+
 async function boot() {
   await assertAttachLeadSchema();
+  await checkSendingLimitsScheduleSchema();
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);

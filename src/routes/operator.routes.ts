@@ -7,7 +7,7 @@ import {
   resumeCampaign
 } from '../services/operatorService.js';
 import { getCampaignStats } from '../services/operatorReadService.js';
-import { getOperatorReplies } from '../services/operatorRepliesService.js';
+import { getOperatorReplies, reviewLeadInterest } from '../services/operatorRepliesService.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 import { getEffectiveOperatorId } from '../utils/getEffectiveOperatorId.js';
 
@@ -117,6 +117,32 @@ router.get('/replies', async (req, res) => {
   const operatorId = getEffectiveOperatorId(req);
   const replies = await getOperatorReplies(operatorId);
   res.json(replies);
+});
+
+router.patch('/replies/:leadId/review', async (req, res) => {
+  try {
+    const leadId = String(req.params.leadId ?? '');
+    const interestStatus = String(req.body?.interest_status ?? '').toLowerCase();
+    const interestNote = req.body?.interest_note ? String(req.body.interest_note) : null;
+
+    if (!leadId) {
+      return res.status(400).json({ error: 'leadId is required' });
+    }
+    if (!['unreviewed', 'interested', 'not_interested'].includes(interestStatus)) {
+      return res.status(400).json({ error: 'interest_status must be unreviewed | interested | not_interested' });
+    }
+
+    const reviewedBy = String((req as any)?.auth?.user_id ?? (req as any)?.auth?.operator_id ?? '');
+    const result = await reviewLeadInterest({
+      leadId,
+      interest_status: interestStatus as 'unreviewed' | 'interested' | 'not_interested',
+      interest_note: interestNote,
+      reviewed_by: reviewedBy || null,
+    });
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(400).json({ error: err?.message ?? 'Failed to review reply interest' });
+  }
 });
 
 export default router;

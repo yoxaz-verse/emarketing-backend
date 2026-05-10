@@ -1,6 +1,6 @@
 
 import { Router } from 'express';
-import { handleReply } from '../services/replyIngestService';
+import { ingestInboundReply } from '../services/replyIngestService.js';
 
 const router = Router();
 
@@ -8,8 +8,15 @@ const router = Router();
 
 // Campaign Step 15
 router.post('/', async (req, res) => {
-    await handleReply(req.body);
-    res.json({ success: true });
+    const result = await ingestInboundReply({
+      from_email: req.body?.from_email ?? req.body?.from,
+      message: req.body?.message,
+      inbox_email: req.body?.inbox_email,
+      message_id: req.body?.message_id,
+      received_at: req.body?.received_at,
+      leadId: req.body?.leadId,
+    });
+    res.json(result);
   });
   
 

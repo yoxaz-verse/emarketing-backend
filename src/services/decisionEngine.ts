@@ -2,6 +2,7 @@ import { supabase } from '../supabase';
 import {
   getSendingLimitsConfig,
   resolveInboxEffectiveLimits,
+  isNowWithinSendingSchedule,
 } from './sendingLimitsConfig.service';
 
 /**
@@ -14,6 +15,10 @@ import {
  */
 export async function getNextSend() {
   const sendingLimits = await getSendingLimitsConfig();
+  const scheduleGate = isNowWithinSendingSchedule(sendingLimits);
+  if (!scheduleGate.allowed) {
+    return null;
+  }
   /**
    * 1. Pick one active inbox
    * (simple strategy for now; rotation can come later)

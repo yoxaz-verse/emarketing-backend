@@ -2,15 +2,25 @@ import { supabase } from '../supabase';
 import { decryptSecret } from '../utils/sendEncryption';
 import { updateRow } from './crudService';
 import { createSmtpTransport } from './email/smtpTransport';
-import { getSendingLimitsConfig, resolveInboxEffectiveLimits } from './sendingLimitsConfig.service';
+import {
+  getSendingLimitsConfig,
+  resolveInboxEffectiveLimits,
+  isNowWithinSendingSchedule,
+} from './sendingLimitsConfig.service';
 
 
   
   
-  export async function getNextCampaignExecutions(
+export async function getNextCampaignExecutions(
     campaignId: string,
     batchSize: number
   ) {
+    const config = await getSendingLimitsConfig();
+    const scheduleGate = isNowWithinSendingSchedule(config);
+    if (!scheduleGate.allowed) {
+      return [];
+    }
+
     console.log("getNextCampaignExecutions");
     
     const { data, error } = await supabase.rpc(
@@ -35,8 +45,17 @@ import { getSendingLimitsConfig, resolveInboxEffectiveLimits } from './sendingLi
    * Send campaign email for ONE campaign_lead
    * Idempotent-safe, deterministic, RLS-safe
    */
-  export async function sendCampaignEmail(campaignLeadId: string) {
-    /* -------------------------------------------------------
+export async function sendCampaignEmail(campaignLeadId: string) {
+  const config = await getSendingLimitsConfig();
+  const scheduleGate = isNowWithinSendingSchedule(config);
+  if (!scheduleGate.allowed) {
+    return {
+      skipped: true,
+      reason: scheduleGate.reason ?? 'schedule_not_allowed',
+    };
+  }
+
+  /* -------------------------------------------------------
        1️⃣ Load campaign_lead (EXECUTION STATE ONLY)
     ------------------------------------------------------- */
     const { data: campaignLead, error: leadError } = await supabase
@@ -91,7 +110,6 @@ import { getSendingLimitsConfig, resolveInboxEffectiveLimits } from './sendingLi
 
     const leadEligibility = String(campaignLead?.leads?.email_eligibility ?? '').toLowerCase();
     if (leadEligibility === 'risky') {
-      const config = await getSendingLimitsConfig();
       const { dailyLimit } = resolveInboxEffectiveLimits(inbox as any, config);
       const riskyPercent = Math.max(0, Math.min(100, Number(config.risky_daily_percent_limit ?? 20)));
       const allowedRiskyPerDay = Math.max(0, Math.floor((dailyLimit * riskyPercent) / 100));

@@ -17,6 +17,14 @@ import { supabase } from '../supabase';
 
 console.log('[ATTACH_FIX_V2] campaign routes loaded (attach uses permanently_failed, not is_blocked)');
 
+function resolveStatusCode(err: any) {
+  const statusCode = Number(err?.statusCode ?? err?.status ?? 0);
+  if (Number.isInteger(statusCode) && statusCode >= 400 && statusCode < 500) {
+    return statusCode;
+  }
+  return 500;
+}
+
 router.post('/:id/leads/attach', async (req, res) => {
   try {
     const campaignId = req.params.id;
@@ -39,7 +47,7 @@ router.post('/:id/leads/attach', async (req, res) => {
     });
   } catch (err: any) {
     console.error('[ATTACH LEADS ERROR]', err);
-    res.status(500).json({
+    res.status(resolveStatusCode(err)).json({
       error: err.message ?? 'Failed to attach leads',
     });
   }
@@ -80,7 +88,7 @@ router.post('/:id/leads/attach-folder', async (req, res) => {
     });
   } catch (err: any) {
     console.error('[ATTACH FOLDER LEADS ERROR]', err);
-    return res.status(500).json({ error: err.message ?? 'Failed to attach folder leads' });
+    return res.status(resolveStatusCode(err)).json({ error: err.message ?? 'Failed to attach folder leads' });
   }
 });
 
@@ -102,7 +110,7 @@ router.post('/:id/leads/detach', async (req, res) => {
     });
   } catch (err: any) {
     console.error('[DETACH LEADS ERROR]', err);
-    return res.status(500).json({
+    return res.status(resolveStatusCode(err)).json({
       error: err.message ?? 'Failed to detach leads',
     });
   }
@@ -127,7 +135,7 @@ router.post('/:id/leads/detach/', async (req, res) => {
     });
   } catch (err: any) {
     console.error('[DETACH LEADS ERROR]', err);
-    return res.status(500).json({
+    return res.status(resolveStatusCode(err)).json({
       error: err.message ?? 'Failed to detach leads',
     });
   }

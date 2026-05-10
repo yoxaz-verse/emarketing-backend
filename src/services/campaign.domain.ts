@@ -1,6 +1,26 @@
 import { supabase } from "../supabase";
 import { updateRow } from "./crudService";
 
+function createHttpError(message: string, statusCode: number) {
+  const error = new Error(message) as Error & { statusCode?: number };
+  error.statusCode = statusCode;
+  return error;
+}
+
+async function assertCampaignIsDraftForLeadMutation(campaignId: string) {
+  const { data: campaign, error } = await supabase
+    .from('campaigns')
+    .select('id,status')
+    .eq('id', campaignId)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!campaign) throw createHttpError('Campaign not found.', 404);
+  if (String(campaign.status ?? '').toLowerCase() !== 'draft') {
+    throw createHttpError('Campaign leads can only be modified while campaign is draft.', 409);
+  }
+}
+
 /**
  * Attach leads to a campaign
  * NOTE: Direct supabase usage is acceptable here for now
@@ -35,6 +55,8 @@ export async function attachLeadsToCampaign(
       skipped_missing: 0,
     };
   }
+  await assertCampaignIsDraftForLeadMutation(campaignId);
+
   const dedupedLeadIds = Array.from(new Set(leadIds.map((id) => String(id))));
   const requested = dedupedLeadIds.length;
 
@@ -162,6 +184,7 @@ export async function detachLeadsFromCampaign(
       skipped_missing: 0,
     };
   }
+  await assertCampaignIsDraftForLeadMutation(campaignId);
 
   const dedupedLeadIds = Array.from(new Set(leadIds.map((id) => String(id))));
   const requested = dedupedLeadIds.length;

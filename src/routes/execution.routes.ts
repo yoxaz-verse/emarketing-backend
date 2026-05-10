@@ -12,7 +12,7 @@ import {
   requeueRiskyPausedLeads,
 } from '../services/execution.service';
 import { supabase } from '../supabase';
-import { handleReply } from '../services/replyIngestService';
+import { ingestInboundReply } from '../services/replyIngestService.js';
 import { initiateCampaignVoiceCall } from '../services/voice/voiceExecution.service';
 
 const router = Router();
@@ -145,8 +145,15 @@ router.post('/bounce', async (req, res) => {
 
 // Campaign Step 12 - Bounces 
 router.post('/reply', async (req, res) => {
-  await handleReply(req.body);
-  res.json({ success: true });
+  const result = await ingestInboundReply({
+    from_email: req.body?.from_email ?? req.body?.from,
+    message: req.body?.message,
+    inbox_email: req.body?.inbox_email,
+    message_id: req.body?.message_id,
+    received_at: req.body?.received_at,
+    leadId: req.body?.leadId,
+  });
+  res.json(result);
 });
 
 // Campaign Phase 13 - Voice Call Initiation
