@@ -1,5 +1,3 @@
-import { supabase } from '../../supabase';
-
 /**
  * Campaign lifecycle hook
  *
@@ -12,6 +10,8 @@ export async function handleCampaignBeforeWrite(
   payload: Record<string, any>,
   mode: 'create' | 'update'
 ) {
+  const nowIso = new Date().toISOString();
+
   // ------------------------
   // CREATE
   // ------------------------
@@ -28,6 +28,8 @@ export async function handleCampaignBeforeWrite(
     if (!payload.status) {
       payload.status = 'draft';
     }
+
+    payload.updated_at = nowIso;
 
     return payload;
   }
@@ -50,6 +52,7 @@ export async function handleCampaignBeforeWrite(
      * - metadata changes
      * - status updates triggered by domain actions
      */
+    payload.updated_at = nowIso;
     return payload;
   }
 

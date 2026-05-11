@@ -8,6 +8,52 @@ import {
   isNowWithinSendingSchedule,
 } from './sendingLimitsConfig.service';
 
+const RUNNER_WINDOW_TIMEZONE = 'Asia/Kolkata';
+const RUNNER_WINDOW_START_HOUR = 9;
+const RUNNER_WINDOW_END_HOUR = 18;
+
+function isWithinRunnerWindow(now: Date = new Date()): boolean {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: RUNNER_WINDOW_TIMEZONE,
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+  }).formatToParts(now);
+
+  const hourPart = parts.find((part) => part.type === 'hour')?.value ?? '00';
+  const minutePart = parts.find((part) => part.type === 'minute')?.value ?? '00';
+  const totalMinutes = (Number(hourPart) * 60) + Number(minutePart);
+
+  return totalMinutes >= RUNNER_WINDOW_START_HOUR * 60
+    && totalMinutes < RUNNER_WINDOW_END_HOUR * 60;
+}
+
+export async function getCampaignExecutionWakeState(lastSeenVersion?: string | null) {
+  const { data, error } = await supabase
+    .from('campaigns')
+    .select('updated_at')
+    .not('updated_at', 'is', null)
+    .order('updated_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  const version = String(data?.updated_at ?? '0');
+  const normalizedLastSeen = String(lastSeenVersion ?? '').trim();
+
+  return {
+    version,
+    changed_since: normalizedLastSeen.length === 0 ? true : version !== normalizedLastSeen,
+    within_window: isWithinRunnerWindow(),
+    timezone: RUNNER_WINDOW_TIMEZONE,
+    window_start: '09:00',
+    window_end: '18:00',
+  };
+}
+
 
   
   

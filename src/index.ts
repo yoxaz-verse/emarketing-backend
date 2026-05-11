@@ -16,6 +16,10 @@ import validationRoutes from './routes/validation.routes';
 import executionRoutes from './routes/execution.routes';
 import leadFoldersRoutes from './routes/lead.folders.routes';
 import webhookRoutes from './routes/webhook.routes';
+import newsletterRoutes from './routes/newsletter.routes';
+import marketplacesRoutes from './routes/marketplaces.routes';
+import socialRoutes from './routes/social.routes';
+import blogsRoutes from './routes/blogs.routes';
 import { startSequenceRunner } from './worker/sequenceRunner';
 import { supabase } from './supabase';
 
@@ -101,6 +105,10 @@ app.use('/agents', agentsRoutes);
 app.use('/reply', replyRoutes);
 app.use('/stats', statsRoutes);
 app.use('/admin', adminRoutes);
+app.use('/newsletter', newsletterRoutes);
+app.use('/marketplaces', marketplacesRoutes);
+app.use('/social', socialRoutes);
+app.use('/blogs', blogsRoutes);
 app.use('/', webhookRoutes);
 
 const PORT = Number(process.env.PORT) || 3000;

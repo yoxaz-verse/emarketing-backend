@@ -10,6 +10,7 @@ import {
   resetInboxCounters,
   markCampaignLeadFailed,
   requeueRiskyPausedLeads,
+  getCampaignExecutionWakeState,
 } from '../services/execution.service';
 import { supabase } from '../supabase';
 import { ingestInboundReply } from '../services/replyIngestService.js';
@@ -132,6 +133,19 @@ router.post('/system/requeue-risky-paused', async (_req, res) => {
   } catch (err: any) {
     console.error('[REQUEUE RISKY PAUSED ERROR]', err);
     res.status(400).json({ error: err.message ?? 'Failed to requeue risky paused leads' });
+  }
+});
+
+router.get('/system/wake-check', async (req, res) => {
+  try {
+    const lastSeenVersion = typeof req.query.last_seen_version === 'string'
+      ? req.query.last_seen_version
+      : undefined;
+    const wake = await getCampaignExecutionWakeState(lastSeenVersion);
+    res.json(wake);
+  } catch (err: any) {
+    console.error('[WAKE CHECK ERROR]', err);
+    res.status(400).json({ error: err.message ?? 'Failed to read wake-check state' });
   }
 });
 

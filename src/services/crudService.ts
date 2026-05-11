@@ -201,7 +201,15 @@ export async function listRows(
   let query = applyFilters(supabase.from(table).select(select));
 
   let { data, error } = await query;
-  if (error && (error.code === 'PGRST205' || error.message?.includes('Could not find the table'))) {
+  if (
+    error &&
+    (
+      error.code === 'PGRST205' ||
+      error.code === '42P01' ||
+      error.message?.includes('Could not find the table') ||
+      error.message?.toLowerCase().includes('does not exist')
+    )
+  ) {
     console.warn(`[CRUD LIST WARNING] Table ${table} missing in schema. Return [].`);
     return [];
   }
