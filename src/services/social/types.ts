@@ -1,7 +1,10 @@
 export type SocialPlatformCode = 'meta' | 'linkedin' | 'reddit' | 'telegram' | 'whatsapp';
 
-export type SocialConnectorStatus = 'manual_assisted';
-export type SocialAuthType = 'none';
+export type SocialConnectorStatus = 'manual_assisted' | 'api_enabled';
+export type SocialAuthType = 'none' | 'oauth2';
+
+export type SocialConnectionStatus = 'connected' | 'expired' | 'missing_scope' | 'disconnected';
+export type PublishCapability = 'text_link' | 'image' | 'multi_media';
 
 export type SocialConnectorCapability = {
   code: SocialPlatformCode;
@@ -30,7 +33,15 @@ export type CreateSocialPublishRequestInput = {
   post_input: SocialPostInput;
 };
 
-export type SocialJobPhase = 'DRAFT_CREATE' | 'VALIDATE' | 'APPROVAL_PENDING' | 'PUBLISH';
+export type SocialJobPhase =
+  | 'DRAFT_CREATE'
+  | 'VALIDATE'
+  | 'APPROVAL_PENDING'
+  | 'AUTH_CHECK'
+  | 'PAYLOAD_BUILD'
+  | 'API_SUBMIT'
+  | 'API_CONFIRMED'
+  | 'PUBLISH';
 
 export type SocialJobStatus =
   | 'draft_created'

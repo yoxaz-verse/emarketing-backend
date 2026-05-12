@@ -9,7 +9,14 @@ import {
   SocialPlatformCode,
   SocialPostInput,
 } from './types';
-import { executeSocialPublish, validateSocialPostInput } from './connectors';
+import {
+  manualFallback,
+  normalizeProviderError,
+  publishedResult,
+  validateSocialPostInput,
+} from './connectors';
+import { publishLinkedInTextLink } from './linkedin.client';
+import { getOperatorPlatformConnection, markConnectionFailure } from './socialAuth.service';
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -33,7 +40,7 @@ function fallbackIdempotencyKey(input: CreateSocialPublishRequestInput, userId?:
   return `social-auto-${digest}`;
 }
 
-export async function listSocialConnectors() {
+export async function listSocialConnectors(userId?: string | null, operatorId?: string | null) {
   const { data, error } = await supabase
     .from('social_connectors')
     .select('*')
@@ -44,7 +51,34 @@ export async function listSocialConnectors() {
     throw error;
   }
 
-  return data ?? [];
+  const rows = (data ?? []) as SocialConnectorCapability[];
+  if (!userId || !operatorId) return rows;
+
+  const statuses = await Promise.all(
+    rows.map(async (row) => {
+      const conn = await getOperatorPlatformConnection(row.code, userId, operatorId);
+      return {
+        code: row.code,
+        connected: Boolean(conn),
+      };
+    })
+  );
+
+  const statusByCode = new Map(statuses.map((s) => [s.code, s.connected]));
+
+  return rows.map((row) => {
+    if (row.code !== 'linkedin') return row;
+    return {
+      ...row,
+      credentials_active: Boolean(statusByCode.get(row.code)),
+      auth_type: 'oauth2',
+      status: statusByCode.get(row.code) ? 'api_enabled' : 'manual_assisted',
+      metadata: {
+        ...(row.metadata ?? {}),
+        capabilities: ['text_link'],
+      },
+    } as SocialConnectorCapability;
+  });
 }
 
 async function getConnectorsByCodes(codes: string[]): Promise<Map<string, SocialConnectorCapability>> {
@@ -122,7 +156,72 @@ async function patchJob(id: string, patch: Record<string, unknown>) {
   return data;
 }
 
-async function executeFlow(job: any, connector: SocialConnectorCapability, input: SocialPostInput) {
+async function executeLinkedInApiFlow(job: any, connector: SocialConnectorCapability, input: SocialPostInput, userId?: string | null, operatorId?: string | null) {
+  const timeline = Array.isArray(job.timeline) ? [...job.timeline] : [];
+  timeline.push(makeEvent('AUTH_CHECK', 'approval_pending', 'Checking LinkedIn OAuth credentials'));
+
+  const conn = await getOperatorPlatformConnection('linkedin', userId, operatorId);
+  if (!conn) {
+    timeline.push(makeEvent('PUBLISH', 'manual_action_required', 'LinkedIn not connected, manual fallback generated'));
+    const fallback = manualFallback(connector, input);
+    return patchJob(job.id, {
+      status: 'manual_action_required',
+      phase: 'PUBLISH',
+      manual_task: fallback.manual_task ?? null,
+      timeline,
+    });
+  }
+
+  try {
+    timeline.push(makeEvent('PAYLOAD_BUILD', 'approval_pending', 'LinkedIn payload prepared (text + link)'));
+    timeline.push(makeEvent('API_SUBMIT', 'approval_pending', 'Submitting post to LinkedIn API'));
+
+    const result = await publishLinkedInTextLink(conn as any, {
+      content: input.content,
+      cta_url: input.cta_url,
+    });
+
+    timeline.push(makeEvent('API_CONFIRMED', 'published', 'LinkedIn API confirmed post creation'));
+    const published = publishedResult(result);
+    return patchJob(job.id, {
+      status: 'published',
+      phase: 'PUBLISH',
+      external_post_id: published.external_post_id ?? null,
+      external_post_url: published.external_post_url ?? null,
+      timeline,
+      error_code: null,
+      error_message: null,
+    });
+  } catch (err: unknown) {
+    const norm = normalizeProviderError(err);
+    timeline.push(makeEvent('PUBLISH', 'failed', norm.message, norm.code));
+    await markConnectionFailure('linkedin', userId, operatorId, norm.message);
+
+    if (norm.retryable) {
+      return patchJob(job.id, {
+        status: 'failed',
+        phase: 'PUBLISH',
+        error_code: norm.code,
+        error_message: norm.message,
+        provider_error_code: norm.code,
+        provider_error_message: norm.message,
+        timeline,
+      });
+    }
+
+    return patchJob(job.id, {
+      status: 'failed',
+      phase: 'PUBLISH',
+      error_code: norm.code,
+      error_message: norm.message,
+      provider_error_code: norm.code,
+      provider_error_message: norm.message,
+      timeline,
+    });
+  }
+}
+
+async function executeFlow(job: any, connector: SocialConnectorCapability, input: SocialPostInput, userId?: string | null, operatorId?: string | null) {
   const timeline = Array.isArray(job.timeline) ? [...job.timeline] : [];
   const validationErrors = validateSocialPostInput(input);
 
@@ -142,24 +241,16 @@ async function executeFlow(job: any, connector: SocialConnectorCapability, input
   timeline.push(makeEvent('VALIDATE', 'validated', 'Post validated successfully'));
   timeline.push(makeEvent('APPROVAL_PENDING', 'approval_pending', 'Post prepared and waiting for approval'));
 
-  const execution = executeSocialPublish(connector, input);
-
-  if (execution.status === 'manual_action_required') {
-    timeline.push(makeEvent('PUBLISH', 'manual_action_required', 'Manual-assisted publish task generated'));
-    return patchJob(job.id, {
-      status: 'manual_action_required',
-      phase: 'PUBLISH',
-      manual_task: execution.manual_task ?? null,
-      timeline,
-    });
+  if (connector.code === 'linkedin') {
+    return executeLinkedInApiFlow(job, connector, input, userId, operatorId);
   }
 
-  timeline.push(makeEvent('PUBLISH', 'published', 'Published successfully'));
+  const fallback = manualFallback(connector, input);
+  timeline.push(makeEvent('PUBLISH', 'manual_action_required', 'Manual-assisted publish task generated'));
   return patchJob(job.id, {
-    status: 'published',
+    status: 'manual_action_required',
     phase: 'PUBLISH',
-    external_post_id: execution.external_post_id ?? null,
-    external_post_url: execution.external_post_url ?? null,
+    manual_task: fallback.manual_task ?? null,
     timeline,
   });
 }
@@ -192,7 +283,7 @@ export async function createSocialPublishJobs(input: CreateSocialPublishRequestI
   for (const target of targets) {
     const connector = connectorMap.get(target)!;
     const created = await createJob(request.id, connector, input.post_input, userId);
-    const executed = await executeFlow(created, connector, input.post_input);
+    const executed = await executeFlow(created, connector, input.post_input, userId, operatorId);
     jobs.push(executed);
   }
 
@@ -242,7 +333,15 @@ export async function retrySocialPublishJob(jobId: string) {
     timeline,
     error_code: null,
     error_message: null,
+    provider_error_code: null,
+    provider_error_message: null,
   });
 
-  return executeFlow(patched, connector as SocialConnectorCapability, job.post_input as SocialPostInput);
+  return executeFlow(
+    patched,
+    connector as SocialConnectorCapability,
+    job.post_input as SocialPostInput,
+    job.created_by as string | null,
+    (job as any).operator_id ?? null
+  );
 }

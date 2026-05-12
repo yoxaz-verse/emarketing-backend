@@ -10,20 +10,37 @@ type JwtPayload = {
   operator_id?: string | null;
 };
 
+function extractCookieToken(cookieHeader?: string): string {
+  if (!cookieHeader) return '';
+  const cookieMap = Object.fromEntries(
+    cookieHeader
+      .split(';')
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .map((entry) => {
+        const [key, ...rest] = entry.split('=');
+        return [key, rest.join('=')];
+      })
+  );
+  return String(cookieMap.auth_token ?? '').trim();
+}
+
 export function requireAuth(
   minimumRole?: Role,
   requireOperator: boolean = false
 ) {
   return async (req: Request, res: Response, next: NextFunction) => {
     try {
-      console.log("Inside Required Token");
-      
+      console.log('[AUTH_REQUIRE] Start');
+
       const authHeader = req.headers.authorization;
       const apiKeyHeader = req.headers['x-api-key'];
+      const cookieToken = extractCookieToken(req.headers.cookie);
 
       const hasJwt =
         typeof authHeader === 'string' &&
         authHeader.startsWith('Bearer ');
+      const hasCookieJwt = Boolean(cookieToken);
 
       const hasApiKey = typeof apiKeyHeader === 'string';
 
@@ -31,7 +48,8 @@ export function requireAuth(
          0️⃣ MUTUAL EXCLUSION (IMPORTANT)
          JWT OR API KEY — NEVER BOTH
       ====================================================== */
-      if (hasJwt && hasApiKey) {
+      if ((hasJwt || hasCookieJwt) && hasApiKey) {
+        console.warn('[AUTH_REJECT] Both JWT and API key provided');
         return res.status(400).json({
           error: 'Use either JWT or API key, not both',
         });
@@ -40,13 +58,15 @@ export function requireAuth(
       /* ======================================================
          1️⃣ JWT AUTH (USER CONTEXT)
       ====================================================== */
-      if (hasJwt) {
-        const token = authHeader!.slice(7).trim();
+      if (hasJwt || hasCookieJwt) {
+        const token = hasJwt ? authHeader!.slice(7).trim() : cookieToken;
+        const tokenSource = hasJwt ? 'authorization_header' : 'cookie_auth_token';
       
         let jwtUser: JwtPayload;
         try {
           jwtUser = verifyToken(token) as JwtPayload;
-        } catch {
+        } catch (err) {
+          console.warn('[AUTH_REJECT] Invalid JWT token', { tokenSource, error: (err as Error)?.message ?? 'unknown' });
           return res.status(401).json({ error: 'Invalid token' });
         }
       
@@ -58,6 +78,7 @@ export function requireAuth(
       
         // ✅ USER NOT YET CREATED IN DB — ALLOW
         if (!dbUser) {
+          console.info('[AUTH_ALLOW] JWT user not yet provisioned in users table', { tokenSource, userId: jwtUser.user_id });
           req.auth = {
             type: 'user',
             user_id: jwtUser.user_id,
@@ -68,18 +89,26 @@ export function requireAuth(
         }
       
         if (!dbUser.active) {
+          console.warn('[AUTH_REJECT] Inactive user', { tokenSource, userId: dbUser.id });
           return res.status(401).json({
             error: 'User disabled',
           });
         }
       
         if (minimumRole && !hasPermission(dbUser.role, minimumRole)) {
+          console.warn('[AUTH_REJECT] Insufficient permissions', {
+            tokenSource,
+            userId: dbUser.id,
+            actualRole: dbUser.role,
+            requiredRole: minimumRole,
+          });
           return res.status(403).json({
             error: 'Insufficient permissions',
           });
         }
       
         if (requireOperator && !dbUser.operator_id) {
+          console.warn('[AUTH_REJECT] Operator access required', { tokenSource, userId: dbUser.id });
           return res.status(403).json({
             error: 'Operator access required',
           });
@@ -91,7 +120,8 @@ export function requireAuth(
           role: dbUser.role,
           operator_id: dbUser.operator_id ?? null,
         };
-      
+
+        console.info('[AUTH_ALLOW] JWT auth accepted', { tokenSource, userId: dbUser.id, role: dbUser.role });
         return next();
       }
       
@@ -111,6 +141,7 @@ export function requireAuth(
           .single();
 
         if (error || !key || !key.active) {
+          console.warn('[AUTH_REJECT] Invalid or inactive API key');
           return res.status(403).json({
             error: 'Invalid or inactive API key',
           });
@@ -120,6 +151,10 @@ export function requireAuth(
            7️⃣ ROLE PERMISSION CHECK (API KEY)
         ====================================================== */
         if (minimumRole && !hasPermission(key.role as Role, minimumRole)) {
+          console.warn('[AUTH_REJECT] API key insufficient permissions', {
+            actualRole: key.role,
+            requiredRole: minimumRole,
+          });
           return res.status(403).json({
             error: 'Insufficient permissions',
             required: minimumRole,
@@ -131,6 +166,7 @@ export function requireAuth(
            8️⃣ OPERATOR CAPABILITY CHECK
         ====================================================== */
         if (requireOperator && !key.operator_id) {
+          console.warn('[AUTH_REJECT] API key missing operator');
           return res.status(403).json({
             error: 'Operator access required',
           });
@@ -155,12 +191,14 @@ export function requireAuth(
           operator_id: key.operator_id,
         };
 
+        console.info('[AUTH_ALLOW] API key accepted', { keyId: key.id, role: key.role });
         return next();
       }
 
       /* ======================================================
          ❌ NO AUTH PROVIDED
       ====================================================== */
+      console.warn('[AUTH_REJECT] No authentication provided');
       return res.status(401).json({
         error: 'Authentication required',
       });
@@ -172,4 +210,3 @@ export function requireAuth(
     }
   };
 }
-

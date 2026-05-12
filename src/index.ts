@@ -19,7 +19,9 @@ import webhookRoutes from './routes/webhook.routes';
 import newsletterRoutes from './routes/newsletter.routes';
 import marketplacesRoutes from './routes/marketplaces.routes';
 import socialRoutes from './routes/social.routes';
+import socialAuthRoutes from './routes/social.auth.routes';
 import blogsRoutes from './routes/blogs.routes';
+import communitiesRoutes from './routes/communities.routes';
 import { startSequenceRunner } from './worker/sequenceRunner';
 import { supabase } from './supabase';
 
@@ -108,7 +110,9 @@ app.use('/admin', adminRoutes);
 app.use('/newsletter', newsletterRoutes);
 app.use('/marketplaces', marketplacesRoutes);
 app.use('/social', socialRoutes);
+app.use('/social', socialAuthRoutes);
 app.use('/blogs', blogsRoutes);
+app.use('/communities', communitiesRoutes);
 app.use('/', webhookRoutes);
 
 const PORT = Number(process.env.PORT) || 3000;

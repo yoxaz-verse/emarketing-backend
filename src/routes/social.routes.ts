@@ -10,9 +10,9 @@ import {
 const router = Router();
 router.use(requireAuth('viewer'));
 
-router.get('/connectors', async (_req, res) => {
+router.get('/connectors', async (req, res) => {
   try {
-    const data = await listSocialConnectors();
+    const data = await listSocialConnectors(req.auth?.user_id, req.auth?.operator_id);
     res.json(data);
   } catch (err: any) {
     console.error('[SOCIAL CONNECTORS ERROR]', err?.message ?? err);
