@@ -66,7 +66,11 @@ export function requireAuth(
         try {
           jwtUser = verifyToken(token) as JwtPayload;
         } catch (err) {
-          console.warn('[AUTH_REJECT] Invalid JWT token', { tokenSource, error: (err as Error)?.message ?? 'unknown' });
+          console.warn('[AUTH_REJECT] Invalid JWT token', {
+            tokenSource,
+            tokenLength: token.length,
+            error: (err as Error)?.message ?? 'unknown',
+          });
           return res.status(401).json({ error: 'Invalid token' });
         }
       

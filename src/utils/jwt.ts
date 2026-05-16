@@ -1,12 +1,20 @@
 import jwt from 'jsonwebtoken';
 
-export const JWT_SECRET = process.env.JWT_SECRET as string || "obaol-jwt-secret-2025";
+const FALLBACK_DEV_SECRET = 'obaol-jwt-secret-2025';
+const envSecret = String(process.env.JWT_SECRET ?? '').trim();
+const isProduction = process.env.NODE_ENV === 'production';
 
-if (!JWT_SECRET) {
-  throw new Error('JWT_SECRET is missing in environment');
+if (isProduction && !envSecret) {
+  throw new Error('JWT_SECRET is missing in production environment');
 }
 
-export function signToken(payload: any) {
+export const JWT_SECRET = envSecret || FALLBACK_DEV_SECRET;
+
+if (!envSecret) {
+  console.warn('[JWT_CONFIG_WARN] JWT_SECRET not set; using fallback development secret');
+}
+
+export function signToken(payload: string | object | Buffer) {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: '12h' });
 }
 
