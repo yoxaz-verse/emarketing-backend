@@ -14,7 +14,10 @@ function toBaseUrl(agent: AgentRecord): string {
 function toPath(agent: AgentRecord, request: AgentTestRequest): string {
   if (request.path && request.path.trim()) return request.path.trim();
   if (agent.default_path && agent.default_path.trim()) return agent.default_path.trim();
-  if (agent.provider.toLowerCase().includes('openclaw') || agent.provider.toLowerCase().includes('openclo')) {
+  if (
+    agent.provider.toLowerCase().includes('openclaw') ||
+    agent.provider.toLowerCase().includes('openclo')
+  ) {
     return '/v1/responses';
   }
   return '/';
@@ -48,7 +51,10 @@ function buildBody(agent: AgentRecord, request: AgentTestRequest): Record<string
     return request.payload;
   }
 
-  if (agent.provider.toLowerCase().includes('openclaw') || agent.provider.toLowerCase().includes('openclo')) {
+  if (
+    agent.provider.toLowerCase().includes('openclaw') ||
+    agent.provider.toLowerCase().includes('openclo')
+  ) {
     return {
       model: request.model || agent.default_model || 'gpt-4.1-mini',
       input: 'ping',

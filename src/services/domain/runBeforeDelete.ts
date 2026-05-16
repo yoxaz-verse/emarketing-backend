@@ -39,16 +39,18 @@ export async function runBeforeDelete(
     }
   }
   if (table === 'sequences') {
-    const { data: runningCampaigns, error } = await supabase
+    const { data: linkedCampaigns, error } = await supabase
       .from('campaigns')
-      .select('id')
+      .select('id,status')
       .eq('sequence_id', id)
-      .eq('status', 'running')
       .limit(1);
 
     if (error) throw error;
-    if ((runningCampaigns ?? []).length > 0) {
-      throw new Error('Sequence is used by running campaign(s) and cannot be deleted.');
+    if ((linkedCampaigns ?? []).length > 0) {
+      const campaignStatus = String(linkedCampaigns?.[0]?.status ?? 'unknown');
+      throw new Error(
+        `Sequence is linked to campaign(s) (first status: ${campaignStatus}) and cannot be deleted.`
+      );
     }
   }
 

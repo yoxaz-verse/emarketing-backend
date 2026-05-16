@@ -145,7 +145,8 @@ router.get('/system/wake-check', async (req, res) => {
     res.json(wake);
   } catch (err: any) {
     console.error('[WAKE CHECK ERROR]', err);
-    res.status(400).json({ error: err.message ?? 'Failed to read wake-check state' });
+    const statusCode = Number(err?.statusCode ?? 400);
+    res.status(statusCode).json({ error: err.message ?? 'Failed to read wake-check state' });
   }
 });
 

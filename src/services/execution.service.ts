@@ -38,10 +38,22 @@ export async function getCampaignExecutionWakeState(lastSeenVersion?: string | n
     .maybeSingle();
 
   if (error) {
+    const code = String((error as any)?.code ?? '');
+    const message = String((error as any)?.message ?? '');
+    const missingUpdatedAt = code === '42703' || message.includes('campaigns.updated_at');
+
+    if (missingUpdatedAt) {
+      const migrationError: Error & { statusCode?: number } = new Error(
+        'Campaign wake-check requires migration 20260512_add_campaigns_updated_at_for_wake_check.sql. Apply migration and restart backend.'
+      );
+      migrationError.statusCode = 503;
+      throw migrationError;
+    }
+
     throw error;
   }
 
-  const version = String(data?.updated_at ?? '0');
+  const version = String((data as any)?.updated_at ?? '0');
   const normalizedLastSeen = String(lastSeenVersion ?? '').trim();
 
   return {

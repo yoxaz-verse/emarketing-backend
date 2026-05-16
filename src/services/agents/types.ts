@@ -1,5 +1,12 @@
 export type ProviderType = 'preset' | 'custom';
 export type AuthType = 'none' | 'api_key' | 'bearer' | 'custom_header';
+export type MemoryStrategy = 'window' | 'summary';
+
+export type MemoryPolicy = {
+  strategy: MemoryStrategy;
+  max_turns?: number;
+  summary_trigger_tokens?: number;
+};
 
 export type AgentRecord = {
   id: string;
@@ -14,6 +21,8 @@ export type AgentRecord = {
   headers_config: Record<string, string>;
   default_model: string | null;
   default_path: string | null;
+  role_key: string | null;
+  memory_policy: MemoryPolicy;
   status: string;
   last_test_at: string | null;
   last_test_status: string | null;
@@ -39,6 +48,8 @@ export type CreateOrUpdateAgentInput = {
   headers_config?: Record<string, string>;
   default_model?: string;
   default_path?: string;
+  role_key?: string;
+  memory_policy?: MemoryPolicy;
 };
 
 export type AgentTestRequest = {

@@ -13,6 +13,8 @@ function sanitizeAgent(agent: AgentRecord): AgentResponse {
   return {
     ...safe,
     headers_config: safe.headers_config ?? {},
+    role_key: safe.role_key ?? null,
+    memory_policy: safe.memory_policy ?? { strategy: 'summary', max_turns: 12, summary_trigger_tokens: 8000 },
     has_secret: Boolean(auth_secret_encrypted),
   };
 }
@@ -29,6 +31,12 @@ function normalizeInput(input: CreateOrUpdateAgentInput, partial = false) {
   if (!partial || input.auth_header_name !== undefined) payload.auth_header_name = input.auth_header_name?.trim() || null;
   if (!partial || input.default_model !== undefined) payload.default_model = input.default_model?.trim() || null;
   if (!partial || input.default_path !== undefined) payload.default_path = input.default_path?.trim() || null;
+  if (!partial || input.role_key !== undefined) payload.role_key = input.role_key?.trim() || null;
+  if (!partial || input.memory_policy !== undefined) {
+    payload.memory_policy = input.memory_policy && typeof input.memory_policy === 'object'
+      ? input.memory_policy
+      : { strategy: 'summary', max_turns: 12, summary_trigger_tokens: 8000 };
+  }
 
   if (!partial || input.headers_config !== undefined) {
     payload.headers_config = input.headers_config && typeof input.headers_config === 'object'

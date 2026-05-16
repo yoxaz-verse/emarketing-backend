@@ -1,6 +1,7 @@
 import { supabase } from '../supabase';
 import { decryptSecret } from '../utils/sendEncryption';
 import { createSmtpTransport } from './email/smtpTransport';
+import { chatWithAgentRole } from './agents/openclawChat.service';
 
 type GraphNode = {
   id: string;
@@ -240,6 +241,24 @@ async function callAgent(node: GraphNode, runContext: any) {
     input_mapping: node.data?.input_mapping ?? {},
     context: runContext,
   };
+
+  const roleKey = String(node.data?.role_key ?? agent.role_key ?? '').trim();
+  if (roleKey) {
+    const userId = String(
+      runContext?.user_id ??
+      runContext?.contact?.user_id ??
+      runContext?.contact?.id ??
+      runContext?.lead_id ??
+      'sequence-user'
+    );
+    const message = String(node.data?.prompt_template ?? 'Continue');
+    return chatWithAgentRole({
+      user_id: userId,
+      role_key: roleKey,
+      message,
+      context: runContext,
+    });
+  }
 
   if (!agent.endpoint) {
     throw new Error('Agent endpoint is missing.');
