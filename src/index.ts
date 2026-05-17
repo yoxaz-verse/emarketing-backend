@@ -26,6 +26,10 @@ import inquiriesRoutes from './routes/inquiries.routes';
 import quotesRoutes from './routes/quotes.routes';
 import { startSequenceRunner } from './worker/sequenceRunner';
 import { startAgentMissionRunner } from './worker/agentMissionRunner';
+import {
+  getEmailValidationWorkerHealth,
+  startEmailValidationQueueWorker,
+} from './worker/email/eligibility.bullmq.worker';
 import { supabase } from './supabase';
 
 dotenv.config();
@@ -75,9 +79,12 @@ console.info('[BACKEND_RUNTIME]', {
 });
 
 console.info('[EMAIL_VALIDATION_RUNTIME]', {
-  executionMode: 'inline_sync',
-  redisRequired: false,
+  queueMode: process.env.EMAIL_VALIDATION_QUEUE_MODE ?? 'legacy',
+  executionMode: process.env.EMAIL_VALIDATION_QUEUE_MODE === 'bullmq' ? 'bullmq_async' : 'inline_sync',
+  redisRequired: process.env.EMAIL_VALIDATION_QUEUE_MODE === 'bullmq',
+  redisConfigured: Boolean(process.env.REDIS_URL),
   staleMinutes: Number(process.env.EMAIL_VALIDATION_STALE_MINUTES ?? 10),
+  workerHealth: getEmailValidationWorkerHealth(),
 });
 
 app.use(cors({
@@ -327,4 +334,15 @@ try {
   startAgentMissionRunner();
 } catch (error) {
   console.error('[AGENT_MISSION_RUNNER_BOOT_ERROR]', error);
+}
+
+try {
+  startEmailValidationQueueWorker();
+  console.info('[EMAIL_VALIDATION_WORKER_BOOT]', {
+    queueMode: process.env.EMAIL_VALIDATION_QUEUE_MODE ?? 'legacy',
+    redisConfigured: Boolean(process.env.REDIS_URL),
+    workerHealth: getEmailValidationWorkerHealth(),
+  });
+} catch (error) {
+  console.error('[EMAIL_VALIDATION_WORKER_BOOT_ERROR]', error);
 }

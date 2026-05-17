@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { runEligibilityWorker } from '../../worker/email/eligibility.worker';
+import { getEmailValidationQueue } from '../../queue/emailValidation.queue';
 import { supabase } from '../../supabase';
 import { logger } from '../logging/logger';
 import {
@@ -176,6 +177,8 @@ async function startEmailEligibilityValidation(
   options: { bypassActiveRunCheck: boolean }
 ): Promise<{ success: boolean; message: string; queued: number; runId: string }> {
   const mode = (String(req.body?.mode || 'pending') === 'rerun_failed' ? 'rerun_failed' : 'pending') as ValidationRunMode;
+  const queueMode = process.env.EMAIL_VALIDATION_QUEUE_MODE === 'bullmq' ? 'bullmq' : 'legacy';
+  const executionMode = queueMode === 'bullmq' ? 'bullmq_async' : 'inline_sync';
 
   if (!options.bypassActiveRunCheck) {
     const activeRun = await getActiveValidationRun();
@@ -201,17 +204,48 @@ async function startEmailEligibilityValidation(
     type: mode,
     totalTargeted: leads.length,
     triggeredBy: req.headers.authorization ? 'authenticated_user' : null,
-    scope: { limit: 1000, executionMode: 'inline_sync' },
+    scope: { limit: 1000, executionMode },
   });
 
-  if (leads.length > 0) {
+  if (queueMode === 'bullmq' && leads.length > 0) {
+    const redisUrl = process.env.REDIS_URL;
+    if (!redisUrl) {
+      const err = new Error(
+        'EMAIL_VALIDATION_QUEUE_MODE is bullmq but REDIS_URL is missing. Configure REDIS_URL to your CapRover Redis service (for example redis://srv-captain--<redis-app>:6379) and restart backend.'
+      ) as Error & { statusCode?: number };
+      err.statusCode = 500;
+      throw err;
+    }
+
+    try {
+      const queue = getEmailValidationQueue();
+      await queue.waitUntilReady();
+      for (const lead of leads) {
+        await queue.add(
+          'validate-lead',
+          { ...lead, validation_run_id: run.id },
+          {
+            removeOnComplete: true,
+            removeOnFail: false,
+          }
+        );
+      }
+    } catch (error: any) {
+      const err = new Error(
+        `BullMQ enqueue failed. Verify REDIS_URL points to your CapRover internal Redis service (redis://srv-captain--<redis-app>:6379). Root error: ${error?.message ?? 'unknown'}`
+      ) as Error & { statusCode?: number };
+      err.statusCode = 500;
+      throw err;
+    }
+  } else if (leads.length > 0) {
     await runEligibilityWorker(1000, run.id, leads);
   }
 
   logger.info('email_validation_run_started', {
     mode,
     runId: run.id,
-    executionMode: 'inline_sync',
+    queueMode,
+    executionMode,
     pendingCountPreFilter: pendingCountPreFilter ?? 0,
     targetedCountPostFilter: leads.length,
     normalizedCount,
@@ -219,7 +253,9 @@ async function startEmailEligibilityValidation(
 
   return {
     success: true,
-    message: 'Email eligibility validation finished in basic one-by-one mode',
+    message: queueMode === 'bullmq'
+      ? 'Email eligibility validation queued for async processing'
+      : 'Email eligibility validation finished in basic one-by-one mode',
     queued: leads.length,
     runId: run.id,
   };
