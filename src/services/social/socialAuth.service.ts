@@ -4,6 +4,7 @@ import { decryptSocialSecret, encryptSocialSecret } from '../../utils/socialInte
 import {
   exchangeLinkedInCode,
   fetchLinkedInActorUrn,
+  LinkedInOAuthAppConfig,
   linkedInAuthorizeUrl,
   checkLinkedInConnectionStatus,
 } from './linkedin.client';
@@ -24,6 +25,16 @@ type ConnectionRow = {
   last_error: string | null;
 };
 
+type OAuthAppRow = {
+  operator_id: string;
+  platform_code: string;
+  client_id: string;
+  client_secret_encrypted: string;
+  redirect_uri: string;
+  scopes: string[] | null;
+  active: boolean;
+};
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -34,6 +45,63 @@ function stateDigest(state: string): string {
 
 function stateExpiryIso(): string {
   return new Date(Date.now() + STATE_TTL_MINUTES * 60 * 1000).toISOString();
+}
+
+const DEFAULT_LINKEDIN_SCOPES = ['w_member_social', 'r_liteprofile'];
+
+function normalizeScopes(scopes: string[] | null | undefined): string[] {
+  const out = (scopes ?? [])
+    .map((s) => String(s || '').trim())
+    .filter(Boolean);
+  return out.length > 0 ? out : DEFAULT_LINKEDIN_SCOPES;
+}
+
+export async function hasOperatorOAuthAppConfig(platform: string, operatorId?: string | null): Promise<boolean> {
+  if (!operatorId) return false;
+  const { count, error } = await supabase
+    .from('social_operator_oauth_apps')
+    .select('operator_id', { head: true, count: 'exact' })
+    .eq('operator_id', operatorId)
+    .eq('platform_code', platform)
+    .eq('active', true);
+
+  if (error) {
+    if (error.code === 'PGRST205' || error.code === '42P01') return false;
+    throw error;
+  }
+
+  return Number(count ?? 0) > 0;
+}
+
+async function getOperatorOAuthAppConfig(platform: string, operatorId?: string | null): Promise<LinkedInOAuthAppConfig> {
+  if (!operatorId) throw new Error('Operator context is required');
+
+  const { data, error } = await supabase
+    .from('social_operator_oauth_apps')
+    .select('*')
+    .eq('operator_id', operatorId)
+    .eq('platform_code', platform)
+    .eq('active', true)
+    .maybeSingle();
+
+  if (error) {
+    if (error.code === 'PGRST205' || error.code === '42P01') {
+      throw new Error('LinkedIn app credentials store is not set up. Run social OAuth app migration.');
+    }
+    throw error;
+  }
+
+  if (!data) {
+    throw new Error('LinkedIn app credentials not configured for this operator');
+  }
+
+  const row = data as OAuthAppRow;
+  return {
+    clientId: String(row.client_id || '').trim(),
+    clientSecret: decryptSocialSecret(String(row.client_secret_encrypted || '').trim()),
+    redirectUri: String(row.redirect_uri || '').trim(),
+    scopes: normalizeScopes(row.scopes),
+  };
 }
 
 export async function getConnectionStatuses(userId?: string | null, operatorId?: string | null) {
@@ -84,6 +152,7 @@ export async function getConnectionStatuses(userId?: string | null, operatorId?:
 export async function startPlatformConnect(platform: string, userId?: string | null, operatorId?: string | null) {
   if (!userId || !operatorId) throw new Error('User/operator context is required');
   if (platform !== 'linkedin') throw new Error(`Unsupported platform connect flow: ${platform}`);
+  const appConfig = await getOperatorOAuthAppConfig(platform, operatorId);
 
   const stateRaw = crypto.randomBytes(24).toString('hex');
   const stateHash = stateDigest(stateRaw);
@@ -100,7 +169,7 @@ export async function startPlatformConnect(platform: string, userId?: string | n
     });
 
   if (error) throw error;
-  return linkedInAuthorizeUrl(stateRaw);
+  return linkedInAuthorizeUrl(stateRaw, appConfig);
 }
 
 async function consumeOauthState(stateRaw: string, platform: string) {
@@ -135,14 +204,12 @@ export async function handlePlatformCallback(params: {
   if (!state) throw new Error('Missing oauth state');
 
   const stateRow = await consumeOauthState(state, platform);
-  const token = await exchangeLinkedInCode(code);
+  const appConfig = await getOperatorOAuthAppConfig(platform, String(stateRow.operator_id));
+  const token = await exchangeLinkedInCode(code, appConfig);
   const actorUrn = await fetchLinkedInActorUrn(token.access_token);
   const expiresAt = new Date(Date.now() + Number(token.expires_in || 3600) * 1000).toISOString();
 
-  const scope = (process.env.LINKEDIN_SCOPES || 'w_member_social r_liteprofile')
-    .split(' ')
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const scope = normalizeScopes(appConfig.scopes);
 
   const row = {
     platform_code: platform,

@@ -1,4 +1,5 @@
 import { supabase } from '../../supabase';
+import { updateMissionRunFromTaskResult } from './agentMissions.service';
 
 export const ALLOWED_ROLE_KEYS = [
   'content_creator',
@@ -42,7 +43,6 @@ type AuthCtx = {
 };
 
 type CreateTaskInput = {
-  integration_id?: string | null;
   role_key?: string;
   task_type?: string;
   input?: string;
@@ -67,19 +67,6 @@ type SubmitTaskResultInput = {
   error?: string;
 };
 
-type CreateIntegrationInput = {
-  name?: string;
-  provider?: string;
-  mode?: string;
-  status?: string;
-  base_url?: string | null;
-  fallback_endpoint?: string | null;
-  auth_type?: string | null;
-  model?: string | null;
-  role_key?: string | null;
-  config?: Record<string, unknown>;
-};
-
 type CreateContextDocumentInput = {
   name?: string;
   role_key?: string;
@@ -87,6 +74,25 @@ type CreateContextDocumentInput = {
   active?: boolean;
   metadata?: Record<string, unknown>;
 };
+
+function isLegacyTypeNotNullError(error: unknown): boolean {
+  const message =
+    (error as { message?: string } | null)?.message?.toLowerCase() ?? '';
+  return (
+    message.includes('null value in column "type"') &&
+    message.includes('relation "agent_tasks"') &&
+    message.includes('violates not-null constraint')
+  );
+}
+
+function withSchemaGuidance(error: unknown): never {
+  if (isLegacyTypeNotNullError(error)) {
+    throw new Error(
+      'Agent Integrations schema is not ready. Apply migration 20260516_normalize_agent_tasks_type_to_task_type.sql and restart backend.'
+    );
+  }
+  throw error;
+}
 
 function ensureEnum(name: string, value: string, allowed: readonly string[]) {
   if (!allowed.includes(value)) {
@@ -128,7 +134,6 @@ export async function createAgentTask(input: CreateTaskInput, auth: AuthCtx) {
   const { data, error } = await supabase
     .from('agent_tasks')
     .insert({
-      integration_id: input.integration_id ?? null,
       role_key: roleKey,
       task_type: taskType,
       input: taskInput,
@@ -143,7 +148,7 @@ export async function createAgentTask(input: CreateTaskInput, auth: AuthCtx) {
     .select('*')
     .single();
 
-  if (error) throw error;
+  if (error) withSchemaGuidance(error);
 
   await addTaskEvent(data.id, 'created', 'Task created', {
     role_key: roleKey,
@@ -179,7 +184,7 @@ export async function listAgentTasks(filters: ListTaskFilter) {
   }
 
   const { data, error } = await query;
-  if (error) throw error;
+  if (error) withSchemaGuidance(error);
 
   return data ?? [];
 }
@@ -191,7 +196,7 @@ export async function getAgentTaskById(taskId: string) {
     .eq('id', taskId)
     .single();
 
-  if (error) throw error;
+  if (error) withSchemaGuidance(error);
   return data;
 }
 
@@ -264,6 +269,8 @@ export async function submitAgentTaskResult(taskId: string, input: SubmitTaskRes
       structured_outputs_count: structuredOutputs.length,
     });
 
+    await updateMissionRunFromTaskResult(taskId, 'completed', String(input.result ?? ''));
+
     return data;
   }
 
@@ -285,49 +292,9 @@ export async function submitAgentTaskResult(taskId: string, input: SubmitTaskRes
     error: String(input.error ?? 'Task failed'),
   });
 
+  await updateMissionRunFromTaskResult(taskId, 'failed', String(input.error ?? 'Task failed'));
+
   return data;
-}
-
-export async function createAgentIntegration(input: CreateIntegrationInput, auth: AuthCtx) {
-  const name = String(input.name ?? '').trim();
-  const provider = String(input.provider ?? '').trim().toLowerCase();
-  const mode = String(input.mode ?? '').trim();
-
-  if (!name) throw new Error('name is required');
-  if (!provider) throw new Error('provider is required');
-  if (!mode) throw new Error('mode is required');
-
-  const { data, error } = await supabase
-    .from('agent_integrations')
-    .insert({
-      name,
-      provider,
-      mode,
-      status: String(input.status ?? 'active').trim() || 'active',
-      base_url: input.base_url ?? null,
-      fallback_endpoint: input.fallback_endpoint ?? null,
-      auth_type: input.auth_type ?? null,
-      model: input.model ?? null,
-      role_key: input.role_key ?? null,
-      config: asObject(input.config),
-      created_by: auth.userId ?? null,
-      operator_id: auth.operatorId ?? null,
-    })
-    .select('*')
-    .single();
-
-  if (error) throw error;
-  return data;
-}
-
-export async function listAgentIntegrations() {
-  const { data, error } = await supabase
-    .from('agent_integrations')
-    .select('*')
-    .order('created_at', { ascending: false });
-
-  if (error) throw error;
-  return data ?? [];
 }
 
 export async function createAgentContextDocument(input: CreateContextDocumentInput, auth: AuthCtx) {

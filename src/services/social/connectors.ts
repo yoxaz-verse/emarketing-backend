@@ -14,13 +14,41 @@ export type SocialExecutionResult = {
   provider_error_message?: string;
 };
 
+const DEFAULT_SOCIAL_TIMEZONE = 'Asia/Kolkata';
+
+function resolveValidTimeZone(timezone?: string): string {
+  const candidate = String(timezone || '').trim();
+  if (!candidate) return DEFAULT_SOCIAL_TIMEZONE;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: candidate }).format(new Date());
+    return candidate;
+  } catch {
+    return DEFAULT_SOCIAL_TIMEZONE;
+  }
+}
+
+function asDateInTimezone(date: Date, timeZone: string): Date {
+  // Convert the same instant into wall-clock fields for the requested timezone.
+  return new Date(date.toLocaleString('en-US', { timeZone }));
+}
+
 export function validateSocialPostInput(input: SocialPostInput): string[] {
   const errors: string[] = [];
   if (!input.content?.trim()) errors.push('content is required');
   if (!Array.isArray(input.media)) errors.push('media must be an array');
   if (!Array.isArray(input.hashtags)) errors.push('hashtags must be an array');
-  if (input.scheduled_at && Number.isNaN(new Date(input.scheduled_at).getTime())) {
-    errors.push('scheduled_at must be a valid ISO date-time');
+  if (input.scheduled_at) {
+    const scheduledAt = new Date(input.scheduled_at);
+    if (Number.isNaN(scheduledAt.getTime())) {
+      errors.push('scheduled_at must be a valid ISO date-time');
+    } else {
+      const timezone = resolveValidTimeZone(input.timezone);
+      const scheduledInTz = asDateInTimezone(scheduledAt, timezone);
+      const nowInTz = asDateInTimezone(new Date(), timezone);
+      if (scheduledInTz.getTime() <= nowInTz.getTime()) {
+        errors.push('scheduled_at must be in the future');
+      }
+    }
   }
   return errors;
 }

@@ -243,16 +243,8 @@ export const TABLE_FIELD_MAP: Record<
       db: 'is_active',
       behavior: 'plain',
     },
-    status: {
-      db: 'status',
-      behavior: 'plain',
-    },
     created_at: {
       db: 'created_at',
-      behavior: 'readonly',
-    },
-    updated_at: {
-      db: 'updated_at',
       behavior: 'readonly',
     },
   },

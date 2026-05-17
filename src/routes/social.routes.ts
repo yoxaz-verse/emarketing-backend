@@ -10,9 +10,20 @@ import {
 const router = Router();
 router.use(requireAuth('viewer'));
 
+function resolveOperatorId(req: any): string | null {
+  const role = String(req.auth?.role ?? '').toLowerCase();
+  if (role === 'admin' || role === 'superadmin') {
+    const fromQuery = String(req.query?.operator_id ?? '').trim();
+    const fromBody = String(req.body?.operator_id ?? '').trim();
+    return fromQuery || fromBody || null;
+  }
+  return req.auth?.operator_id ?? null;
+}
+
 router.get('/connectors', async (req, res) => {
   try {
-    const data = await listSocialConnectors(req.auth?.user_id, req.auth?.operator_id);
+    const operatorId = resolveOperatorId(req);
+    const data = await listSocialConnectors(req.auth?.user_id, operatorId);
     res.json(data);
   } catch (err: any) {
     console.error('[SOCIAL CONNECTORS ERROR]', err?.message ?? err);

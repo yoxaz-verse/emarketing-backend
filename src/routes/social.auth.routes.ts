@@ -10,9 +10,25 @@ import {
 const router = Router();
 router.use(requireAuth('viewer'));
 
+function resolveOperatorId(req: any): string | null {
+  const role = String(req.auth?.role ?? '').toLowerCase();
+  if (role === 'admin' || role === 'superadmin') {
+    const fromQuery = String(req.query?.operator_id ?? '').trim();
+    const fromBody = String(req.body?.operator_id ?? '').trim();
+    const operatorId = fromQuery || fromBody;
+    return operatorId || null;
+  }
+  return req.auth?.operator_id ?? null;
+}
+
+function socialRedirectBase() {
+  return process.env.SOCIAL_OAUTH_SUCCESS_REDIRECT || 'http://localhost:3000/dashboard/social-connectors';
+}
+
 router.get('/connections', async (req, res) => {
   try {
-    const data = await getConnectionStatuses(req.auth?.user_id, req.auth?.operator_id);
+    const operatorId = resolveOperatorId(req);
+    const data = await getConnectionStatuses(req.auth?.user_id, operatorId);
     res.json(data);
   } catch (err: any) {
     console.error('[SOCIAL CONNECTION LIST ERROR]', err?.message ?? err);
@@ -21,17 +37,24 @@ router.get('/connections', async (req, res) => {
 });
 
 router.get('/connect/:platform', async (req, res) => {
+  const frontend = socialRedirectBase();
   try {
-    const authUrl = await startPlatformConnect(req.params.platform, req.auth?.user_id, req.auth?.operator_id);
+    const operatorId = resolveOperatorId(req);
+    if (!operatorId) {
+      const message = encodeURIComponent('operator_id is required for admin action');
+      return res.redirect(`${frontend}?social_connect_error=${message}`);
+    }
+    const authUrl = await startPlatformConnect(req.params.platform, req.auth?.user_id, operatorId);
     res.redirect(authUrl);
   } catch (err: any) {
     console.error('[SOCIAL CONNECT START ERROR]', err?.message ?? err);
-    res.status(400).json({ error: err?.message ?? 'Failed to start social connect flow' });
+    const message = encodeURIComponent(err?.message ?? 'Failed to start social connect flow');
+    res.redirect(`${frontend}?social_connect_error=${message}`);
   }
 });
 
 router.get('/callback/:platform', async (req, res) => {
-  const frontend = process.env.SOCIAL_OAUTH_SUCCESS_REDIRECT || 'http://localhost:3000/dashboard/social-scheduling';
+  const frontend = socialRedirectBase();
   try {
     await handlePlatformCallback({
       platform: req.params.platform,
@@ -49,7 +72,8 @@ router.get('/callback/:platform', async (req, res) => {
 
 router.post('/disconnect/:platform', async (req, res) => {
   try {
-    const data = await disconnectPlatform(req.params.platform, req.auth?.user_id, req.auth?.operator_id);
+    const operatorId = resolveOperatorId(req);
+    const data = await disconnectPlatform(req.params.platform, req.auth?.user_id, operatorId);
     res.json(data);
   } catch (err: any) {
     console.error('[SOCIAL DISCONNECT ERROR]', err?.message ?? err);

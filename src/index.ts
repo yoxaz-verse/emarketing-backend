@@ -22,7 +22,10 @@ import socialRoutes from './routes/social.routes';
 import socialAuthRoutes from './routes/social.auth.routes';
 import blogsRoutes from './routes/blogs.routes';
 import communitiesRoutes from './routes/communities.routes';
+import inquiriesRoutes from './routes/inquiries.routes';
+import quotesRoutes from './routes/quotes.routes';
 import { startSequenceRunner } from './worker/sequenceRunner';
+import { startAgentMissionRunner } from './worker/agentMissionRunner';
 import { supabase } from './supabase';
 
 dotenv.config();
@@ -113,7 +116,22 @@ app.use('/social', socialRoutes);
 app.use('/social', socialAuthRoutes);
 app.use('/blogs', blogsRoutes);
 app.use('/communities', communitiesRoutes);
+app.use('/inquiries', inquiriesRoutes);
+app.use('/quotes', quotesRoutes);
 app.use('/', webhookRoutes);
+
+app.get('/ping/routes', (_req, res) => {
+  res.json({
+    ok: true,
+    routes: [
+      '/inquiries/sources',
+      '/inquiries/fetch-runs',
+      '/inquiries/connector-runs',
+      '/inquiries/webhook/:sourceCode',
+      '/quotes',
+    ],
+  });
+});
 
 const PORT = Number(process.env.PORT) || 3000;
 
@@ -163,17 +181,133 @@ async function checkSendingLimitsScheduleSchema() {
   console.warn('[SENDING_LIMITS_SCHEMA_CHECK_WARN]', { code, message });
 }
 
+async function checkOperatorsSchemaReadiness() {
+  const { error, count } = await supabase
+    .from('operators')
+    .select('id', { count: 'exact', head: true })
+    .limit(1);
+
+  if (!error) {
+    console.info('[OPERATORS_SCHEMA_CHECK_OK]', {
+      table: 'operators',
+      reachable: true,
+      countEstimate: Number(count ?? 0),
+    });
+    return;
+  }
+
+  const message = String(error?.message ?? '');
+  const code = String(error?.code ?? '');
+  if (
+    code === '42P01' ||
+    message.toLowerCase().includes('does not exist') ||
+    message.toLowerCase().includes('could not find the table')
+  ) {
+    console.error('[OPERATORS_SCHEMA_CHECK_FAILED]', {
+      code,
+      message,
+      fix: 'Ensure operators table exists in active database and backend points to correct Supabase project.',
+    });
+    return;
+  }
+
+  console.warn('[OPERATORS_SCHEMA_CHECK_WARN]', { code, message });
+}
+
+async function checkSocialAppsSchemaReadiness() {
+  const { error } = await supabase
+    .from('social_operator_oauth_apps')
+    .select('operator_id,platform_code,client_id,client_secret_encrypted,redirect_uri,scopes,metadata,active')
+    .limit(1);
+
+  if (!error) {
+    console.info('[SOCIAL_APPS_SCHEMA_CHECK_OK]', {
+      table: 'social_operator_oauth_apps',
+      requiredColumns: ['operator_id', 'platform_code', 'client_secret_encrypted', 'metadata'],
+      endpoints: ['/admin/social-apps/:platform', '/admin/social-apps'],
+    });
+    return;
+  }
+
+  const message = String(error?.message ?? '');
+  const code = String(error?.code ?? '');
+  if (
+    code === '42P01' ||
+    code === '42703' ||
+    message.toLowerCase().includes('does not exist') ||
+    message.toLowerCase().includes('schema cache')
+  ) {
+    console.error('[SOCIAL_APPS_SCHEMA_CHECK_FAILED]', {
+      code,
+      message,
+      fix: 'Apply social_operator_oauth_apps migrations (including multi-platform expansion) and restart backend.',
+    });
+    return;
+  }
+
+  console.warn('[SOCIAL_APPS_SCHEMA_CHECK_WARN]', { code, message });
+}
+
+async function checkInquirySchemaReadiness() {
+  const tables = ['inquiry_sources', 'inquiry_fetch_runs', 'buyer_inquiries', 'inquiry_quotes'];
+  for (const table of tables) {
+    const { error } = await supabase.from(table).select('*').limit(1);
+    if (!error) continue;
+
+    const message = String(error?.message ?? '');
+    const code = String(error?.code ?? '');
+    if (
+      code === '42P01' ||
+      code === 'PGRST205' ||
+      message.toLowerCase().includes('schema cache') ||
+      message.toLowerCase().includes('does not exist')
+    ) {
+      console.error('[INQUIRY_SCHEMA_CHECK_FAILED]', {
+        table,
+        code,
+        message,
+        fix: 'Apply inquiry migrations (create inquiry pipeline + expand inquiry sources and quotes), then restart backend.',
+      });
+      return;
+    }
+    console.warn('[INQUIRY_SCHEMA_CHECK_WARN]', { table, code, message });
+  }
+
+  console.info('[INQUIRY_SCHEMA_CHECK_OK]', {
+    tables,
+    endpoints: ['/inquiries/fetch-runs', '/inquiries/sources', '/quotes'],
+  });
+}
+
 async function boot() {
   await assertAttachLeadSchema();
   await checkSendingLimitsScheduleSchema();
+  await checkOperatorsSchemaReadiness();
+  await checkSocialAppsSchemaReadiness();
+  await checkInquirySchemaReadiness();
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
     console.info('[BACKEND_BOOT_OK]', {
       port: PORT,
+      bindHost: '0.0.0.0',
+      expectedApiBase: process.env.NEXT_PUBLIC_API_BASE_URL ?? 'unset',
       runtimeMode,
       entrypoint,
       schemaGuardVersion,
+    });
+    console.info('[INQUIRY_ROUTE_HEALTH]', {
+      fetchRunsEndpoint: '/inquiries/fetch-runs',
+      sourcesEndpoint: '/inquiries/sources',
+      connectorRunsEndpoint: '/inquiries/connector-runs',
+      quotesEndpoint: '/quotes',
+      note: 'If UI shows Cannot POST /inquiries/fetch-runs, verify this process is the active runtime and restarted after deploy.',
+    });
+    console.info('[SOCIAL_APPS_ROUTE_HEALTH]', {
+      getCanonical: '/admin/social-apps/:platform?operator_id=...',
+      putCanonical: '/admin/social-apps/:platform',
+      getCompatAlias: '/admin/social-apps?platform=...&operator_id=...',
+      putCompatAlias: '/admin/social-apps with body.platform',
     });
   });
 }
@@ -187,4 +321,10 @@ try {
   startSequenceRunner();
 } catch (error) {
   console.error('[SEQUENCE_RUNNER_BOOT_ERROR]', error);
+}
+
+try {
+  startAgentMissionRunner();
+} catch (error) {
+  console.error('[AGENT_MISSION_RUNNER_BOOT_ERROR]', error);
 }

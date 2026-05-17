@@ -18,11 +18,12 @@ type PublishResult = {
   external_post_url: string;
 };
 
-function getRequiredEnv(name: string): string {
-  const value = process.env[name];
-  if (!value || !value.trim()) throw new Error(`${name} is required`);
-  return value;
-}
+export type LinkedInOAuthAppConfig = {
+  clientId: string;
+  clientSecret: string;
+  redirectUri: string;
+  scopes: string[];
+};
 
 function isExpired(expiresAt?: string | null): boolean {
   if (!expiresAt) return false;
@@ -106,15 +107,13 @@ export async function publishLinkedInTextLink(conn: LinkedInConnection, input: P
   };
 }
 
-export function linkedInAuthorizeUrl(state: string): string {
-  const clientId = getRequiredEnv('LINKEDIN_CLIENT_ID');
-  const redirectUri = getRequiredEnv('LINKEDIN_REDIRECT_URI');
-  const scope = (process.env.LINKEDIN_SCOPES || 'w_member_social r_liteprofile').trim();
+export function linkedInAuthorizeUrl(state: string, config: LinkedInOAuthAppConfig): string {
+  const scope = (config.scopes ?? []).join(' ').trim() || 'w_member_social r_liteprofile';
 
   const params = new URLSearchParams({
     response_type: 'code',
-    client_id: clientId,
-    redirect_uri: redirectUri,
+    client_id: config.clientId,
+    redirect_uri: config.redirectUri,
     state,
     scope,
   });
@@ -122,22 +121,18 @@ export function linkedInAuthorizeUrl(state: string): string {
   return `https://www.linkedin.com/oauth/v2/authorization?${params.toString()}`;
 }
 
-export async function exchangeLinkedInCode(code: string): Promise<{
+export async function exchangeLinkedInCode(code: string, config: LinkedInOAuthAppConfig): Promise<{
   access_token: string;
   expires_in: number;
   refresh_token?: string;
   refresh_token_expires_in?: number;
 }> {
-  const clientId = getRequiredEnv('LINKEDIN_CLIENT_ID');
-  const clientSecret = getRequiredEnv('LINKEDIN_CLIENT_SECRET');
-  const redirectUri = getRequiredEnv('LINKEDIN_REDIRECT_URI');
-
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
     code,
-    redirect_uri: redirectUri,
-    client_id: clientId,
-    client_secret: clientSecret,
+    redirect_uri: config.redirectUri,
+    client_id: config.clientId,
+    client_secret: config.clientSecret,
   });
 
   const res = await fetch('https://www.linkedin.com/oauth/v2/accessToken', {

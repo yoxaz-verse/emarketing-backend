@@ -20,7 +20,7 @@ lsof -nP -iTCP:3004 -sTCP:LISTEN
 ```
 If no process is listening, restart backend with `npm run start`.
 
-## OpenClaw Queue Integration
+## OpenClaw Task Queue (Task-Creator-Only)
 
 ### Required backend env vars
 - `SUPABASE_URL`
@@ -35,3 +35,40 @@ If no process is listening, restart backend with `npm run start`.
 
 ### Local worker runbook
 See `/openclaw-worker/README.md` for setup/run instructions targeting `~/openclaw-worker`.
+
+### Persistent Agent Missions (Employee Agents)
+
+Apply migration:
+
+- `Backend/migrations/20260516_add_agent_missions.sql`
+
+This enables:
+
+- reusable mission contracts per agent
+- scheduler-driven task dispatch into `agent_tasks`
+- mission run audit logs (`agent_mission_runs`)
+- Running Agents runtime controls (run now / pause / resume)
+
+### Fix: `type` NOT NULL mismatch on `agent_tasks`
+
+If Agent Integrations page shows:
+`null value in column "type" of relation "agent_tasks" violates not-null constraint`
+
+Apply this migration in your cloud Supabase SQL editor:
+
+- `Backend/migrations/20260516_normalize_agent_tasks_type_to_task_type.sql`
+
+Then restart backend so runtime/schema caches refresh.
+
+### Remove Queue Integration Stack (archive then drop)
+
+If you want task-creator-only flow with no `agent_integrations` usage:
+
+- Apply migration:
+  - `Backend/migrations/20260516_archive_and_remove_agent_integrations.sql`
+- Or run standalone cloud SQL:
+  - `sql/remove_agent_integrations_stack.sql`
+
+This will archive existing integration data, then remove:
+- `agent_integrations` table
+- `agent_tasks.integration_id` column + FK/index

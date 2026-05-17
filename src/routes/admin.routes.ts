@@ -13,8 +13,10 @@ import {
 } from '../services/sendingLimitsConfig.service.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 import { supabase } from '../supabase.js';
+import { encryptSocialSecret } from '../utils/socialIntegrationEncryption.js';
 
 const router = Router();
+type SocialPlatform = 'linkedin' | 'meta' | 'reddit' | 'telegram' | 'whatsapp';
 
 type StepKey = 'step_1_syntax' | 'step_2_provider' | 'step_3_risk' | 'step_4_finalize';
 
@@ -82,14 +84,332 @@ router.post('/sequence/:id/enable', async (req, res) => {
 /**
  * Operators list (Admin only)
  */
-router.get('/operators', async (_req, res) => {
-  const { data, error } = await listOperators();
+router.get('/operators', async (req, res) => {
+  try {
+    const { data, error } = await listOperators();
+    if (error) {
+      console.error('[ADMIN_OPERATORS_LIST_ERROR]', {
+        role: req.auth?.role ?? null,
+        type: req.auth?.type ?? null,
+        message: error.message ?? 'Unknown error',
+      });
+      return res.status(500).json({ error: error.message });
+    }
 
-  if (error) {
-    return res.status(500).json({ error: error.message });
+    console.info('[ADMIN_OPERATORS_LIST_OK]', {
+      role: req.auth?.role ?? null,
+      type: req.auth?.type ?? null,
+      count: Array.isArray(data) ? data.length : 0,
+    });
+    res.json(data ?? []);
+  } catch (err: any) {
+    console.error('[ADMIN_OPERATORS_LIST_EXCEPTION]', {
+      role: req.auth?.role ?? null,
+      type: req.auth?.type ?? null,
+      message: err?.message ?? 'Unknown exception',
+    });
+    return res.status(500).json({ error: err?.message ?? 'Failed to load operators' });
+  }
+});
+
+const SOCIAL_PLATFORMS: SocialPlatform[] = ['linkedin', 'meta', 'reddit', 'telegram', 'whatsapp'];
+
+function isSocialPlatform(value: string): value is SocialPlatform {
+  return SOCIAL_PLATFORMS.includes(value as SocialPlatform);
+}
+
+function requiredFieldsByPlatform(platform: SocialPlatform): string[] {
+  if (platform === 'linkedin') return ['client_id', 'client_secret', 'redirect_uri'];
+  if (platform === 'meta') return ['app_id', 'app_secret', 'redirect_uri'];
+  if (platform === 'reddit') return ['client_id', 'client_secret', 'redirect_uri', 'user_agent'];
+  if (platform === 'telegram') return ['bot_token', 'chat_id'];
+  return ['phone_number_id', 'business_account_id', 'access_token'];
+}
+
+function extractConfig(platform: SocialPlatform, input: Record<string, unknown>) {
+  const trim = (v: unknown) => String(v ?? '').trim();
+  if (platform === 'linkedin') {
+    const scopes = Array.isArray(input.scopes)
+      ? input.scopes.map((s) => String(s ?? '').trim()).filter(Boolean)
+      : [];
+    return {
+      client_id: trim(input.client_id),
+      secret: trim(input.client_secret),
+      redirect_uri: trim(input.redirect_uri),
+      scopes: scopes.length > 0 ? scopes : ['w_member_social', 'r_liteprofile'],
+      metadata: {},
+    };
   }
 
-  res.json(data);
+  if (platform === 'meta') {
+    return {
+      client_id: trim(input.app_id),
+      secret: trim(input.app_secret),
+      redirect_uri: trim(input.redirect_uri),
+      scopes: [],
+      metadata: {
+        page_access_token: trim(input.page_access_token),
+        business_account_id: trim(input.business_account_id),
+      },
+    };
+  }
+
+  if (platform === 'reddit') {
+    return {
+      client_id: trim(input.client_id),
+      secret: trim(input.client_secret),
+      redirect_uri: trim(input.redirect_uri),
+      scopes: [],
+      metadata: {
+        user_agent: trim(input.user_agent),
+      },
+    };
+  }
+
+  if (platform === 'telegram') {
+    return {
+      client_id: '',
+      secret: trim(input.bot_token),
+      redirect_uri: '',
+      scopes: [],
+      metadata: {
+        chat_id: trim(input.chat_id),
+      },
+    };
+  }
+
+  return {
+    client_id: trim(input.phone_number_id),
+    secret: trim(input.access_token),
+    redirect_uri: '',
+    scopes: [],
+    metadata: {
+      business_account_id: trim(input.business_account_id),
+      phone_number_id: trim(input.phone_number_id),
+    },
+  };
+}
+
+function missingRequired(platform: SocialPlatform, source: Record<string, string>): string[] {
+  return requiredFieldsByPlatform(platform).filter((key) => !String(source[key] ?? '').trim());
+}
+
+function nonSecretFields(platform: SocialPlatform, row: any, hasSecret: boolean): Record<string, string> {
+  const metadata = (row?.metadata && typeof row.metadata === 'object') ? row.metadata : {};
+  const fields: Record<string, string> = {};
+
+  if (platform === 'linkedin') {
+    fields.client_id = String(row.client_id ?? '');
+    fields.redirect_uri = String(row.redirect_uri ?? '');
+    fields.client_secret = hasSecret ? '***' : '';
+    return fields;
+  }
+
+  if (platform === 'meta') {
+    fields.app_id = String(row.client_id ?? '');
+    fields.redirect_uri = String(row.redirect_uri ?? '');
+    fields.app_secret = hasSecret ? '***' : '';
+    fields.page_access_token = String((metadata as any).page_access_token ?? '');
+    fields.business_account_id = String((metadata as any).business_account_id ?? '');
+    return fields;
+  }
+
+  if (platform === 'reddit') {
+    fields.client_id = String(row.client_id ?? '');
+    fields.redirect_uri = String(row.redirect_uri ?? '');
+    fields.client_secret = hasSecret ? '***' : '';
+    fields.user_agent = String((metadata as any).user_agent ?? '');
+    return fields;
+  }
+
+  if (platform === 'telegram') {
+    fields.bot_token = hasSecret ? '***' : '';
+    fields.chat_id = String((metadata as any).chat_id ?? '');
+    return fields;
+  }
+
+  fields.phone_number_id = String((metadata as any).phone_number_id ?? row.client_id ?? '');
+  fields.business_account_id = String((metadata as any).business_account_id ?? '');
+  fields.access_token = hasSecret ? '***' : '';
+  return fields;
+}
+
+function isSocialAppSchemaMismatch(error: any): boolean {
+  const code = String(error?.code ?? '');
+  const message = String(error?.message ?? '').toLowerCase();
+  return (
+    code === '42P01' ||
+    code === '42703' ||
+    message.includes('social_operator_oauth_apps') ||
+    message.includes('does not exist') ||
+    message.includes('schema cache')
+  );
+}
+
+async function handleGetSocialApp(req: any, res: any, platformRaw: string, operatorIdRaw: string) {
+  try {
+    const platform = String(platformRaw ?? '').trim().toLowerCase();
+    if (!isSocialPlatform(platform)) return res.status(400).json({ error: 'Unsupported platform' });
+
+    const operatorId = String(operatorIdRaw ?? '').trim();
+    if (!operatorId) return res.status(400).json({ error: 'operator_id is required' });
+
+    const { data, error } = await supabase
+      .from('social_operator_oauth_apps')
+      .select('*')
+      .eq('operator_id', operatorId)
+      .eq('platform_code', platform)
+      .maybeSingle();
+
+    if (error && error.code !== 'PGRST116') throw error;
+    if (!data) {
+      console.info('[ADMIN_SOCIAL_APP_READ_OK]', {
+        role: req.auth?.role ?? null,
+        operatorId,
+        platform,
+        configured: false,
+      });
+      return res.json({
+        configured: false,
+        operator_id: operatorId,
+        platform_code: platform,
+        required_missing: requiredFieldsByPlatform(platform),
+      });
+    }
+
+    const row = data as any;
+    const hasSecret = Boolean(String(row.client_secret_encrypted ?? '').trim());
+    const responseFields = nonSecretFields(platform, row, hasSecret);
+    const requiredMissing = missingRequired(platform, responseFields);
+    console.info('[ADMIN_SOCIAL_APP_READ_OK]', {
+      role: req.auth?.role ?? null,
+      operatorId,
+      platform,
+      configured: requiredMissing.length === 0,
+      missingCount: requiredMissing.length,
+    });
+
+    return res.json({
+      configured: requiredMissing.length === 0,
+      operator_id: operatorId,
+      platform_code: platform,
+      required_missing: requiredMissing,
+      fields: responseFields,
+      active: Boolean(row.active),
+      updated_at: row.updated_at,
+    });
+  } catch (err: any) {
+    if (isSocialAppSchemaMismatch(err)) {
+      return res.status(500).json({
+        error: 'social_operator_oauth_apps schema is not ready. Apply social app migrations and restart backend.',
+      });
+    }
+    console.error('[ADMIN_SOCIAL_APP_READ_ERROR]', {
+      role: req.auth?.role ?? null,
+      platform: platformRaw ?? null,
+      message: err?.message ?? 'Unknown error',
+    });
+    return res.status(500).json({ error: err?.message ?? 'Failed to read social app config' });
+  }
+}
+
+async function handlePutSocialApp(req: any, res: any, platformRaw: string, body: any) {
+  try {
+    const platform = String(platformRaw ?? '').trim().toLowerCase();
+    if (!isSocialPlatform(platform)) return res.status(400).json({ error: 'Unsupported platform' });
+
+    const operatorId = String(body?.operator_id ?? '').trim();
+    if (!operatorId) return res.status(400).json({ error: 'operator_id is required' });
+
+    const extracted = extractConfig(platform, (body ?? {}) as Record<string, unknown>);
+    const checkMap: Record<string, string> = {};
+    if (platform === 'linkedin') {
+      checkMap.client_id = extracted.client_id;
+      checkMap.client_secret = extracted.secret;
+      checkMap.redirect_uri = extracted.redirect_uri;
+    } else if (platform === 'meta') {
+      checkMap.app_id = extracted.client_id;
+      checkMap.app_secret = extracted.secret;
+      checkMap.redirect_uri = extracted.redirect_uri;
+    } else if (platform === 'reddit') {
+      checkMap.client_id = extracted.client_id;
+      checkMap.client_secret = extracted.secret;
+      checkMap.redirect_uri = extracted.redirect_uri;
+      checkMap.user_agent = String((extracted.metadata as any).user_agent ?? '');
+    } else if (platform === 'telegram') {
+      checkMap.bot_token = extracted.secret;
+      checkMap.chat_id = String((extracted.metadata as any).chat_id ?? '');
+    } else {
+      checkMap.phone_number_id = String((extracted.metadata as any).phone_number_id ?? '');
+      checkMap.business_account_id = String((extracted.metadata as any).business_account_id ?? '');
+      checkMap.access_token = extracted.secret;
+    }
+
+    const requiredMissing = missingRequired(platform, checkMap);
+    if (requiredMissing.length > 0) {
+      return res.status(400).json({ error: `Missing required fields: ${requiredMissing.join(', ')}` });
+    }
+
+    const payload = {
+      operator_id: operatorId,
+      platform_code: platform,
+      client_id: extracted.client_id || null,
+      client_secret_encrypted: encryptSocialSecret(extracted.secret),
+      redirect_uri: extracted.redirect_uri || null,
+      scopes: extracted.scopes,
+      metadata: extracted.metadata ?? {},
+      active: true,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { error } = await supabase
+      .from('social_operator_oauth_apps')
+      .upsert(payload, { onConflict: 'operator_id,platform_code' });
+
+    if (error) throw error;
+
+    console.info('[ADMIN_SOCIAL_APP_UPSERT_OK]', {
+      role: req.auth?.role ?? null,
+      operatorId,
+      platform,
+      requiredMissingCount: requiredMissing.length,
+    });
+
+    return res.json({ success: true });
+  } catch (err: any) {
+    if (isSocialAppSchemaMismatch(err)) {
+      return res.status(500).json({
+        error: 'social_operator_oauth_apps schema is not ready. Apply social app migrations and restart backend.',
+      });
+    }
+    console.error('[ADMIN_SOCIAL_APP_UPSERT_ERROR]', {
+      role: req.auth?.role ?? null,
+      platform: platformRaw ?? null,
+      message: err?.message ?? 'Unknown error',
+    });
+    return res.status(500).json({ error: err?.message ?? 'Failed to save social app config' });
+  }
+}
+
+// canonical endpoint
+router.get('/social-apps/:platform', async (req, res) => {
+  return handleGetSocialApp(req, res, String(req.params.platform ?? ''), String(req.query?.operator_id ?? ''));
+});
+
+// compatibility alias: /admin/social-apps?platform=linkedin&operator_id=...
+router.get('/social-apps', async (req, res) => {
+  return handleGetSocialApp(req, res, String(req.query?.platform ?? ''), String(req.query?.operator_id ?? ''));
+});
+
+// canonical endpoint
+router.put('/social-apps/:platform', async (req, res) => {
+  return handlePutSocialApp(req, res, String(req.params.platform ?? ''), req.body);
+});
+
+// compatibility alias: /admin/social-apps with platform in body/query
+router.put('/social-apps', async (req, res) => {
+  const platform = String(req.body?.platform ?? req.query?.platform ?? '');
+  return handlePutSocialApp(req, res, platform, req.body);
 });
 
 router.get('/sending-limits', async (_req, res) => {

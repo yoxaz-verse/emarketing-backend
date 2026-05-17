@@ -78,6 +78,13 @@ export async function listRows(
   filters: Record<string, any> = {}
 ) {
   const sanitized = normalizeFilters(filters);
+  const isSequencesTable = table === 'sequences';
+
+  if (isSequencesTable) {
+    console.info('[CRUD_LIST_SEQUENCES_INPUT]', {
+      filters: sanitized,
+    });
+  }
 
   const applyFilters = (baseQuery: ReturnType<typeof supabase.from>) => {
     let nextQuery: any = baseQuery;
@@ -192,7 +199,9 @@ export async function listRows(
         continue;
       }
 
-      nextQuery = nextQuery.eq(key, value);
+      const normalizedBool = parseBoolean(value);
+      const normalizedValue = normalizedBool === null ? value : normalizedBool;
+      nextQuery = nextQuery.eq(key, normalizedValue);
     }
     return nextQuery;
   };
@@ -201,6 +210,14 @@ export async function listRows(
   let query = applyFilters(supabase.from(table).select(select));
 
   let { data, error } = await query;
+  if (isSequencesTable) {
+    console.info('[CRUD_LIST_SEQUENCES_QUERY_RESULT]', {
+      phase: 'primary_select',
+      errorCode: String(error?.code ?? ''),
+      errorMessage: String(error?.message ?? ''),
+      rowCount: Array.isArray(data) ? data.length : 0,
+    });
+  }
   if (
     error &&
     (
@@ -217,6 +234,14 @@ export async function listRows(
     console.warn('[CRUD LIST WARNING] Missing column in sequences, falling back to *', error);
     query = applyFilters(supabase.from(table).select('*'));
     ({ data, error } = await query);
+    if (isSequencesTable) {
+      console.info('[CRUD_LIST_SEQUENCES_QUERY_RESULT]', {
+        phase: 'fallback_select_star',
+        errorCode: String(error?.code ?? ''),
+        errorMessage: String(error?.message ?? ''),
+        rowCount: Array.isArray(data) ? data.length : 0,
+      });
+    }
   }
   if (
     error &&
@@ -268,6 +293,12 @@ export async function listRows(
   const rows = (data ?? []).map((row: Record<string, unknown>) =>
     transformForRead(table, row)
   );
+
+  if (isSequencesTable) {
+    console.info('[CRUD_LIST_SEQUENCES_OUTPUT]', {
+      rowCount: rows.length,
+    });
+  }
 
   return await resolveAfterRead(table, rows);
 }

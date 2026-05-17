@@ -15,15 +15,23 @@ import {
 } from '../services/agents/openclawChat.service';
 import {
   createAgentContextDocument,
-  createAgentIntegration,
   createAgentTask,
   getAgentTaskById,
   listAgentContextDocuments,
-  listAgentIntegrations,
   listAgentTasks,
   pickNextAgentTask,
   submitAgentTaskResult,
 } from '../services/agents/agentTasks.service';
+import {
+  bootstrapEmployeeTeam,
+  createMission,
+  getAgentRuntimeOverview,
+  getMissionTemplates,
+  listMissionRuns,
+  listMissions,
+  runMissionNow,
+  updateMission,
+} from '../services/agents/agentMissions.service';
 
 const router = Router();
 const WORKER_SECRET = String(process.env.OPENCLAW_WORKER_SECRET ?? '').trim();
@@ -135,7 +143,6 @@ router.post('/tasks', requireAuth('viewer'), async (req, res) => {
   try {
     const data = await createAgentTask(
       {
-        integration_id: req.body?.integration_id,
         role_key: req.body?.role_key,
         task_type: req.body?.task_type,
         input: req.body?.input,
@@ -219,40 +226,147 @@ router.get('/tasks/:id', requireAuth('viewer'), async (req, res) => {
   }
 });
 
-router.post('/integrations', requireAuth('viewer'), async (req, res) => {
+router.get('/runtime', requireAuth('viewer'), async (_req, res) => {
   try {
-    const data = await createAgentIntegration(
-      {
-        name: req.body?.name,
-        provider: req.body?.provider,
-        mode: req.body?.mode,
-        status: req.body?.status,
-        base_url: req.body?.base_url,
-        fallback_endpoint: req.body?.fallback_endpoint,
-        auth_type: req.body?.auth_type,
-        model: req.body?.model,
-        role_key: req.body?.role_key,
-        config: req.body?.config,
-      },
-      {
-        userId: req.auth?.user_id,
-        operatorId: req.auth?.operator_id,
-      }
-    );
-    res.json({ ok: true, integration: data });
+    const data = await getAgentRuntimeOverview();
+    res.json({ ok: true, agents: data });
   } catch (err: any) {
-    console.error('[AGENT INTEGRATION CREATE ERROR]', err?.message ?? err);
-    res.status(400).json({ ok: false, error: err.message ?? 'Create integration failed' });
+    console.error('[AGENT RUNTIME ERROR]', err?.message ?? err);
+    res.status(500).json({ ok: false, error: err.message ?? 'Runtime overview failed' });
   }
 });
 
-router.get('/integrations', requireAuth('viewer'), async (_req, res) => {
+router.get('/mission-templates', requireAuth('viewer'), async (_req, res) => {
   try {
-    const data = await listAgentIntegrations();
-    res.json({ ok: true, integrations: data });
+    res.json({ ok: true, templates: getMissionTemplates() });
   } catch (err: any) {
-    console.error('[AGENT INTEGRATION LIST ERROR]', err?.message ?? err);
-    res.status(500).json({ ok: false, error: err.message ?? 'List integrations failed' });
+    console.error('[MISSION TEMPLATE LIST ERROR]', err?.message ?? err);
+    res.status(500).json({ ok: false, error: err.message ?? 'Template list failed' });
+  }
+});
+
+router.post('/bootstrap-employee-team', requireAuth('viewer'), async (req, res) => {
+  try {
+    const data = await bootstrapEmployeeTeam({
+      userId: req.auth?.user_id,
+      operatorId: req.auth?.operator_id,
+    });
+    res.json({ ok: true, ...data });
+  } catch (err: any) {
+    console.error('[BOOTSTRAP_EMPLOYEE_TEAM_ERROR]', err?.message ?? err);
+    res.status(400).json({ ok: false, error: err.message ?? 'Bootstrap employee team failed' });
+  }
+});
+
+router.get('/missions', requireAuth('viewer'), async (req, res) => {
+  try {
+    const agentId = req.query?.agent_id ? String(req.query.agent_id) : undefined;
+    const data = await listMissions(agentId);
+    res.json({ ok: true, missions: data });
+  } catch (err: any) {
+    console.error('[MISSION LIST ERROR]', err?.message ?? err);
+    res.status(400).json({ ok: false, error: err.message ?? 'Mission list failed' });
+  }
+});
+
+router.post('/missions', requireAuth('viewer'), async (req, res) => {
+  try {
+    const data = await createMission(
+      {
+        agent_id: req.body?.agent_id,
+        name: req.body?.name,
+        role_key: req.body?.role_key,
+        task_type: req.body?.task_type,
+        mission_goal: req.body?.mission_goal,
+        instructions: req.body?.instructions,
+        cadence_type: req.body?.cadence_type,
+        cadence_value: req.body?.cadence_value,
+        timezone: req.body?.timezone,
+        next_run_at: req.body?.next_run_at,
+        active: req.body?.active,
+        execution_policy: req.body?.execution_policy,
+        output_policy: req.body?.output_policy,
+        priority: req.body?.priority,
+        metadata: req.body?.metadata,
+      },
+      { userId: req.auth?.user_id, operatorId: req.auth?.operator_id }
+    );
+    res.json({ ok: true, mission: data });
+  } catch (err: any) {
+    console.error('[MISSION CREATE ERROR]', err?.message ?? err);
+    res.status(400).json({ ok: false, error: err.message ?? 'Create mission failed' });
+  }
+});
+
+router.patch('/missions/:id', requireAuth('viewer'), async (req, res) => {
+  try {
+    const data = await updateMission(req.params.id, {
+      name: req.body?.name,
+      mission_goal: req.body?.mission_goal,
+      instructions: req.body?.instructions,
+      cadence_type: req.body?.cadence_type,
+      cadence_value: req.body?.cadence_value,
+      timezone: req.body?.timezone,
+      next_run_at: req.body?.next_run_at,
+      active: req.body?.active,
+      execution_policy: req.body?.execution_policy,
+      output_policy: req.body?.output_policy,
+      priority: req.body?.priority,
+      metadata: req.body?.metadata,
+      last_status: req.body?.last_status,
+    });
+    res.json({ ok: true, mission: data });
+  } catch (err: any) {
+    console.error('[MISSION UPDATE ERROR]', err?.message ?? err);
+    res.status(400).json({ ok: false, error: err.message ?? 'Update mission failed' });
+  }
+});
+
+router.post('/missions/:id/run-now', requireAuth('viewer'), async (req, res) => {
+  try {
+    const data = await runMissionNow(req.params.id, {
+      userId: req.auth?.user_id,
+      operatorId: req.auth?.operator_id,
+    });
+    res.json({ ok: true, ...data });
+  } catch (err: any) {
+    console.error('[MISSION RUN NOW ERROR]', err?.message ?? err);
+    res.status(400).json({ ok: false, error: err.message ?? 'Run now failed' });
+  }
+});
+
+router.post('/missions/:id/pause', requireAuth('viewer'), async (req, res) => {
+  try {
+    const data = await updateMission(req.params.id, { active: false, last_status: 'skipped' });
+    res.json({ ok: true, mission: data });
+  } catch (err: any) {
+    console.error('[MISSION PAUSE ERROR]', err?.message ?? err);
+    res.status(400).json({ ok: false, error: err.message ?? 'Pause mission failed' });
+  }
+});
+
+router.post('/missions/:id/resume', requireAuth('viewer'), async (req, res) => {
+  try {
+    const data = await updateMission(req.params.id, {
+      active: true,
+      next_run_at: req.body?.next_run_at ?? new Date(Date.now() + 60000).toISOString(),
+      last_status: 'queued',
+    });
+    res.json({ ok: true, mission: data });
+  } catch (err: any) {
+    console.error('[MISSION RESUME ERROR]', err?.message ?? err);
+    res.status(400).json({ ok: false, error: err.message ?? 'Resume mission failed' });
+  }
+});
+
+router.get('/missions/:id/runs', requireAuth('viewer'), async (req, res) => {
+  try {
+    const limit = req.query?.limit ? Number(req.query.limit) : 20;
+    const runs = await listMissionRuns(req.params.id, limit);
+    res.json({ ok: true, runs });
+  } catch (err: any) {
+    console.error('[MISSION RUN LIST ERROR]', err?.message ?? err);
+    res.status(400).json({ ok: false, error: err.message ?? 'List mission runs failed' });
   }
 });
 

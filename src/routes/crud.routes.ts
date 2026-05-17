@@ -39,6 +39,13 @@ router.get('/:table', async (req, res) => {
     assertTablePermission(req, table);
     const rows = await listRows(table, req.query);
 
+    if (table === 'sequences') {
+      console.info('[CRUD_ROUTE_SEQUENCES_RESPONSE]', {
+        query: req.query,
+        rowCount: Array.isArray(rows) ? rows.length : 0,
+      });
+    }
+
     res.json(rows);
   } catch (err: any) {
     console.error('[CRUD LIST ERROR]', err);

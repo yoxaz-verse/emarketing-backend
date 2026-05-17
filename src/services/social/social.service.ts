@@ -16,7 +16,7 @@ import {
   validateSocialPostInput,
 } from './connectors';
 import { publishLinkedInTextLink } from './linkedin.client';
-import { getOperatorPlatformConnection, markConnectionFailure } from './socialAuth.service';
+import { getOperatorPlatformConnection, hasOperatorOAuthAppConfig, markConnectionFailure } from './socialAuth.service';
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -40,6 +40,50 @@ function fallbackIdempotencyKey(input: CreateSocialPublishRequestInput, userId?:
   return `social-auto-${digest}`;
 }
 
+function requiredFieldsByPlatform(platform: string): string[] {
+  if (platform === 'linkedin') return ['client_id', 'client_secret', 'redirect_uri'];
+  if (platform === 'meta') return ['app_id', 'app_secret', 'redirect_uri'];
+  if (platform === 'reddit') return ['client_id', 'client_secret', 'redirect_uri', 'user_agent'];
+  if (platform === 'telegram') return ['bot_token', 'chat_id'];
+  if (platform === 'whatsapp') return ['phone_number_id', 'business_account_id', 'access_token'];
+  return [];
+}
+
+function missingConfigFieldsForPlatform(platform: string, row: any | null): string[] {
+  const required = requiredFieldsByPlatform(platform);
+  if (!row) return required;
+
+  const metadata = (row.metadata && typeof row.metadata === 'object') ? row.metadata : {};
+  const clientId = String(row.client_id ?? '').trim();
+  const redirectUri = String(row.redirect_uri ?? '').trim();
+  const hasSecret = Boolean(String(row.client_secret_encrypted ?? '').trim());
+
+  const snapshot: Record<string, string> = {};
+  if (platform === 'linkedin') {
+    snapshot.client_id = clientId;
+    snapshot.client_secret = hasSecret ? '***' : '';
+    snapshot.redirect_uri = redirectUri;
+  } else if (platform === 'meta') {
+    snapshot.app_id = clientId;
+    snapshot.app_secret = hasSecret ? '***' : '';
+    snapshot.redirect_uri = redirectUri;
+  } else if (platform === 'reddit') {
+    snapshot.client_id = clientId;
+    snapshot.client_secret = hasSecret ? '***' : '';
+    snapshot.redirect_uri = redirectUri;
+    snapshot.user_agent = String((metadata as any).user_agent ?? '').trim();
+  } else if (platform === 'telegram') {
+    snapshot.bot_token = hasSecret ? '***' : '';
+    snapshot.chat_id = String((metadata as any).chat_id ?? '').trim();
+  } else if (platform === 'whatsapp') {
+    snapshot.phone_number_id = String((metadata as any).phone_number_id ?? clientId ?? '').trim();
+    snapshot.business_account_id = String((metadata as any).business_account_id ?? '').trim();
+    snapshot.access_token = hasSecret ? '***' : '';
+  }
+
+  return required.filter((key) => !String(snapshot[key] ?? '').trim());
+}
+
 export async function listSocialConnectors(userId?: string | null, operatorId?: string | null) {
   const { data, error } = await supabase
     .from('social_connectors')
@@ -54,28 +98,65 @@ export async function listSocialConnectors(userId?: string | null, operatorId?: 
   const rows = (data ?? []) as SocialConnectorCapability[];
   if (!userId || !operatorId) return rows;
 
-  const statuses = await Promise.all(
-    rows.map(async (row) => {
-      const conn = await getOperatorPlatformConnection(row.code, userId, operatorId);
-      return {
-        code: row.code,
-        connected: Boolean(conn),
-      };
-    })
-  );
+  const [statuses, appRowsResult] = await Promise.all([
+    Promise.all(
+      rows.map(async (row) => {
+        const conn = await getOperatorPlatformConnection(row.code, userId, operatorId);
+        const oauthAppConfigured = row.code === 'linkedin'
+          ? await hasOperatorOAuthAppConfig('linkedin', operatorId)
+          : false;
+        return {
+          code: row.code,
+          connected: Boolean(conn),
+          oauthAppConfigured,
+        };
+      })
+    ),
+    supabase
+      .from('social_operator_oauth_apps')
+      .select('*')
+      .eq('operator_id', operatorId)
+      .eq('active', true),
+  ]);
+
+  if (appRowsResult.error && appRowsResult.error.code !== 'PGRST205' && appRowsResult.error.code !== '42P01') {
+    throw appRowsResult.error;
+  }
+
+  const appByPlatform = new Map<string, any>();
+  for (const appRow of appRowsResult.data ?? []) {
+    appByPlatform.set(String((appRow as any).platform_code ?? '').toLowerCase(), appRow);
+  }
 
   const statusByCode = new Map(statuses.map((s) => [s.code, s.connected]));
+  const oauthConfigByCode = new Map(statuses.map((s) => [s.code, s.oauthAppConfigured]));
 
   return rows.map((row) => {
-    if (row.code !== 'linkedin') return row;
+    const appRow = appByPlatform.get(row.code) ?? null;
+    const missingFields = missingConfigFieldsForPlatform(row.code, appRow);
+    const appConfigured = missingFields.length === 0;
+    if (row.code !== 'linkedin') {
+      return {
+        ...row,
+        metadata: {
+          ...(row.metadata ?? {}),
+          app_configured: appConfigured,
+          missing_fields: missingFields,
+        },
+      };
+    }
+    const oauthAppConfigured = Boolean(oauthConfigByCode.get(row.code));
     return {
       ...row,
       credentials_active: Boolean(statusByCode.get(row.code)),
-      auth_type: 'oauth2',
+      auth_type: oauthAppConfigured ? 'oauth2' : 'none',
       status: statusByCode.get(row.code) ? 'api_enabled' : 'manual_assisted',
       metadata: {
         ...(row.metadata ?? {}),
         capabilities: ['text_link'],
+        oauth_app_configured: oauthAppConfigured,
+        app_configured: appConfigured,
+        missing_fields: missingFields,
       },
     } as SocialConnectorCapability;
   });
