@@ -9,6 +9,15 @@ type JwtPayload = {
   operator_id?: string | null;
 };
 
+function authMeta(req: Request) {
+  return {
+    method: req.method,
+    path: req.originalUrl || req.url,
+    host: req.headers.host ?? 'unknown',
+    deploymentVersion: process.env.DEPLOYMENT_VERSION ?? process.env.CAPROVER_GIT_COMMIT_SHA ?? 'unset',
+  };
+}
+
 export function requireAuthLite() {
   return (req: Request, res: Response, next: NextFunction): void => {
     let token = '';
@@ -31,7 +40,7 @@ export function requireAuthLite() {
     }
 
     if (!token) {
-      console.log('[requireAuthLite] No token found in header or cookies', { tokenSource });
+      console.log('[requireAuthLite] No token found in header or cookies', { tokenSource, ...authMeta(req) });
       res.status(401).json({ error: 'UNAUTHORIZED' });
       return;
     }
@@ -42,7 +51,7 @@ export function requireAuthLite() {
         JWT_SECRET
       ) as JwtPayload;
 
-      console.log('[requireAuthLite] Payload:', JSON.stringify(payload));
+      console.log('[requireAuthLite] Payload:', JSON.stringify(payload), authMeta(req));
 
       // ✅ MAP PAYLOAD → req.auth (IMPORTANT)
       req.auth = {
@@ -52,13 +61,14 @@ export function requireAuthLite() {
         operator_id: payload.operator_id ?? null,
       };
 
-      console.log('[requireAuthLite] req.auth set:', JSON.stringify(req.auth));
+      console.log('[requireAuthLite] req.auth set:', JSON.stringify(req.auth), authMeta(req));
 
       next();
     } catch (err) {
       console.log('[requireAuthLite] Token verification failed:', {
         tokenSource,
         message: err instanceof Error ? err.message : 'unknown',
+        ...authMeta(req),
       });
       res.status(401).json({ error: 'UNAUTHORIZED' });
     }

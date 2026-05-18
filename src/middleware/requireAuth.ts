@@ -10,6 +10,15 @@ type JwtPayload = {
   operator_id?: string | null;
 };
 
+function authMeta(req: Request) {
+  return {
+    method: req.method,
+    path: req.originalUrl || req.url,
+    host: req.headers.host ?? 'unknown',
+    deploymentVersion: process.env.DEPLOYMENT_VERSION ?? process.env.CAPROVER_GIT_COMMIT_SHA ?? 'unset',
+  };
+}
+
 function extractCookieToken(cookieHeader?: string): string {
   if (!cookieHeader) return '';
   const cookieMap = Object.fromEntries(
@@ -31,7 +40,7 @@ export function requireAuth(
 ) {
   return async (req: Request, res: Response, next: NextFunction) => {
     try {
-      console.log('[AUTH_REQUIRE] Start');
+      console.log('[AUTH_REQUIRE] Start', authMeta(req));
 
       const authHeader = req.headers.authorization;
       const apiKeyHeader = req.headers['x-api-key'];
@@ -70,6 +79,7 @@ export function requireAuth(
             tokenSource,
             tokenLength: token.length,
             error: (err as Error)?.message ?? 'unknown',
+            ...authMeta(req),
           });
           return res.status(401).json({ error: 'Invalid token' });
         }
@@ -82,7 +92,7 @@ export function requireAuth(
       
         // ✅ USER NOT YET CREATED IN DB — ALLOW
         if (!dbUser) {
-          console.info('[AUTH_ALLOW] JWT user not yet provisioned in users table', { tokenSource, userId: jwtUser.user_id });
+          console.info('[AUTH_ALLOW] JWT user not yet provisioned in users table', { tokenSource, userId: jwtUser.user_id, ...authMeta(req) });
           req.auth = {
             type: 'user',
             user_id: jwtUser.user_id,
@@ -93,7 +103,7 @@ export function requireAuth(
         }
       
         if (!dbUser.active) {
-          console.warn('[AUTH_REJECT] Inactive user', { tokenSource, userId: dbUser.id });
+          console.warn('[AUTH_REJECT] Inactive user', { tokenSource, userId: dbUser.id, ...authMeta(req) });
           return res.status(401).json({
             error: 'User disabled',
           });
@@ -105,6 +115,7 @@ export function requireAuth(
             userId: dbUser.id,
             actualRole: dbUser.role,
             requiredRole: minimumRole,
+            ...authMeta(req),
           });
           return res.status(403).json({
             error: 'Insufficient permissions',
@@ -112,7 +123,7 @@ export function requireAuth(
         }
       
         if (requireOperator && !dbUser.operator_id) {
-          console.warn('[AUTH_REJECT] Operator access required', { tokenSource, userId: dbUser.id });
+          console.warn('[AUTH_REJECT] Operator access required', { tokenSource, userId: dbUser.id, ...authMeta(req) });
           return res.status(403).json({
             error: 'Operator access required',
           });
@@ -125,7 +136,7 @@ export function requireAuth(
           operator_id: dbUser.operator_id ?? null,
         };
 
-        console.info('[AUTH_ALLOW] JWT auth accepted', { tokenSource, userId: dbUser.id, role: dbUser.role });
+        console.info('[AUTH_ALLOW] JWT auth accepted', { tokenSource, userId: dbUser.id, role: dbUser.role, ...authMeta(req) });
         return next();
       }
       

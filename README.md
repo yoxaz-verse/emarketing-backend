@@ -72,3 +72,21 @@ If you want task-creator-only flow with no `agent_integrations` usage:
 This will archive existing integration data, then remove:
 - `agent_integrations` table
 - `agent_tasks.integration_id` column + FK/index
+
+## Production Auth Secret Rotation Runbook (`JWT_SECRET`)
+
+When rotating `JWT_SECRET` in production, old browser cookies contain tokens signed by the previous secret and will fail with `invalid signature`.
+
+### Required steps
+1. Set a single canonical `JWT_SECRET` in CapRover backend env.
+2. Ensure all running backend instances use the same env/version.
+3. Restart backend deployment.
+4. Force logout flow for users once:
+   - ask users to hit `/api/auth/logout` or
+   - clear cookies `auth_token`, `user_role`, `operator_id`.
+5. Users log in again to receive a token signed by the new secret.
+
+### Verification checklist
+- Backend boot logs do not show missing JWT secret.
+- `/auth/me` succeeds after fresh login.
+- Repeated `[requireAuthLite] Token verification failed: invalid signature` stops for fresh sessions.
