@@ -23,19 +23,28 @@ export type ValidationRunRow = {
   updated_at: string;
 };
 
+function applyOperatorRunScope(query: any, operatorId?: string) {
+  const scopedOperatorId = String(operatorId ?? '').trim();
+  if (!scopedOperatorId) return query;
+  return query.contains('scope', { operatorId: scopedOperatorId });
+}
+
 function deriveStatus(run: ValidationRunRow): 'idle' | 'queued' | 'running' | 'completed' | 'failed' {
   if (!run) return 'idle';
   return run.status;
 }
 
-export async function getActiveValidationRun(): Promise<ValidationRunRow | null> {
-  const { data, error } = await supabase
+export async function getActiveValidationRun(operatorId?: string): Promise<ValidationRunRow | null> {
+  const query = applyOperatorRunScope(
+    supabase
     .from('validation_runs')
     .select('*')
     .in('status', ['queued', 'running'])
     .order('started_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    .limit(1),
+    operatorId
+  );
+  const { data, error } = await query.maybeSingle();
 
   if (error) throw error;
   return (data as ValidationRunRow | null) ?? null;
@@ -119,25 +128,32 @@ export async function touchValidationRun(runId: string): Promise<void> {
     .eq('id', runId);
 }
 
-export async function getLatestValidationRun(): Promise<ValidationRunRow | null> {
-  const { data, error } = await supabase
+export async function getLatestValidationRun(operatorId?: string): Promise<ValidationRunRow | null> {
+  const query = applyOperatorRunScope(
+    supabase
     .from('validation_runs')
     .select('*')
     .order('started_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    .limit(1),
+    operatorId
+  );
+  const { data, error } = await query.maybeSingle();
 
   if (error) throw error;
   return (data as ValidationRunRow | null) ?? null;
 }
 
-export async function listValidationRuns(limit: number = 5): Promise<ValidationRunRow[]> {
+export async function listValidationRuns(limit: number = 5, operatorId?: string): Promise<ValidationRunRow[]> {
   const safeLimit = Math.max(1, Math.min(20, limit));
-  const { data, error } = await supabase
+  const query = applyOperatorRunScope(
+    supabase
     .from('validation_runs')
     .select('*')
     .order('started_at', { ascending: false })
-    .limit(safeLimit);
+    .limit(safeLimit),
+    operatorId
+  );
+  const { data, error } = await query;
 
   if (error) throw error;
   return (data as ValidationRunRow[]) ?? [];

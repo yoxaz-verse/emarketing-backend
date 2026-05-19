@@ -11,7 +11,7 @@ import { requireAuth } from '../middleware/requireAuth.js';
 
 const router = Router();
 
-// router.use(requireAuth('operator'));
+router.use(requireAuth('viewer'));
 
 
 router.get('/overview', async (_req, res) => {
@@ -19,10 +19,10 @@ router.get('/overview', async (_req, res) => {
   res.json(data);
 });
 
-router.get('/operations-summary', async (_req, res) => {
+router.get('/operations-summary', async (req, res) => {
   const startedAt = Date.now();
   try {
-    const data = await getOperationsSummary();
+    const data = await getOperationsSummary(req.auth);
     console.info('[STATS_OPERATIONS_SUMMARY_OK]', {
       durationMs: Date.now() - startedAt,
     });

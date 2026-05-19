@@ -152,7 +152,7 @@ router.get('/me', requireAuthLite(), async (req, res) => {
 
   const { data: user, error } = await supabase
     .from('users')
-    .select('id, role, operator_id, active')
+    .select('id, role, operator_id, email, active')
     .eq('id', userId)
     .single();
 
@@ -167,6 +167,7 @@ router.get('/me', requireAuthLite(), async (req, res) => {
     id: user.id,
     role: user.role,
     operator_id: user.operator_id,
+    email: user.email,
   });
 });
 

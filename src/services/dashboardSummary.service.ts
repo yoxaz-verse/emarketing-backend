@@ -1,5 +1,6 @@
 import { supabase } from '../supabase';
 import { getSendingLimitsConfig, resolveInboxEffectiveLimits } from './sendingLimitsConfig.service';
+import type { Role } from '../auth/roles';
 
 export type OperationsSummaryResponse = {
   campaigns: {
@@ -53,6 +54,7 @@ type InboxRow = {
 type CampaignRow = {
   id: string;
   status: string | null;
+  operator_id?: string | null;
 };
 
 type CampaignInboxRow = {
@@ -70,6 +72,14 @@ type LeadRow = {
   interest_status: string | null;
 };
 
+type AuthContext = {
+  type: 'user' | 'api';
+  role: Role;
+  user_id?: string;
+  operator_id?: string | null;
+  api_key_id?: string;
+};
+
 function toSafeNumber(value: unknown, fallback = 0): number {
   const num = Number(value);
   if (!Number.isFinite(num)) return fallback;
@@ -84,7 +94,7 @@ function getErrorMessage(error: unknown): string {
   return String(error ?? 'Unknown error');
 }
 
-export async function getOperationsSummary(): Promise<OperationsSummaryResponse> {
+export async function getOperationsSummary(auth?: AuthContext): Promise<OperationsSummaryResponse> {
   let sendingLimits: any;
   try {
     sendingLimits = await getSendingLimitsConfig();
@@ -95,21 +105,71 @@ export async function getOperationsSummary(): Promise<OperationsSummaryResponse>
     };
   }
 
-  const campaignsResult = await supabase.from('campaigns').select('id,status');
-  const campaignInboxesResult = await supabase.from('campaign_inboxes').select('campaign_id,inbox_id');
+  const normalizedRole = String(auth?.role ?? '').toLowerCase();
+  const scopedOperatorId =
+    normalizedRole === 'admin' || normalizedRole === 'superadmin'
+      ? null
+      : String(auth?.operator_id ?? '').trim() || null;
 
-  const inboxesFullResult = await supabase
+  let campaignsQuery = supabase.from('campaigns').select('id,status,operator_id');
+  if (scopedOperatorId) {
+    campaignsQuery = campaignsQuery.eq('operator_id', scopedOperatorId);
+  }
+  const campaignsResult = await campaignsQuery;
+
+  const campaigns = (campaignsResult.data ?? []) as CampaignRow[];
+  const scopedCampaignIds = campaigns.map((campaign) => String(campaign.id));
+
+  let campaignInboxesQuery = supabase.from('campaign_inboxes').select('campaign_id,inbox_id');
+  if (scopedCampaignIds.length > 0) {
+    campaignInboxesQuery = campaignInboxesQuery.in('campaign_id', scopedCampaignIds);
+  } else if (scopedOperatorId) {
+    campaignInboxesQuery = campaignInboxesQuery.eq('campaign_id', '__none__');
+  }
+  const campaignInboxesResult = await campaignInboxesQuery;
+
+  const scopedInboxIds = Array.from(
+    new Set((campaignInboxesResult.data ?? []).map((row: CampaignInboxRow) => String(row.inbox_id)))
+  );
+
+  let inboxesFullQuery = supabase
     .from('inboxes')
     .select('id,status,is_paused,hard_paused,health_score,daily_limit,hourly_limit,warmup_enabled,warmup_day');
+  if (scopedOperatorId) {
+    if (scopedInboxIds.length > 0) {
+      inboxesFullQuery = inboxesFullQuery.in('id', scopedInboxIds);
+    } else {
+      inboxesFullQuery = inboxesFullQuery.eq('id', '__none__');
+    }
+  }
+  const inboxesFullResult = await inboxesFullQuery;
+
+  let inboxesFallbackQuery = supabase.from('inboxes').select('id,status,is_paused,health_score,daily_limit,hourly_limit');
+  if (scopedOperatorId) {
+    if (scopedInboxIds.length > 0) {
+      inboxesFallbackQuery = inboxesFallbackQuery.in('id', scopedInboxIds);
+    } else {
+      inboxesFallbackQuery = inboxesFallbackQuery.eq('id', '__none__');
+    }
+  }
   const inboxesResult = inboxesFullResult.error
-    ? await supabase.from('inboxes').select('id,status,is_paused,health_score,daily_limit,hourly_limit')
+    ? await inboxesFallbackQuery
     : inboxesFullResult;
 
-  const leadsFullResult = await supabase
+  let leadsFullQuery = supabase
     .from('leads')
     .select('id,is_used,email_eligibility,permanently_failed,status,replied_at,interest_status');
+  if (scopedOperatorId) {
+    leadsFullQuery = leadsFullQuery.eq('operator_id', scopedOperatorId);
+  }
+  const leadsFullResult = await leadsFullQuery;
+
+  let leadsFallbackQuery = supabase.from('leads').select('id,is_used,email_eligibility,permanently_failed,status,replied_at');
+  if (scopedOperatorId) {
+    leadsFallbackQuery = leadsFallbackQuery.eq('operator_id', scopedOperatorId);
+  }
   const leadsResult = leadsFullResult.error
-    ? await supabase.from('leads').select('id,is_used,email_eligibility,permanently_failed,status,replied_at')
+    ? await leadsFallbackQuery
     : leadsFullResult;
 
   if (campaignsResult.error) throw campaignsResult.error;
@@ -117,7 +177,6 @@ export async function getOperationsSummary(): Promise<OperationsSummaryResponse>
   if (campaignInboxesResult.error) throw campaignInboxesResult.error;
   if (leadsResult.error) throw leadsResult.error;
 
-  const campaigns = (campaignsResult.data ?? []) as CampaignRow[];
   const inboxes = ((inboxesResult.data ?? []) as InboxRow[]).map((row) => ({
     ...row,
     hard_paused: row.hard_paused ?? false,

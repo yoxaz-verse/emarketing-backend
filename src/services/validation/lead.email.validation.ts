@@ -20,6 +20,10 @@ type LeadQueueRow = {
 };
 
 type StepKey = 'step_1_syntax' | 'step_2_provider' | 'step_3_risk' | 'step_4_finalize';
+type ValidationScope = {
+  isAdmin: boolean;
+  operatorId: string | null;
+};
 
 const STEP_LABELS: Record<StepKey, string> = {
   step_1_syntax: 'Step 1 - Email Syntax',
@@ -27,6 +31,31 @@ const STEP_LABELS: Record<StepKey, string> = {
   step_3_risk: 'Step 3 - Risk Filters',
   step_4_finalize: 'Step 4 - Final Decision',
 };
+
+function createHttpError(message: string, statusCode: number): Error & { statusCode: number } {
+  const error = new Error(message) as Error & { statusCode: number };
+  error.statusCode = statusCode;
+  return error;
+}
+
+function resolveValidationScope(req: Request): ValidationScope {
+  const role = String(req.auth?.role ?? '').toLowerCase();
+  const isAdmin = role === 'admin' || role === 'superadmin';
+  if (isAdmin) {
+    return { isAdmin: true, operatorId: null };
+  }
+
+  const operatorId = String(req.auth?.operator_id ?? '').trim();
+  if (!operatorId) {
+    throw createHttpError('Operator access required', 403);
+  }
+  return { isAdmin: false, operatorId };
+}
+
+function applyOperatorScope(query: any, scope: ValidationScope) {
+  if (scope.isAdmin || !scope.operatorId) return query;
+  return query.eq('operator_id', scope.operatorId);
+}
 
 function getStepFromReason(reason: string | null | undefined): StepKey {
   const normalized = String(reason ?? '').toLowerCase();
@@ -64,14 +93,18 @@ export function shouldNormalizeLeadEligibility(row: { email?: unknown; email_eli
   return hasNonEmptyEmail(row.email) && isBlankEligibility(row.email_eligibility);
 }
 
-async function normalizeLegacyPendingEligibility(): Promise<number> {
-  const { data: candidates, error: fetchError } = await supabase
+async function normalizeLegacyPendingEligibility(scope: ValidationScope): Promise<number> {
+  const candidatesQuery = applyOperatorScope(
+    supabase
     .from('leads')
     .select('id, email, email_eligibility')
     .or('email_eligibility.is.null,email_eligibility.eq.')
     .not('email', 'is', null)
     .neq('email', '')
-    .limit(5000);
+    .limit(5000),
+    scope
+  );
+  const { data: candidates, error: fetchError } = await candidatesQuery;
 
   if (fetchError) {
     logger.warn('email_validation_normalization_check_failed', { error: fetchError.message });
@@ -84,7 +117,8 @@ async function normalizeLegacyPendingEligibility(): Promise<number> {
 
   if (idsToNormalize.length === 0) return 0;
 
-  const { error: updateError } = await supabase
+  const updateQuery = applyOperatorScope(
+    supabase
     .from('leads')
     .update({
       email_eligibility: 'pending',
@@ -92,7 +126,10 @@ async function normalizeLegacyPendingEligibility(): Promise<number> {
       retry_count: 0,
       permanently_failed: false,
     })
-    .in('id', idsToNormalize);
+    .in('id', idsToNormalize),
+    scope
+  );
+  const { error: updateError } = await updateQuery;
 
   if (updateError) {
     logger.warn('email_validation_normalization_update_failed', { error: updateError.message });
@@ -105,13 +142,17 @@ async function normalizeLegacyPendingEligibility(): Promise<number> {
   return idsToNormalize.length;
 }
 
-async function resetInProgressRows(): Promise<number> {
-  const { data: processingRows, error: processingError } = await supabase
+async function resetInProgressRows(scope: ValidationScope): Promise<number> {
+  const processingRowsQuery = applyOperatorScope(
+    supabase
     .from('leads')
     .select('id')
     .eq('email_eligibility', 'pending')
     .eq('eligibility_processing', true)
-    .limit(5000);
+    .limit(5000),
+    scope
+  );
+  const { data: processingRows, error: processingError } = await processingRowsQuery;
 
   if (processingError) {
     logger.warn('email_validation_reset_in_progress_check_failed', { error: processingError.message });
@@ -121,10 +162,14 @@ async function resetInProgressRows(): Promise<number> {
   const ids = (processingRows ?? []).map((row: any) => row.id);
   if (ids.length === 0) return 0;
 
-  const { error: resetError } = await supabase
+  const resetQuery = applyOperatorScope(
+    supabase
     .from('leads')
     .update({ eligibility_processing: false })
-    .in('id', ids);
+    .in('id', ids),
+    scope
+  );
+  const { error: resetError } = await resetQuery;
 
   if (resetError) {
     logger.warn('email_validation_reset_in_progress_failed', { error: resetError.message });
@@ -137,19 +182,24 @@ async function resetInProgressRows(): Promise<number> {
   return ids.length;
 }
 
-async function fetchLeadsToValidate(mode: ValidationRunMode, limit: number): Promise<LeadQueueRow[]> {
+async function fetchLeadsToValidate(mode: ValidationRunMode, limit: number, scope: ValidationScope): Promise<LeadQueueRow[]> {
   if (mode === 'rerun_failed') {
-    const { data: failedLeads, error: failedError } = await supabase
+    const failedLeadsQuery = applyOperatorScope(
+      supabase
       .from('leads')
       .select('id')
       .eq('permanently_failed', true)
-      .limit(limit);
+      .limit(limit),
+      scope
+    );
+    const { data: failedLeads, error: failedError } = await failedLeadsQuery;
 
     if (failedError) throw failedError;
     const failedIds = (failedLeads ?? []).map((l: any) => l.id);
 
     if (failedIds.length > 0) {
-      await supabase
+      await applyOperatorScope(
+        supabase
         .from('leads')
         .update({
           email_eligibility: 'pending',
@@ -158,15 +208,21 @@ async function fetchLeadsToValidate(mode: ValidationRunMode, limit: number): Pro
           retry_count: 0,
           email_eligibility_reason: null,
         })
-        .in('id', failedIds);
+        .in('id', failedIds),
+        scope
+      );
     }
   }
 
-  const { data: leads, error } = await applyPendingQueueReadyFilter(
-    supabase
+  const pendingQuery = applyPendingQueueReadyFilter(
+    applyOperatorScope(
+      supabase
       .from('leads')
-      .select('id, email, retry_count')
+      .select('id, email, retry_count'),
+      scope
+    )
   ).limit(limit);
+  const { data: leads, error } = await pendingQuery;
 
   if (error) throw error;
   return (leads as LeadQueueRow[]) ?? [];
@@ -176,12 +232,13 @@ async function startEmailEligibilityValidation(
   req: Request,
   options: { bypassActiveRunCheck: boolean }
 ): Promise<{ success: boolean; message: string; queued: number; runId: string }> {
+  const scope = resolveValidationScope(req);
   const mode = (String(req.body?.mode || 'pending') === 'rerun_failed' ? 'rerun_failed' : 'pending') as ValidationRunMode;
   const queueMode = process.env.EMAIL_VALIDATION_QUEUE_MODE === 'bullmq' ? 'bullmq' : 'legacy';
   const executionMode = queueMode === 'bullmq' ? 'bullmq_async' : 'inline_sync';
 
   if (!options.bypassActiveRunCheck) {
-    const activeRun = await getActiveValidationRun();
+    const activeRun = await getActiveValidationRun(scope.isAdmin ? undefined : scope.operatorId ?? undefined);
     if (activeRun) {
       const err = new Error('A validation run is currently active. Please wait for completion.') as Error & {
         statusCode?: number;
@@ -193,18 +250,27 @@ async function startEmailEligibilityValidation(
     }
   }
 
-  const normalizedCount = await normalizeLegacyPendingEligibility();
-  const { count: pendingCountPreFilter } = await supabase
+  const normalizedCount = await normalizeLegacyPendingEligibility(scope);
+  const pendingCountQuery = applyOperatorScope(
+    supabase
     .from('leads')
     .select('id', { count: 'exact', head: true })
-    .eq('email_eligibility', 'pending');
+    .eq('email_eligibility', 'pending'),
+    scope
+  );
+  const { count: pendingCountPreFilter } = await pendingCountQuery;
 
-  const leads = await fetchLeadsToValidate(mode, 1000);
+  const leads = await fetchLeadsToValidate(mode, 1000, scope);
   const run = await createValidationRun({
     type: mode,
     totalTargeted: leads.length,
     triggeredBy: req.headers.authorization ? 'authenticated_user' : null,
-    scope: { limit: 1000, executionMode },
+    scope: {
+      limit: 1000,
+      executionMode,
+      scopeType: scope.isAdmin ? 'global' : 'operator',
+      operatorId: scope.operatorId,
+    },
   });
 
   if (queueMode === 'bullmq' && leads.length > 0) {
@@ -278,7 +344,8 @@ export async function runEmailEligibilityValidation(req: Request, res: Response)
 }
 
 export async function resetStuckAndRerunValidation(req: Request, res: Response) {
-  const resetCount = await resetInProgressRows();
+  const scope = resolveValidationScope(req);
+  const resetCount = await resetInProgressRows(scope);
   logger.warn('email_validation_reset_and_rerun_requested', {
     resetCount,
   });
@@ -292,15 +359,16 @@ export async function resetStuckAndRerunValidation(req: Request, res: Response) 
 }
 
 export async function forceUnlockAndRerunValidation(req: Request, res: Response) {
+  const scope = resolveValidationScope(req);
   const mode = (String(req.body?.mode || 'pending') === 'rerun_failed' ? 'rerun_failed' : 'pending') as ValidationRunMode;
-  const activeRun = await getActiveValidationRun();
+  const activeRun = await getActiveValidationRun(scope.isAdmin ? undefined : scope.operatorId ?? undefined);
   const previousRunId = activeRun?.id ?? null;
 
   if (activeRun) {
     await markRunFailed(activeRun.id, 'manual_reset_in_progress_from_leads_ui');
   }
 
-  const resetCount = await resetInProgressRows();
+  const resetCount = await resetInProgressRows(scope);
   logger.warn('email_validation_manual_unlock_applied', {
     previousRunId,
     resetCount,
@@ -332,8 +400,9 @@ export async function forceUnlockAndRerunValidation(req: Request, res: Response)
   }
 }
 
-export async function getEmailValidationRunStatus(_req: Request, res: Response) {
-  const run = await getLatestValidationRun();
+export async function getEmailValidationRunStatus(req: Request, res: Response) {
+  const scope = resolveValidationScope(req);
+  const run = await getLatestValidationRun(scope.isAdmin ? undefined : scope.operatorId ?? undefined);
   const recentUpdatesThreshold = new Date(Date.now() - 2 * 60 * 1000).toISOString();
 
   const [
@@ -347,45 +416,69 @@ export async function getEmailValidationRunStatus(_req: Request, res: Response) 
     reasonRowsResult,
   ] = await Promise.all([
     applyPendingQueueReadyFilter(
-      supabase
+      applyOperatorScope(
+        supabase
         .from('leads')
-        .select('id', { count: 'exact', head: true })
+        .select('id', { count: 'exact', head: true }),
+        scope
+      )
     ),
-    supabase
+    applyOperatorScope(
+      supabase
       .from('leads')
       .select('id', { count: 'exact', head: true })
       .eq('email_eligibility', 'pending')
       .eq('eligibility_processing', true),
-    supabase
+      scope
+    ),
+    applyOperatorScope(
+      supabase
       .from('leads')
       .select('id', { count: 'exact', head: true })
       .eq('eligibility_processing', true),
-    supabase
+      scope
+    ),
+    applyOperatorScope(
+      supabase
       .from('leads')
       .select('id', { count: 'exact', head: true })
       .gte('email_checked_at', recentUpdatesThreshold),
-    supabase
+      scope
+    ),
+    applyOperatorScope(
+      supabase
       .from('leads')
       .select('email_checked_at')
       .eq('email_eligibility', 'pending')
       .order('email_checked_at', { ascending: false })
       .limit(1)
       .maybeSingle(),
-    supabase
+      scope
+    ),
+    applyOperatorScope(
+      supabase
       .from('leads')
       .select('email_checked_at')
       .not('email_checked_at', 'is', null)
       .order('email_checked_at', { ascending: false })
       .limit(1)
       .maybeSingle(),
-    supabase
+      scope
+    ),
+    applyOperatorScope(
+      supabase
       .from('leads')
       .select('id', { count: 'exact', head: true }),
-    supabase
+      scope
+    ),
+    applyOperatorScope(
+      supabase
       .from('leads')
       .select('email_eligibility_reason')
       .not('email_eligibility_reason', 'is', null)
       .limit(5000),
+      scope
+    ),
   ]);
 
   const reasonCounts: Record<string, number> = {};
@@ -438,8 +531,9 @@ export async function getEmailValidationRunStatus(_req: Request, res: Response) 
 }
 
 export async function getEmailValidationRunHistory(req: Request, res: Response) {
+  const scope = resolveValidationScope(req);
   const limit = Number(req.query.limit ?? 5);
-  const runs = await listValidationRuns(limit);
+  const runs = await listValidationRuns(limit, scope.isAdmin ? undefined : scope.operatorId ?? undefined);
   return res.json({
     success: true,
     runs,

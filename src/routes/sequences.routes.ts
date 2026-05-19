@@ -1,11 +1,32 @@
 import { Router } from 'express';
 import { supabase } from '../supabase';
+import { requireAuth } from '../middleware/requireAuth';
 import {
   createSequenceRuns,
   validateSequenceGraph,
 } from '../services/sequenceEngine';
 
 const router = Router();
+router.use(requireAuth('viewer'));
+
+function isAdmin(req: any): boolean {
+  const role = String(req?.auth?.role ?? '').toLowerCase();
+  return role === 'admin' || role === 'superadmin';
+}
+
+function assertAdmin(req: any) {
+  if (!isAdmin(req)) {
+    const err = new Error('Only admin can modify sequences') as Error & { statusCode?: number };
+    err.statusCode = 403;
+    throw err;
+  }
+}
+
+function statusFromError(err: any, fallback: number): number {
+  const code = Number(err?.statusCode ?? err?.status ?? 0);
+  if (Number.isInteger(code) && code >= 400 && code < 600) return code;
+  return fallback;
+}
 
 router.get('/', async (_req, res) => {
   try {
@@ -24,6 +45,7 @@ router.get('/', async (_req, res) => {
 
 router.post('/', async (req, res) => {
   try {
+    assertAdmin(req);
     const payload = {
       name: req.body.name ?? 'Untitled Sequence',
       graph_json: req.body.graph_json ?? { nodes: [], edges: [] },
@@ -40,7 +62,7 @@ router.post('/', async (req, res) => {
     res.json(data);
   } catch (err: any) {
     console.error('[SEQUENCE CREATE ERROR]', err);
-    res.status(400).json({ error: err.message ?? 'Create failed' });
+    res.status(statusFromError(err, 400)).json({ error: err.message ?? 'Create failed' });
   }
 });
 
@@ -62,6 +84,7 @@ router.get('/:id', async (req, res) => {
 
 router.patch('/:id', async (req, res) => {
   try {
+    assertAdmin(req);
     const { data, error } = await supabase
       .from('sequences')
       .update({
@@ -76,12 +99,13 @@ router.patch('/:id', async (req, res) => {
     res.json(data);
   } catch (err: any) {
     console.error('[SEQUENCE UPDATE ERROR]', err);
-    res.status(400).json({ error: err.message ?? 'Update failed' });
+    res.status(statusFromError(err, 400)).json({ error: err.message ?? 'Update failed' });
   }
 });
 
 router.delete('/:id', async (req, res) => {
   try {
+    assertAdmin(req);
     const { error } = await supabase
       .from('sequences')
       .delete()
@@ -91,12 +115,13 @@ router.delete('/:id', async (req, res) => {
     res.json({ success: true });
   } catch (err: any) {
     console.error('[SEQUENCE DELETE ERROR]', err);
-    res.status(400).json({ error: err.message ?? 'Delete failed' });
+    res.status(statusFromError(err, 400)).json({ error: err.message ?? 'Delete failed' });
   }
 });
 
 router.post('/:id/validate', async (req, res) => {
   try {
+    assertAdmin(req);
     const { data: sequence, error } = await supabase
       .from('sequences')
       .select('graph_json')
@@ -125,12 +150,13 @@ router.post('/:id/validate', async (req, res) => {
     res.json(result);
   } catch (err: any) {
     console.error('[SEQUENCE VALIDATE ERROR]', err);
-    res.status(400).json({ error: err.message ?? 'Validation failed' });
+    res.status(statusFromError(err, 400)).json({ error: err.message ?? 'Validation failed' });
   }
 });
 
 router.post('/:id/execute', async (req, res) => {
   try {
+    assertAdmin(req);
     const { data: sequence, error } = await supabase
       .from('sequences')
       .select('graph_json')
@@ -154,7 +180,7 @@ router.post('/:id/execute', async (req, res) => {
     res.json({ success: true, runs });
   } catch (err: any) {
     console.error('[SEQUENCE EXECUTE ERROR]', err);
-    res.status(400).json({ error: err.message ?? 'Execution failed' });
+    res.status(statusFromError(err, 400)).json({ error: err.message ?? 'Execution failed' });
   }
 });
 

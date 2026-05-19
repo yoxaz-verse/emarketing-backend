@@ -3,17 +3,19 @@ import { requireAuth } from '../middleware/requireAuth';
 import {
   attachLeadsToCampaign,
   detachLeadsFromCampaign,
+  getInboxLockConflicts,
   syncCampaignInboxes,
   startCampaign,
   pauseCampaign
 } from '../services/campaign.domain';
 
 const router = Router();
-// router.use(requireAuth('operator'));
+router.use(requireAuth('viewer'));
 
 
 import express from 'express';
 import { supabase } from '../supabase';
+import { resolveOperatorScope } from '../utils/resolveOperatorId';
 
 console.log('[ATTACH_FIX_V2] campaign routes loaded (attach uses permanently_failed, not is_blocked)');
 
@@ -25,10 +27,108 @@ function resolveStatusCode(err: any) {
   return 500;
 }
 
+function getNormalizedAuth(req: any) {
+  const auth = req?.auth;
+  if (!auth) {
+    throw createHttpError('Unauthenticated', 401);
+  }
+
+  return {
+    ...auth,
+    role: String(auth.role ?? '').toLowerCase(),
+    operator_id: auth.operator_id ?? null,
+  };
+}
+
+async function assertCampaignAccess(req: any, campaignId: string) {
+  const auth = getNormalizedAuth(req);
+  let operatorScope: string | null;
+  try {
+    operatorScope = resolveOperatorScope({ ...req, auth } as any);
+  } catch (error: any) {
+    const message = String(error?.message ?? 'Forbidden');
+    if (message.toLowerCase().includes('operator access required')) {
+      throw createHttpError('Operator access required', 403);
+    }
+    throw createHttpError(message, 403);
+  }
+  if (!operatorScope) return;
+
+  const { data: campaign, error } = await supabase
+    .from('campaigns')
+    .select('id, operator_id')
+    .eq('id', campaignId)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!campaign || String(campaign.operator_id ?? '') !== operatorScope) {
+    throw createHttpError('Campaign not found', 404);
+  }
+}
+
+function createHttpError(message: string, statusCode: number) {
+  const error = new Error(message) as Error & { statusCode?: number };
+  error.statusCode = statusCode;
+  return error;
+}
+
+router.get('/:id/inbox-locks', async (req, res) => {
+  try {
+    const campaignId = req.params.id;
+    await assertCampaignAccess(req, campaignId);
+    const campaignAccessRole = String(req?.auth?.role ?? '').toLowerCase();
+
+    const { data: campaign, error: campaignError } = await supabase
+      .from('campaigns')
+      .select('id, operator_id')
+      .eq('id', campaignId)
+      .maybeSingle();
+
+    if (campaignError) throw campaignError;
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+
+    const { data: inboxRows, error: inboxRowsError } = await supabase
+      .from('inboxes')
+      .select('id');
+    if (inboxRowsError) throw inboxRowsError;
+
+    const inboxIds = (inboxRows ?? []).map((row: any) => String(row.id)).filter(Boolean);
+    const conflicts = await getInboxLockConflicts(campaignId, inboxIds);
+    const campaignOperatorId = String(campaign.operator_id ?? '');
+
+    const locks = conflicts.map((row) => {
+      const sameOperator = campaignAccessRole === 'admin' || String(row.blocking_operator_id ?? '') === campaignOperatorId;
+      return {
+        inbox_id: row.inbox_id,
+        blocking_campaign_id: row.blocking_campaign_id,
+        blocking_status: row.blocking_status,
+        blocking_campaign_name: sameOperator
+          ? row.blocking_campaign_name
+          : 'Another active campaign',
+      };
+    });
+
+    return res.json(locks);
+  } catch (err: any) {
+    console.error('[GET INBOX LOCKS ERROR]', err);
+    return res.status(resolveStatusCode(err)).json({
+      error: err.message ?? 'Failed to fetch inbox locks',
+    });
+  }
+});
+
+function isOperatorScopedRequest(req: any): boolean {
+  const role = String(req?.auth?.role ?? '').toLowerCase();
+  const isAdmin = role === 'admin' || role === 'superadmin';
+  const hasOperatorId = String(req?.auth?.operator_id ?? '').trim().length > 0;
+  return !isAdmin && hasOperatorId;
+}
+
 router.post('/:id/leads/attach', async (req, res) => {
   try {
     const campaignId = req.params.id;
     const { lead_ids } = req.body;
+    await assertCampaignAccess(req, campaignId);
 
     if (!Array.isArray(lead_ids)) {
       return res.status(400).json({
@@ -36,10 +136,20 @@ router.post('/:id/leads/attach', async (req, res) => {
       });
     }
 
-    const result = await attachLeadsToCampaign(
-      campaignId,
-      lead_ids
-    );
+    let scopedLeadIds = lead_ids;
+    if (isOperatorScopedRequest(req)) {
+      const operatorId = String(req?.auth?.operator_id ?? '').trim();
+      const { data: ownedLeads, error: ownedLeadsError } = await supabase
+        .from('leads')
+        .select('id')
+        .eq('operator_id', operatorId)
+        .in('id', lead_ids);
+      if (ownedLeadsError) throw ownedLeadsError;
+      const allowedIds = new Set((ownedLeads ?? []).map((row: any) => String(row.id)));
+      scopedLeadIds = lead_ids.filter((id: any) => allowedIds.has(String(id)));
+    }
+
+    const result = await attachLeadsToCampaign(campaignId, scopedLeadIds);
 
     res.json({
       success: true,
@@ -57,14 +167,19 @@ router.post('/:id/leads/attach-folder', async (req, res) => {
   try {
     const campaignId = req.params.id;
     const folderIds = Array.isArray(req.body?.folder_ids) ? req.body.folder_ids : [];
+    await assertCampaignAccess(req, campaignId);
     if (folderIds.length === 0) {
       return res.status(400).json({ error: 'folder_ids must be a non-empty array' });
     }
 
-    const { data: members, error: memberError } = await supabase
+    let memberQuery: any = supabase
       .from('leads')
       .select('id')
       .in('folder_id', folderIds);
+    if (isOperatorScopedRequest(req)) {
+      memberQuery = memberQuery.eq('operator_id', String(req?.auth?.operator_id ?? ''));
+    }
+    const { data: members, error: memberError } = await memberQuery;
     if (memberError) throw memberError;
     const leadIds: string[] = Array.from(new Set((members ?? []).map((m: any) => String(m.id))));
     if (leadIds.length === 0) {
@@ -96,6 +211,7 @@ router.post('/:id/leads/detach', async (req, res) => {
   try {
     const campaignId = req.params.id;
     const { lead_ids } = req.body;
+    await assertCampaignAccess(req, campaignId);
 
     if (!Array.isArray(lead_ids)) {
       return res.status(400).json({
@@ -121,6 +237,7 @@ router.post('/:id/leads/detach/', async (req, res) => {
   try {
     const campaignId = req.params.id;
     const { lead_ids } = req.body;
+    await assertCampaignAccess(req, campaignId);
 
     if (!Array.isArray(lead_ids)) {
       return res.status(400).json({
@@ -144,6 +261,7 @@ router.post('/:id/leads/detach/', async (req, res) => {
 router.post('/:id/inboxes/sync', async (req, res) => {
   try {
     const campaignId = req.params.id;
+    await assertCampaignAccess(req, campaignId);
     const selectedInboxIds = Array.isArray(req.body?.selected_inbox_ids)
       ? req.body.selected_inbox_ids
       : null;
@@ -178,23 +296,55 @@ router.post('/:id/inboxes/sync', async (req, res) => {
 
 // Campaign Step 5 , 13 here we go again
 router.post('/:id/start', async (req, res) => {
+  const campaignId = String(req.params.id ?? '');
+  let auth: ReturnType<typeof getNormalizedAuth> | null = null;
   try {
-    await startCampaign(req.params.id);
+    auth = getNormalizedAuth(req);
+    await assertCampaignAccess({ ...req, auth }, campaignId);
+    await startCampaign(campaignId, auth);
+    console.info('[START_CAMPAIGN_SUCCESS]', {
+      campaignId,
+      role: auth.role,
+      hasOperatorId: Boolean(String(auth.operator_id ?? '').trim()),
+    });
     res.json({ success: true });
   } catch (err: any) {
-    console.error('[START CAMPAIGN ERROR]', err);
-    res.status(500).json({ error: err.message ?? 'Failed to start campaign' });
+    const statusCode = resolveStatusCode(err);
+    console.error('[START CAMPAIGN ERROR]', {
+      campaignId,
+      role: auth?.role ?? String(req?.auth?.role ?? '').toLowerCase(),
+      hasOperatorId: Boolean(String(auth?.operator_id ?? req?.auth?.operator_id ?? '').trim()),
+      statusCode,
+      message: err?.message ?? 'Failed to start campaign',
+    });
+    res.status(statusCode).json({ error: err.message ?? 'Failed to start campaign' });
   }
 });
 
 // Campaign Step 12
 router.post('/:id/pause', async (req, res) => {
+  const campaignId = String(req.params.id ?? '');
+  let auth: ReturnType<typeof getNormalizedAuth> | null = null;
   try {
-    await pauseCampaign(req.params.id);
+    auth = getNormalizedAuth(req);
+    await assertCampaignAccess({ ...req, auth }, campaignId);
+    await pauseCampaign(campaignId, auth);
+    console.info('[PAUSE_CAMPAIGN_SUCCESS]', {
+      campaignId,
+      role: auth.role,
+      hasOperatorId: Boolean(String(auth.operator_id ?? '').trim()),
+    });
     res.json({ success: true });
   } catch (err: any) {
-    console.error('[PAUSE CAMPAIGN ERROR]', err);
-    res.status(500).json({ error: err.message ?? 'Failed to pause campaign' });
+    const statusCode = resolveStatusCode(err);
+    console.error('[PAUSE CAMPAIGN ERROR]', {
+      campaignId,
+      role: auth?.role ?? String(req?.auth?.role ?? '').toLowerCase(),
+      hasOperatorId: Boolean(String(auth?.operator_id ?? req?.auth?.operator_id ?? '').trim()),
+      statusCode,
+      message: err?.message ?? 'Failed to pause campaign',
+    });
+    res.status(statusCode).json({ error: err.message ?? 'Failed to pause campaign' });
   }
 });
 

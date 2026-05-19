@@ -30,6 +30,14 @@ function assertTablePermission(req: any, table: string) {
   }
 }
 
+function resolveStatusCode(err: any, fallback: number) {
+  const statusCode = Number(err?.statusCode ?? err?.status ?? 0);
+  if (Number.isInteger(statusCode) && statusCode >= 400 && statusCode < 600) {
+    return statusCode;
+  }
+  return fallback;
+}
+
 router.get('/:table', async (req, res) => {
   try {
     console.log("CRUD CALLED of", req.params.table);
@@ -37,7 +45,7 @@ router.get('/:table', async (req, res) => {
 
     const table = validateTable(req.params.table);
     assertTablePermission(req, table);
-    const rows = await listRows(table, req.query);
+    const rows = await listRows(table, req.query, req.auth);
 
     if (table === 'sequences') {
       console.info('[CRUD_ROUTE_SEQUENCES_RESPONSE]', {
@@ -49,7 +57,7 @@ router.get('/:table', async (req, res) => {
     res.json(rows);
   } catch (err: any) {
     console.error('[CRUD LIST ERROR]', err);
-    res.status(500).json({
+    res.status(resolveStatusCode(err, 500)).json({
       error: err.message ?? 'Failed to fetch rows',
     });
   }
@@ -59,11 +67,11 @@ router.post('/:table', async (req, res) => {
   try {
     const table = validateTable(req.params.table);
     assertTablePermission(req, table);
-    await insertRow(table, req.body);
+    await insertRow(table, req.body, req.auth);
     res.json({ success: true });
   } catch (err: any) {
     console.error('[CRUD INSERT ERROR]', err);
-    res.status(400).json({ error: err.message });
+    res.status(resolveStatusCode(err, 400)).json({ error: err.message });
   }
 });
 
@@ -74,12 +82,12 @@ router.put('/:table/:id', async (req, res) => {
 
     console.log('[CRUD UPDATE]', table, req.params.id, req.body);
 
-    await updateRow(table, req.params.id, req.body);
+    await updateRow(table, req.params.id, req.body, req.auth);
 
     res.json({ success: true });
   } catch (err: any) {
     console.error('[CRUD UPDATE ERROR]', err);
-    res.status(400).json({
+    res.status(resolveStatusCode(err, 400)).json({
       error: err.message ?? 'Update failed',
     });
   }
@@ -90,11 +98,11 @@ router.post('/:table/bulk-delete', async (req, res) => {
     const table = validateTable(req.params.table);
     assertTablePermission(req, table);
     const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
-    const result = await deleteRowsBulk(table, ids);
+    const result = await deleteRowsBulk(table, ids, req.auth);
     res.json({ success: true, deletedCount: result.deletedCount });
   } catch (err: any) {
     console.error('[CRUD BULK DELETE ERROR]', err);
-    res.status(400).json({
+    res.status(resolveStatusCode(err, 400)).json({
       error: err.message ?? 'Bulk delete failed',
     });
   }
@@ -105,12 +113,12 @@ router.delete('/:table/:id', async (req, res) => {
     const table = validateTable(req.params.table);
     assertTablePermission(req, table);
 
-    await deleteRow(table, req.params.id);
+    await deleteRow(table, req.params.id, req.auth);
 
     res.json({ success: true });
   } catch (err: any) {
     console.error('[CRUD DELETE ERROR]', err);
-    res.status(400).json({
+    res.status(resolveStatusCode(err, 400)).json({
       error: err.message ?? 'Delete failed',
     });
   }

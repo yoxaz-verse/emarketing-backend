@@ -14,8 +14,10 @@ export function resolveOperatorScope(
     throw new Error('Unauthenticated');
   }
 
+  const normalizedRole = String(auth.role ?? '').toLowerCase();
+
   // Admin / Superadmin: global scope
-  if (auth.role === 'admin' || auth.role === 'superadmin') {
+  if (normalizedRole === 'admin' || normalizedRole === 'superadmin') {
     return null;
   }
 
@@ -25,12 +27,12 @@ export function resolveOperatorScope(
   }
 
   // Any non-admin role without operator scope cannot use operator-scoped routes
-  if (auth.role === 'user' || auth.role === 'viewer') {
+  if (normalizedRole === 'user' || normalizedRole === 'viewer') {
     throw new Error('Operator access required');
   }
 
   // Backward-compat: legacy role strings still supported if present in old tokens
-  if ((auth as any).role === 'operator') {
+  if (normalizedRole === 'operator') {
     if (!auth.operator_id) {
       throw new Error('Operator ID missing');
     }

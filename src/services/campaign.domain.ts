@@ -1,5 +1,9 @@
 import { supabase } from "../supabase";
-import { updateRow } from "./crudService";
+type AuthContext = {
+  role?: string | null;
+  operator_id?: string | null;
+  user_id?: string | null;
+};
 
 function createHttpError(message: string, statusCode: number) {
   const error = new Error(message) as Error & { statusCode?: number };
@@ -292,42 +296,7 @@ export async function syncCampaignInboxes(
   const unchanged = dedupedSelectedInboxIds.length - toAttach.length;
 
   if (toAttach.length > 0) {
-    const unlockedStatuses = new Set(['paused', 'completed', 'ended', 'cancelled', 'canceled']);
-    const { data: lockRows, error: lockError } = await supabase
-      .from('campaign_inboxes')
-      .select(`
-        inbox_id,
-        campaign_id,
-        campaigns!inner (
-          id,
-          name,
-          status
-        ),
-        inboxes (
-          id,
-          email_address
-        )
-      `)
-      .in('inbox_id', toAttach)
-      .neq('campaign_id', campaignId);
-
-    if (lockError) {
-      throw lockError;
-    }
-
-    const conflicts = (lockRows ?? [])
-      .map((row: any) => {
-        const status = String(row?.campaigns?.status ?? '').toLowerCase();
-        if (unlockedStatuses.has(status)) return null;
-        return {
-          inbox_id: String(row?.inbox_id ?? ''),
-          email_address: String(row?.inboxes?.email_address ?? ''),
-          blocking_campaign_id: String(row?.campaigns?.id ?? ''),
-          blocking_campaign_name: String(row?.campaigns?.name ?? ''),
-          blocking_status: String(row?.campaigns?.status ?? ''),
-        };
-      })
-      .filter(Boolean);
+    const conflicts = await getInboxLockConflicts(campaignId, toAttach);
 
     if (conflicts.length > 0) {
       const error = new Error('Some inboxes are locked by other active campaigns');
@@ -371,13 +340,77 @@ export async function syncCampaignInboxes(
   };
 }
 
+export async function getInboxLockConflicts(
+  campaignId: string,
+  inboxIds: string[]
+): Promise<Array<{
+  inbox_id: string;
+  email_address: string;
+  blocking_campaign_id: string;
+  blocking_campaign_name: string;
+  blocking_status: string;
+  blocking_operator_id: string | null;
+}>> {
+  const dedupedInboxIds = Array.from(new Set((inboxIds ?? []).map((id) => String(id)).filter(Boolean)));
+  if (dedupedInboxIds.length === 0) return [];
+
+  const unlockedStatuses = new Set(['paused', 'completed', 'ended', 'cancelled', 'canceled']);
+  const { data: lockRows, error: lockError } = await supabase
+    .from('campaign_inboxes')
+    .select(`
+      inbox_id,
+      campaign_id,
+      campaigns!inner (
+        id,
+        name,
+        status,
+        operator_id
+      ),
+      inboxes (
+        id,
+        email_address
+      )
+    `)
+    .in('inbox_id', dedupedInboxIds)
+    .neq('campaign_id', campaignId);
+
+  if (lockError) {
+    throw lockError;
+  }
+
+  const conflicts = (lockRows ?? [])
+    .map((row: any) => {
+      const status = String(row?.campaigns?.status ?? '').toLowerCase();
+      if (unlockedStatuses.has(status)) return null;
+      return {
+        inbox_id: String(row?.inbox_id ?? ''),
+        email_address: String(row?.inboxes?.email_address ?? ''),
+        blocking_campaign_id: String(row?.campaigns?.id ?? ''),
+        blocking_campaign_name: String(row?.campaigns?.name ?? ''),
+        blocking_status: String(row?.campaigns?.status ?? ''),
+        blocking_operator_id: row?.campaigns?.operator_id ? String(row.campaigns.operator_id) : null,
+      };
+    })
+    .filter(Boolean);
+
+  const byInbox = new Map<string, (typeof conflicts)[number]>();
+  for (const conflict of conflicts) {
+    if (!conflict) continue;
+    if (!byInbox.has(conflict.inbox_id)) {
+      byInbox.set(conflict.inbox_id, conflict);
+    }
+  }
+
+  return Array.from(byInbox.values());
+}
+
 
 
 
 /**
  * Start campaign (IDEMPOTENT)
  */
-export async function startCampaign(campaignId: string) {
+export async function startCampaign(campaignId: string, _auth?: AuthContext) {
   // 1️⃣ Fetch campaign
   const { data: campaign, error } = await supabase
     .from('campaigns')
@@ -386,7 +419,7 @@ export async function startCampaign(campaignId: string) {
     .single();
 
   if (error || !campaign) {
-    throw new Error('Campaign not found');
+    throw createHttpError('Campaign not found', 404);
   }
 
   // 2️⃣ Idempotency guard
@@ -402,7 +435,7 @@ export async function startCampaign(campaignId: string) {
     .limit(1);
 
   if (!inboxes || inboxes.length === 0) {
-    throw new Error('Cannot start campaign without assigned inboxes');
+    throw createHttpError('Cannot start campaign without assigned inboxes', 409);
   }
 
   const { count: campaignLeadCount, error: campaignLeadCountError } = await supabase
@@ -415,14 +448,21 @@ export async function startCampaign(campaignId: string) {
   }
 
   if (!campaignLeadCount || campaignLeadCount === 0) {
-    throw new Error('Cannot start campaign without attached campaign leads');
+    throw createHttpError('Cannot start campaign without attached campaign leads', 409);
   }
 
   // 3️⃣ Transition campaign to running
-  await updateRow('campaigns', campaignId, {
-    status: 'running',
-    started_at: new Date().toISOString(),
-  });
+  const { error: startUpdateError } = await supabase
+    .from('campaigns')
+    .update({
+      status: 'running',
+      started_at: new Date().toISOString(),
+    })
+    .eq('id', campaignId);
+
+  if (startUpdateError) {
+    throw startUpdateError;
+  }
 
   // 🔒 LOG EVENT
   await supabase.from('system_events').insert({
@@ -457,10 +497,17 @@ async function initializeCampaignLeads(campaignId: string) {
 /**
  * Pause campaign
  */
-export async function pauseCampaign(campaignId: string) {
-  await updateRow("campaigns", campaignId, {
-    status: "paused",
-  });
+export async function pauseCampaign(campaignId: string, _auth?: AuthContext) {
+  const { error: pauseUpdateError } = await supabase
+    .from('campaigns')
+    .update({
+      status: 'paused',
+    })
+    .eq('id', campaignId);
+
+  if (pauseUpdateError) {
+    throw pauseUpdateError;
+  }
 
   // 🔒 LOG EVENT
   await supabase.from('system_events').insert({

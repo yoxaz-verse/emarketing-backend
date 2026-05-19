@@ -7,6 +7,32 @@ import { runBeforeDelete } from './domain/runBeforeDelete';
 import { runBeforeWrite } from './domain/runBeforeWrite';
 import { transformForWrite, transformForRead } from './fieldTransform';
 type DbRow = Record<string, unknown>;
+type CrudAuthContext = {
+  role?: string | null;
+  operator_id?: string | null;
+  user_id?: string | null;
+};
+
+function isAdminRole(role?: string | null): boolean {
+  const normalized = String(role ?? '').toLowerCase();
+  return normalized === 'admin' || normalized === 'superadmin';
+}
+
+function isOperatorScopedUser(auth?: CrudAuthContext): boolean {
+  const isAdmin = isAdminRole(auth?.role);
+  const hasOperatorId = String(auth?.operator_id ?? '').trim().length > 0;
+  return !isAdmin && hasOperatorId;
+}
+
+function requiresOperatorScope(table: AllowedTable): boolean {
+  return table === 'campaigns' || table === 'campaign_leads' || table === 'campaign_inboxes' || table === 'leads' || table === 'operators';
+}
+
+function createHttpError(message: string, statusCode: number): Error & { statusCode: number } {
+  const err = new Error(message) as Error & { statusCode: number };
+  err.statusCode = statusCode;
+  return err;
+}
 
 function mapCrudWriteError(table: AllowedTable, error: any): Error {
   const code = String(error?.code ?? '');
@@ -75,7 +101,8 @@ function applyLegacyInboxWarmupDefaults(row: Record<string, unknown>): Record<st
 
 export async function listRows(
   table: AllowedTable,
-  filters: Record<string, any> = {}
+  filters: Record<string, any> = {},
+  auth?: CrudAuthContext
 ) {
   const sanitized = normalizeFilters(filters);
   const isSequencesTable = table === 'sequences';
@@ -86,8 +113,38 @@ export async function listRows(
     });
   }
 
-  const applyFilters = (baseQuery: ReturnType<typeof supabase.from>) => {
+  const applyFilters = async (baseQuery: ReturnType<typeof supabase.from>) => {
     let nextQuery: any = baseQuery;
+    const operatorScoped = isOperatorScopedUser(auth);
+    const isAdmin = isAdminRole(auth?.role);
+    const operatorId = String(auth?.operator_id ?? '').trim();
+
+    if (!isAdmin && !operatorId && requiresOperatorScope(table)) {
+      throw createHttpError('Operator access required', 403);
+    }
+
+    if (operatorScoped) {
+      if (table === 'campaigns' || table === 'leads') {
+        nextQuery = nextQuery.eq('operator_id', operatorId);
+      }
+      if (table === 'operators') {
+        nextQuery = nextQuery.eq('id', operatorId);
+      }
+
+      if (table === 'campaign_leads' || table === 'campaign_inboxes') {
+        const { data: campaignRows, error: campaignError } = await supabase
+          .from('campaigns')
+          .select('id')
+          .eq('operator_id', operatorId);
+        if (campaignError) throw campaignError;
+        const allowedCampaignIds = (campaignRows ?? []).map((row: any) => String(row.id)).filter(Boolean);
+        if (allowedCampaignIds.length === 0) {
+          nextQuery = nextQuery.eq('campaign_id', '__no_operator_campaign__');
+        } else {
+          nextQuery = nextQuery.in('campaign_id', allowedCampaignIds);
+        }
+      }
+    }
 
     if (table === 'leads') {
       const {
@@ -110,7 +167,9 @@ export async function listRows(
         toDate,
       } = sanitized;
 
-      if (operator_id) {
+      if (operatorScoped) {
+        nextQuery = nextQuery.eq('operator_id', operatorId);
+      } else if (operator_id) {
         nextQuery = nextQuery.eq('operator_id', operator_id);
       }
 
@@ -207,7 +266,7 @@ export async function listRows(
   };
 
   const select = buildSelect(table);
-  let query = applyFilters(supabase.from(table).select(select));
+  let query = await applyFilters(supabase.from(table).select(select));
 
   let { data, error } = await query;
   if (isSequencesTable) {
@@ -232,7 +291,7 @@ export async function listRows(
   }
   if (error && error.code === '42703' && table === 'sequences') {
     console.warn('[CRUD LIST WARNING] Missing column in sequences, falling back to *', error);
-    query = applyFilters(supabase.from(table).select('*'));
+    query = await applyFilters(supabase.from(table).select('*'));
     ({ data, error } = await query);
     if (isSequencesTable) {
       console.info('[CRUD_LIST_SEQUENCES_QUERY_RESULT]', {
@@ -257,7 +316,7 @@ export async function listRows(
       reasonMessage: String(error?.message ?? ''),
       selectMode: 'non_relation',
     });
-    query = applyFilters(
+    query = await applyFilters(
       supabase.from(table).select(buildSelect('leads', { includeRelations: false }))
     );
     ({ data, error } = await query);
@@ -273,7 +332,7 @@ export async function listRows(
       selectMode: 'exclude_warmup_columns',
     });
 
-    query = applyFilters(
+    query = await applyFilters(
       supabase.from(table).select(buildSelect('inboxes', {
         excludeColumns: ['warmup_enabled', 'warmup_day'],
       }))
@@ -305,8 +364,28 @@ export async function listRows(
 
 export async function insertRow(
   table: AllowedTable,
-  payload: Record<string, any>
+  payload: Record<string, any>,
+  auth?: CrudAuthContext
 ) {
+  const operatorScoped = isOperatorScopedUser(auth);
+  const isAdmin = isAdminRole(auth?.role);
+  const operatorId = String(auth?.operator_id ?? '').trim();
+  if (!isAdmin && !operatorId && requiresOperatorScope(table)) {
+    throw createHttpError('Operator access required', 403);
+  }
+
+  if (operatorScoped && table === 'sequences') {
+    throw createHttpError('Only admin can modify sequences', 403);
+  }
+  if (operatorScoped && table === 'sequence_steps') {
+    throw createHttpError('Only admin can modify sequence steps', 403);
+  }
+  if (operatorScoped && table === 'campaigns') {
+    payload = { ...payload, operator_id: operatorId };
+  }
+  if (operatorScoped && table === 'leads') {
+    payload = { ...payload, operator_id: operatorId };
+  }
 
   payload = await runBeforeWrite(table, payload, 'create');
   const data = await transformForWrite(table, payload);
@@ -323,8 +402,41 @@ export async function insertRow(
 export async function updateRow(
   table: AllowedTable,
   id: string,
-  payload: Record<string, any>
+  payload: Record<string, any>,
+  auth?: CrudAuthContext
 ) {
+  const operatorScoped = isOperatorScopedUser(auth);
+  const isAdmin = isAdminRole(auth?.role);
+  const operatorId = String(auth?.operator_id ?? '').trim();
+  if (!isAdmin && !operatorId && requiresOperatorScope(table)) {
+    throw createHttpError('Operator access required', 403);
+  }
+  if (operatorScoped && (table === 'sequences' || table === 'sequence_steps')) {
+    throw createHttpError('Only admin can modify sequences', 403);
+  }
+  if (operatorScoped && table === 'campaigns') {
+    const { data: row, error } = await supabase.from('campaigns').select('id,operator_id').eq('id', id).maybeSingle();
+    if (error) throw error;
+    if (!row || String(row.operator_id ?? '') !== operatorId) throw createHttpError('Campaign not found', 404);
+    payload = { ...payload, operator_id: operatorId };
+  }
+  if (operatorScoped && table === 'leads') {
+    const { data: row, error } = await supabase.from('leads').select('id,operator_id').eq('id', id).maybeSingle();
+    if (error) throw error;
+    if (!row || String(row.operator_id ?? '') !== operatorId) throw createHttpError('Lead not found', 404);
+    payload = { ...payload, operator_id: operatorId };
+  }
+  if (operatorScoped && table === 'campaign_leads') {
+    const { data: row, error } = await supabase
+      .from('campaign_leads')
+      .select('id,campaign_id,campaigns!inner(operator_id)')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw error;
+    const rowOperatorId = String((row as any)?.campaigns?.operator_id ?? '');
+    if (!row || rowOperatorId !== operatorId) throw createHttpError('Campaign lead not found', 404);
+  }
+
   payload = await runBeforeWrite(table, payload, 'update', id);
   const data = await transformForWrite(table, payload);
   console.log('[Update DATA]', table, data);
@@ -339,8 +451,39 @@ export async function updateRow(
 
 export async function deleteRow(
   table: AllowedTable,
-  id: string
+  id: string,
+  auth?: CrudAuthContext
 ) {
+  const operatorScoped = isOperatorScopedUser(auth);
+  const isAdmin = isAdminRole(auth?.role);
+  const operatorId = String(auth?.operator_id ?? '').trim();
+  if (!isAdmin && !operatorId && requiresOperatorScope(table)) {
+    throw createHttpError('Operator access required', 403);
+  }
+  if (operatorScoped && (table === 'sequences' || table === 'sequence_steps')) {
+    throw createHttpError('Only admin can modify sequences', 403);
+  }
+  if (operatorScoped && table === 'campaigns') {
+    const { data: row, error } = await supabase.from('campaigns').select('id,operator_id').eq('id', id).maybeSingle();
+    if (error) throw error;
+    if (!row || String(row.operator_id ?? '') !== operatorId) throw createHttpError('Campaign not found', 404);
+  }
+  if (operatorScoped && table === 'leads') {
+    const { data: row, error } = await supabase.from('leads').select('id,operator_id').eq('id', id).maybeSingle();
+    if (error) throw error;
+    if (!row || String(row.operator_id ?? '') !== operatorId) throw createHttpError('Lead not found', 404);
+  }
+  if (operatorScoped && table === 'campaign_leads') {
+    const { data: row, error } = await supabase
+      .from('campaign_leads')
+      .select('id,campaigns!inner(operator_id)')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw error;
+    const rowOperatorId = String((row as any)?.campaigns?.operator_id ?? '');
+    if (!row || rowOperatorId !== operatorId) throw createHttpError('Campaign lead not found', 404);
+  }
+
   await runBeforeDelete(table, id);
 
   const { error } = await supabase
@@ -353,17 +496,51 @@ export async function deleteRow(
 
 export async function deleteRowsBulk(
   table: AllowedTable,
-  ids: string[]
+  ids: string[],
+  auth?: CrudAuthContext
 ) {
+  const operatorScoped = isOperatorScopedUser(auth);
+  const isAdmin = isAdminRole(auth?.role);
+  const operatorId = String(auth?.operator_id ?? '').trim();
+  if (!isAdmin && !operatorId && requiresOperatorScope(table)) {
+    throw createHttpError('Operator access required', 403);
+  }
+  if (operatorScoped && (table === 'sequences' || table === 'sequence_steps')) {
+    throw createHttpError('Only admin can modify sequences', 403);
+  }
+
   const uniqueIds = Array.from(new Set((ids ?? []).filter((id): id is string => typeof id === 'string' && id.trim().length > 0)));
   if (uniqueIds.length === 0) {
     return { deletedCount: 0 };
   }
 
-  const { data: existingRows, error: fetchError } = await supabase
+  let existingQuery: any = supabase
     .from(table)
     .select('id')
     .in('id', uniqueIds);
+
+  if (operatorScoped) {
+    if (!operatorId && (table === 'campaigns' || table === 'campaign_leads' || table === 'leads')) {
+      throw createHttpError('Operator access required', 403);
+    }
+    if (table === 'campaigns' || table === 'leads') {
+      existingQuery = existingQuery.eq('operator_id', operatorId);
+    }
+    if (table === 'campaign_leads') {
+      const { data: campaignRows, error: campaignError } = await supabase
+        .from('campaigns')
+        .select('id')
+        .eq('operator_id', operatorId);
+      if (campaignError) throw campaignError;
+      const allowedCampaignIds = (campaignRows ?? []).map((row: any) => String(row.id)).filter(Boolean);
+      if (allowedCampaignIds.length === 0) {
+        return { deletedCount: 0 };
+      }
+      existingQuery = existingQuery.in('campaign_id', allowedCampaignIds);
+    }
+  }
+
+  const { data: existingRows, error: fetchError } = await existingQuery;
 
   if (fetchError) throw fetchError;
   const existingIds = (existingRows ?? []).map((row: any) => row.id).filter(Boolean);
