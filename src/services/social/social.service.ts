@@ -16,7 +16,7 @@ import {
   validateSocialPostInput,
 } from './connectors';
 import { publishLinkedInTextLink } from './linkedin.client';
-import { getOperatorPlatformConnection, hasOperatorOAuthAppConfig, markConnectionFailure } from './socialAuth.service';
+import { getOperatorPlatformConnection, hasOAuthAppConfig, markConnectionFailure } from './socialAuth.service';
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -84,6 +84,23 @@ function missingConfigFieldsForPlatform(platform: string, row: any | null): stri
   return required.filter((key) => !String(snapshot[key] ?? '').trim());
 }
 
+function mergePlatformConfigRow(operatorRow: any | null, globalRow: any | null): any | null {
+  if (!operatorRow && !globalRow) return null;
+  const row = operatorRow ?? globalRow;
+  const operatorMeta = (operatorRow?.metadata && typeof operatorRow.metadata === 'object') ? operatorRow.metadata : {};
+  const globalMeta = (globalRow?.metadata && typeof globalRow.metadata === 'object') ? globalRow.metadata : {};
+  return {
+    ...row,
+    client_id: String(operatorRow?.client_id ?? globalRow?.client_id ?? ''),
+    redirect_uri: String(operatorRow?.redirect_uri ?? globalRow?.redirect_uri ?? ''),
+    client_secret_encrypted: String(operatorRow?.client_secret_encrypted ?? globalRow?.client_secret_encrypted ?? ''),
+    metadata: {
+      ...globalMeta,
+      ...operatorMeta,
+    },
+  };
+}
+
 export async function listSocialConnectors(userId?: string | null, operatorId?: string | null) {
   const { data, error } = await supabase
     .from('social_connectors')
@@ -98,13 +115,11 @@ export async function listSocialConnectors(userId?: string | null, operatorId?: 
   const rows = (data ?? []) as SocialConnectorCapability[];
   if (!userId || !operatorId) return rows;
 
-  const [statuses, appRowsResult] = await Promise.all([
+  const [statuses, operatorAppRowsResult, globalAppRowsResult] = await Promise.all([
     Promise.all(
       rows.map(async (row) => {
         const conn = await getOperatorPlatformConnection(row.code, userId, operatorId);
-        const oauthAppConfigured = row.code === 'linkedin'
-          ? await hasOperatorOAuthAppConfig('linkedin', operatorId)
-          : false;
+        const oauthAppConfigured = await hasOAuthAppConfig(row.code, operatorId);
         return {
           code: row.code,
           connected: Boolean(conn),
@@ -117,22 +132,36 @@ export async function listSocialConnectors(userId?: string | null, operatorId?: 
       .select('*')
       .eq('operator_id', operatorId)
       .eq('active', true),
+    supabase
+      .from('social_global_oauth_apps')
+      .select('*')
+      .eq('active', true),
   ]);
 
-  if (appRowsResult.error && appRowsResult.error.code !== 'PGRST205' && appRowsResult.error.code !== '42P01') {
-    throw appRowsResult.error;
+  if (operatorAppRowsResult.error && operatorAppRowsResult.error.code !== 'PGRST205' && operatorAppRowsResult.error.code !== '42P01') {
+    throw operatorAppRowsResult.error;
+  }
+  if (globalAppRowsResult.error && globalAppRowsResult.error.code !== 'PGRST205' && globalAppRowsResult.error.code !== '42P01') {
+    throw globalAppRowsResult.error;
   }
 
-  const appByPlatform = new Map<string, any>();
-  for (const appRow of appRowsResult.data ?? []) {
-    appByPlatform.set(String((appRow as any).platform_code ?? '').toLowerCase(), appRow);
+  const operatorAppByPlatform = new Map<string, any>();
+  for (const appRow of operatorAppRowsResult.data ?? []) {
+    operatorAppByPlatform.set(String((appRow as any).platform_code ?? '').toLowerCase(), appRow);
+  }
+  const globalAppByPlatform = new Map<string, any>();
+  for (const appRow of globalAppRowsResult.data ?? []) {
+    globalAppByPlatform.set(String((appRow as any).platform_code ?? '').toLowerCase(), appRow);
   }
 
   const statusByCode = new Map(statuses.map((s) => [s.code, s.connected]));
   const oauthConfigByCode = new Map(statuses.map((s) => [s.code, s.oauthAppConfigured]));
 
   return rows.map((row) => {
-    const appRow = appByPlatform.get(row.code) ?? null;
+    const appRow = mergePlatformConfigRow(
+      operatorAppByPlatform.get(row.code) ?? null,
+      globalAppByPlatform.get(row.code) ?? null
+    );
     const missingFields = missingConfigFieldsForPlatform(row.code, appRow);
     const appConfigured = missingFields.length === 0;
     if (row.code !== 'linkedin') {

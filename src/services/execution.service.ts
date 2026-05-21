@@ -126,6 +126,9 @@ async function migratePendingLeadsToQueued(campaignId: string): Promise<number> 
 export async function getCampaignExecutionDiagnostics(campaignId: string) {
   const config = await getSendingLimitsConfig();
   const scheduleGate = isNowWithinSendingSchedule(config);
+  const staleCutoffIso = new Date(
+    Date.now() - (DEFAULT_STALE_PROCESSING_TIMEOUT_MINUTES * 60 * 1000)
+  ).toISOString();
 
   const { data: campaign, error: campaignError } = await supabase
     .from('campaigns')
@@ -138,7 +141,7 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
   const [statusRowsResult, pausedRiskyResult, inboxesResult] = await Promise.all([
     supabase
       .from('campaign_leads')
-      .select('status')
+      .select('status,processing_at')
       .eq('campaign_id', campaignId),
     supabase
       .from('campaign_leads')
@@ -173,11 +176,31 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
     completed: 0,
     other: 0,
   };
+  let nullProcessingCount = 0;
+  let staleProcessingCount = 0;
+  let oldestProcessingAt: string | null = null;
 
   for (const row of statusRowsResult.data ?? []) {
     const status = String((row as any)?.status ?? '').toLowerCase();
     if (status in counts) counts[status] += 1;
     else counts.other += 1;
+
+    if (status === 'processing') {
+      const processingAtRaw = (row as any)?.processing_at ?? null;
+      if (!processingAtRaw) {
+        nullProcessingCount += 1;
+        staleProcessingCount += 1;
+        continue;
+      }
+
+      const processingAtIso = String(processingAtRaw);
+      if (!oldestProcessingAt || processingAtIso < oldestProcessingAt) {
+        oldestProcessingAt = processingAtIso;
+      }
+      if (processingAtIso < staleCutoffIso) {
+        staleProcessingCount += 1;
+      }
+    }
   }
 
   const inboxRows = inboxesResult.data ?? [];
@@ -218,6 +241,14 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
       paused: pausedInboxes,
     },
     risky_cap_paused_count: Number(pausedRiskyResult.count ?? 0),
+    processing_health: {
+      timeout_minutes: DEFAULT_STALE_PROCESSING_TIMEOUT_MINUTES,
+      cutoff_iso: staleCutoffIso,
+      oldest_processing_at: oldestProcessingAt,
+      null_processing_count: nullProcessingCount,
+      stale_processing_count: staleProcessingCount,
+      can_requeue_now: staleProcessingCount > 0,
+    },
     claim_function: {
       callable: claimFunctionCallable,
       error: claimFunctionError,
@@ -379,7 +410,7 @@ export async function requeueStaleProcessingLeads(input: RequeueStaleProcessingI
     .from('campaign_leads')
     .select('id, campaign_id')
     .eq('status', 'processing')
-    .lt('processing_at', cutoffIso);
+    .or(`processing_at.lt.${cutoffIso},processing_at.is.null`);
 
   if (campaignId) {
     scopedQuery = scopedQuery.eq('campaign_id', campaignId);
