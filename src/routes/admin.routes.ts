@@ -246,20 +246,29 @@ function isSocialAppSchemaMismatch(error: any): boolean {
   );
 }
 
-async function handleGetSocialApp(req: any, res: any, platformRaw: string, operatorIdRaw: string) {
+async function handleGetSocialApp(req: any, res: any, platformRaw: string, operatorIdRaw: string, scopeRaw?: string) {
   try {
     const platform = String(platformRaw ?? '').trim().toLowerCase();
     if (!isSocialPlatform(platform)) return res.status(400).json({ error: 'Unsupported platform' });
 
+    const scope = String(scopeRaw ?? 'operator').trim().toLowerCase();
+    const isGlobalScope = scope === 'global';
     const operatorId = String(operatorIdRaw ?? '').trim();
-    if (!operatorId) return res.status(400).json({ error: 'operator_id is required' });
 
-    const { data, error } = await supabase
-      .from('social_operator_oauth_apps')
-      .select('*')
-      .eq('operator_id', operatorId)
-      .eq('platform_code', platform)
-      .maybeSingle();
+    if (!isGlobalScope && !operatorId) return res.status(400).json({ error: 'operator_id is required' });
+
+    const query = isGlobalScope
+      ? supabase
+        .from('social_global_oauth_apps')
+        .select('*')
+        .eq('platform_code', platform)
+      : supabase
+        .from('social_operator_oauth_apps')
+        .select('*')
+        .eq('operator_id', operatorId)
+        .eq('platform_code', platform);
+
+    const { data, error } = await query.maybeSingle();
 
     if (error && error.code !== 'PGRST116') throw error;
     if (!data) {
@@ -271,8 +280,9 @@ async function handleGetSocialApp(req: any, res: any, platformRaw: string, opera
       });
       return res.json({
         configured: false,
-        operator_id: operatorId,
+        operator_id: isGlobalScope ? null : operatorId,
         platform_code: platform,
+        scope: isGlobalScope ? 'global' : 'operator',
         required_missing: requiredFieldsByPlatform(platform),
       });
     }
@@ -291,8 +301,9 @@ async function handleGetSocialApp(req: any, res: any, platformRaw: string, opera
 
     return res.json({
       configured: requiredMissing.length === 0,
-      operator_id: operatorId,
+      operator_id: isGlobalScope ? null : operatorId,
       platform_code: platform,
+      scope: isGlobalScope ? 'global' : 'operator',
       required_missing: requiredMissing,
       fields: responseFields,
       active: Boolean(row.active),
@@ -313,13 +324,15 @@ async function handleGetSocialApp(req: any, res: any, platformRaw: string, opera
   }
 }
 
-async function handlePutSocialApp(req: any, res: any, platformRaw: string, body: any) {
+async function handlePutSocialApp(req: any, res: any, platformRaw: string, body: any, scopeRaw?: string) {
   try {
     const platform = String(platformRaw ?? '').trim().toLowerCase();
     if (!isSocialPlatform(platform)) return res.status(400).json({ error: 'Unsupported platform' });
 
+    const scope = String(scopeRaw ?? body?.scope ?? 'operator').trim().toLowerCase();
+    const isGlobalScope = scope === 'global';
     const operatorId = String(body?.operator_id ?? '').trim();
-    if (!operatorId) return res.status(400).json({ error: 'operator_id is required' });
+    if (!isGlobalScope && !operatorId) return res.status(400).json({ error: 'operator_id is required' });
 
     const extracted = extractConfig(platform, (body ?? {}) as Record<string, unknown>);
     const checkMap: Record<string, string> = {};
@@ -351,7 +364,6 @@ async function handlePutSocialApp(req: any, res: any, platformRaw: string, body:
     }
 
     const payload = {
-      operator_id: operatorId,
       platform_code: platform,
       client_id: extracted.client_id || null,
       client_secret_encrypted: encryptSocialSecret(extracted.secret),
@@ -362,16 +374,21 @@ async function handlePutSocialApp(req: any, res: any, platformRaw: string, body:
       updated_at: new Date().toISOString(),
     };
 
-    const { error } = await supabase
-      .from('social_operator_oauth_apps')
-      .upsert(payload, { onConflict: 'operator_id,platform_code' });
+    const { error } = isGlobalScope
+      ? await supabase
+        .from('social_global_oauth_apps')
+        .upsert(payload, { onConflict: 'platform_code' })
+      : await supabase
+        .from('social_operator_oauth_apps')
+        .upsert({ ...payload, operator_id: operatorId }, { onConflict: 'operator_id,platform_code' });
 
     if (error) throw error;
 
     console.info('[ADMIN_SOCIAL_APP_UPSERT_OK]', {
       role: req.auth?.role ?? null,
-      operatorId,
+      operatorId: isGlobalScope ? 'global' : operatorId,
       platform,
+      scope: isGlobalScope ? 'global' : 'operator',
       requiredMissingCount: requiredMissing.length,
     });
 
@@ -393,23 +410,35 @@ async function handlePutSocialApp(req: any, res: any, platformRaw: string, body:
 
 // canonical endpoint
 router.get('/social-apps/:platform', async (req, res) => {
-  return handleGetSocialApp(req, res, String(req.params.platform ?? ''), String(req.query?.operator_id ?? ''));
+  return handleGetSocialApp(
+    req,
+    res,
+    String(req.params.platform ?? ''),
+    String(req.query?.operator_id ?? ''),
+    String(req.query?.scope ?? 'operator')
+  );
 });
 
 // compatibility alias: /admin/social-apps?platform=linkedin&operator_id=...
 router.get('/social-apps', async (req, res) => {
-  return handleGetSocialApp(req, res, String(req.query?.platform ?? ''), String(req.query?.operator_id ?? ''));
+  return handleGetSocialApp(
+    req,
+    res,
+    String(req.query?.platform ?? ''),
+    String(req.query?.operator_id ?? ''),
+    String(req.query?.scope ?? 'operator')
+  );
 });
 
 // canonical endpoint
 router.put('/social-apps/:platform', async (req, res) => {
-  return handlePutSocialApp(req, res, String(req.params.platform ?? ''), req.body);
+  return handlePutSocialApp(req, res, String(req.params.platform ?? ''), req.body, String(req.query?.scope ?? req.body?.scope ?? 'operator'));
 });
 
 // compatibility alias: /admin/social-apps with platform in body/query
 router.put('/social-apps', async (req, res) => {
   const platform = String(req.body?.platform ?? req.query?.platform ?? '');
-  return handlePutSocialApp(req, res, platform, req.body);
+  return handlePutSocialApp(req, res, platform, req.body, String(req.query?.scope ?? req.body?.scope ?? 'operator'));
 });
 
 router.get('/sending-limits', async (_req, res) => {

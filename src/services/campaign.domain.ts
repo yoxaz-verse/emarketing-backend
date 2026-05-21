@@ -330,6 +330,31 @@ export async function syncCampaignInboxes(
     }
   }
 
+  // Strict reassign policy:
+  // If an inbox is removed from this campaign, any queued/processing lead still bound to it
+  // must be reset so future claims/sends can only use currently selected campaign inboxes.
+  const removedInboxIds = toDetachRows
+    .map((row: any) => String(row.inbox_id))
+    .filter(Boolean);
+  if (removedInboxIds.length > 0) {
+    const { error: resetAssignmentsError } = await supabase
+      .from('campaign_leads')
+      .update({
+        assigned_inbox_id: null,
+        status: 'queued',
+        status_reason: 'requeued_invalid_inbox_assignment',
+        processing_at: null,
+        execution_id: null,
+      })
+      .eq('campaign_id', campaignId)
+      .in('status', ['queued', 'processing'])
+      .in('assigned_inbox_id', removedInboxIds);
+
+    if (resetAssignmentsError) {
+      throw resetAssignmentsError;
+    }
+  }
+
   return {
     campaign_id: campaignId,
     selected: dedupedSelectedInboxIds.length,

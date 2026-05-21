@@ -164,16 +164,6 @@ export async function listSocialConnectors(userId?: string | null, operatorId?: 
     );
     const missingFields = missingConfigFieldsForPlatform(row.code, appRow);
     const appConfigured = missingFields.length === 0;
-    if (row.code !== 'linkedin') {
-      return {
-        ...row,
-        metadata: {
-          ...(row.metadata ?? {}),
-          app_configured: appConfigured,
-          missing_fields: missingFields,
-        },
-      };
-    }
     const oauthAppConfigured = Boolean(oauthConfigByCode.get(row.code));
     return {
       ...row,
@@ -182,7 +172,6 @@ export async function listSocialConnectors(userId?: string | null, operatorId?: 
       status: statusByCode.get(row.code) ? 'api_enabled' : 'manual_assisted',
       metadata: {
         ...(row.metadata ?? {}),
-        capabilities: ['text_link'],
         oauth_app_configured: oauthAppConfigured,
         app_configured: appConfigured,
         missing_fields: missingFields,

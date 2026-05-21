@@ -1,13 +1,5 @@
--- Standardize legacy pending rows and define deterministic claim function.
-
-update public.campaign_leads cl
-set
-  status = 'queued',
-  status_reason = coalesce(cl.status_reason, 'migrated_from_pending_compat')
-from public.campaigns c
-where cl.campaign_id = c.id
-  and c.status = 'running'
-  and cl.status = 'pending';
+-- Runtime override: claim queued rows even when assigned_inbox_id is null.
+-- Sender assignment is resolved in backend allocator at send time.
 
 create or replace function public.claim_campaign_executions(
   p_campaign_id text,

@@ -253,6 +253,18 @@ async function checkSocialAppsSchemaReadiness() {
   }
 
   console.warn('[SOCIAL_APPS_SCHEMA_CHECK_WARN]', { code, message });
+
+  const globalCheck = await supabase
+    .from('social_global_oauth_apps')
+    .select('platform_code,client_id,client_secret_encrypted,redirect_uri,scopes,metadata,active')
+    .limit(1);
+  if (!globalCheck.error) {
+    console.info('[SOCIAL_GLOBAL_APPS_SCHEMA_CHECK_OK]', {
+      table: 'social_global_oauth_apps',
+      requiredColumns: ['platform_code', 'client_secret_encrypted', 'metadata'],
+    });
+    return;
+  }
 }
 
 async function checkInquirySchemaReadiness() {

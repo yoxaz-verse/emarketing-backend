@@ -4,9 +4,9 @@ import { updateRow } from './crudService';
 import { createSmtpTransport } from './email/smtpTransport';
 import {
   getSendingLimitsConfig,
-  resolveInboxEffectiveLimits,
   isNowWithinSendingSchedule,
 } from './sendingLimitsConfig.service';
+import { allocateCampaignSender } from './sending/sendAllocator.service';
 
 const RUNNER_WINDOW_TIMEZONE = 'Asia/Kolkata';
 const RUNNER_WINDOW_START_HOUR = 9;
@@ -217,6 +217,7 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
   const claimFunctionError = claimHealth.error
     ? String((claimHealth.error as any)?.message ?? 'unknown_error')
     : null;
+  const allocator = await allocateCampaignSender({ campaignId });
 
   return {
     campaign: {
@@ -252,6 +253,23 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
     claim_function: {
       callable: claimFunctionCallable,
       error: claimFunctionError,
+    },
+    allocator: {
+      eligible_senders: allocator.eligible_count,
+      blocked_by_reason: allocator.blocked_by_reason,
+      selected_inbox_id: allocator.selected?.inbox_id ?? null,
+      selected_domain_id: allocator.selected?.sending_domain_id ?? null,
+      last_allocator_reason: allocator.reason,
+      schedule_allowed: allocator.schedule_allowed,
+      schedule_reason: allocator.schedule_reason,
+      candidate_capacities: allocator.candidates.map((candidate) => ({
+        inbox_id: candidate.inbox_id,
+        domain_id: candidate.sending_domain_id,
+        rem_daily_inbox: candidate.rem_daily_inbox,
+        rem_hour_inbox: candidate.rem_hour_inbox,
+        rem_daily_domain: candidate.rem_daily_domain,
+        rem_hour_domain: candidate.rem_hour_domain,
+      })),
     },
   };
 }
@@ -496,6 +514,7 @@ export async function requeueStaleProcessingLeads(input: RequeueStaleProcessingI
   };
 }
 
+
 async function countCampaignLeadsByStatus(campaignId: string, status: string): Promise<number> {
   const { count, error } = await supabase
     .from('campaign_leads')
@@ -509,12 +528,11 @@ async function countCampaignLeadsByStatus(campaignId: string, status: string): P
 
   return Number(count ?? 0);
 }
-  
-  
-  /**
-   * Send campaign email for ONE campaign_lead
-   * Idempotent-safe, deterministic, RLS-safe
-   */
+
+/**
+ * Send campaign email for ONE campaign_lead
+ * Idempotent-safe, deterministic, RLS-safe
+ */
 export async function sendCampaignEmail(campaignLeadId: string) {
   const config = await getSendingLimitsConfig();
   const scheduleGate = isNowWithinSendingSchedule(config);
@@ -525,222 +543,182 @@ export async function sendCampaignEmail(campaignLeadId: string) {
     };
   }
 
-  /* -------------------------------------------------------
-       1️⃣ Load campaign_lead (EXECUTION STATE ONLY)
-    ------------------------------------------------------- */
-    const { data: campaignLead, error: leadError } = await supabase
-      .from('campaign_leads')
-      .select(`
+  const { data: campaignLead, error: leadError } = await supabase
+    .from('campaign_leads')
+    .select(`
+      id,
+      campaign_id,
+      status,
+      current_step,
+      assigned_inbox_id,
+      leads:lead_id (
         id,
-        status,
-        current_step,
-        assigned_inbox_id,
-        leads:lead_id (
-          id,
-          email,
-          email_eligibility
-        )
-      `)
-      .eq('id', campaignLeadId)
-      .single();
-  
-    if (leadError || !campaignLead) {
-      throw new Error('Campaign lead not found');
-    }
-  
-    if (campaignLead.status !== 'processing') {
-      throw new Error('Campaign lead is not in processing state');
-    }
-  
-    if (!campaignLead.assigned_inbox_id) {
-      throw new Error('Campaign lead has no assigned inbox');
-    }
-  
-    /* -------------------------------------------------------
-       2️⃣ Load inbox (INFRASTRUCTURE)
-    ------------------------------------------------------- */
-    const { data: inbox, error: inboxError } = await supabase
-      .from('inboxes')
-      .select(`
-        id,
-        email_address,
-        smtp_account_id,
-        sending_domain_id,
-        daily_limit,
-        hourly_limit,
-        warmup_enabled,
-        warmup_day
-      `)
-      .eq('id', campaignLead.assigned_inbox_id)
-      .single();
-  
-    if (inboxError || !inbox) {
-      throw new Error('Inbox not found');
-    }
+        email,
+        email_eligibility
+      )
+    `)
+    .eq('id', campaignLeadId)
+    .single();
 
-    const leadEligibility = String(campaignLead?.leads?.email_eligibility ?? '').toLowerCase();
-    if (leadEligibility === 'risky') {
-      const { dailyLimit } = resolveInboxEffectiveLimits(inbox as any, config);
-      const riskyPercent = Math.max(0, Math.min(100, Number(config.risky_daily_percent_limit ?? 20)));
-      const allowedRiskyPerDay = Math.max(0, Math.floor((dailyLimit * riskyPercent) / 100));
-      const today = new Date().toISOString().slice(0, 10);
+  if (leadError || !campaignLead) {
+    throw new Error('Campaign lead not found');
+  }
 
-      const { data: sentTodayLogs, error: sentTodayLogsError } = await supabase
-        .from('email_logs')
-        .select('lead_id')
-        .eq('inbox_id', inbox.id)
-        .eq('status', 'sent')
-        .gte('sent_at', today);
+  if (campaignLead.status !== 'processing') {
+    throw new Error('Campaign lead is not in processing state');
+  }
 
-      if (sentTodayLogsError) {
-        throw sentTodayLogsError;
-      }
+  const allocator = await allocateCampaignSender({
+    campaignId: String((campaignLead as any).campaign_id ?? ''),
+    leadEligibility: String((campaignLead as any)?.leads?.email_eligibility ?? ''),
+  });
 
-      const sentLeadIds = Array.from(
-        new Set((sentTodayLogs ?? []).map((row: any) => String(row?.lead_id ?? '')).filter(Boolean))
-      );
-
-      let riskySentToday = 0;
-      if (sentLeadIds.length > 0) {
-        const { data: riskySentLeads, error: riskySentLeadsError } = await supabase
-          .from('leads')
-          .select('id')
-          .in('id', sentLeadIds)
-          .eq('email_eligibility', 'risky');
-
-        if (riskySentLeadsError) {
-          throw riskySentLeadsError;
-        }
-        riskySentToday = (riskySentLeads ?? []).length;
-      }
-
-      if (riskySentToday >= allowedRiskyPerDay) {
-        await supabase.from('campaign_leads').update({
-          status: 'paused',
-          status_reason: 'risky_daily_cap_reached',
-        }).eq('id', campaignLeadId).eq('status', 'processing');
-
-        await supabase.from('system_events').insert({
-          type: 'RISKY_CAP_REACHED',
-          entity: 'inbox',
-          entity_id: inbox.id,
-          message: `Risky send cap reached for inbox ${inbox.email_address}`,
-          meta: {
-            campaign_lead_id: campaignLeadId,
-            inbox_id: inbox.id,
-            risky_percent_limit: riskyPercent,
-            daily_limit: dailyLimit,
-            allowed_risky_per_day: allowedRiskyPerDay,
-            risky_sent_today: riskySentToday,
-          },
-        });
-
-        return {
-          skipped: true,
-          reason: 'risky_daily_cap_reached',
-          inbox_id: inbox.id,
-          allowed_risky_per_day: allowedRiskyPerDay,
-          risky_sent_today: riskySentToday,
-        };
-      }
-    }
-  
-    /* -------------------------------------------------------
-       3️⃣ Load SMTP account
-    ------------------------------------------------------- */
-    const { data: smtp, error: smtpError } = await supabase
-      .from('smtp_accounts')
-      .select(`
-        provider,
-        host,
-        port,
-        username,
-        password,
-        encryption
-      `)
-      .eq('id', inbox.smtp_account_id)
-      .single();
-  
-    if (smtpError || !smtp) {
-      throw new Error('SMTP account missing for inbox');
-    }
-  
-    /* -------------------------------------------------------
-       4️⃣ Load sequence step (CONTENT)
-    ------------------------------------------------------- */
-    const { data: stepRow, error: stepError } = await supabase
+  if (!allocator.selected) {
+    await supabase
       .from('campaign_leads')
-      .select(`
-        current_step,
-        campaigns:campaign_id (
-          sequences:sequence_id (
-            sequence_steps (
-              step_number,
-              subject,
-              body
-            )
-          )
-        )
-      `)
+      .update({
+        status: 'queued',
+        status_reason: allocator.reason || 'no_eligible_sender',
+        processing_at: null,
+        execution_id: null,
+      })
       .eq('id', campaignLeadId)
-      .single();
-  
-    if (stepError || !stepRow) {
-      throw new Error('Failed to load sequence');
-    }
-  
-    const steps = stepRow.campaigns.sequences.sequence_steps;
-    const step = steps.find(
-      (s: any) => s.step_number === stepRow.current_step
-    );
-  
-    if (!step) {
-      throw new Error('Sequence step not found');
-    }
-  
-    /* -------------------------------------------------------
-       5️⃣ Send email
-    ------------------------------------------------------- */
-    const transporter = createSmtpTransport({
-      provider: smtp.provider,
-      host: smtp.host,
-      port: smtp.port,
-      username: smtp.username,
-      password: decryptSecret(smtp.password),
-      encryption: smtp.encryption,
-    });
-  
-    const info = await transporter.sendMail({
-      from: `"${inbox.email_address}" <${inbox.email_address}>`,
-      to: campaignLead.leads.email,
-      subject: step.subject,
-      html: step.body,
-    });
-  
-    /* -------------------------------------------------------
-       6️⃣ Log event
-    ------------------------------------------------------- */
+      .eq('status', 'processing');
+
     await supabase.from('system_events').insert({
-      type: 'email_sent',
+      type: 'CAMPAIGN_SEND_DEFERRED',
+      entity: 'campaign_leads',
       entity_id: campaignLeadId,
+      message: 'No eligible sender available; lead requeued for next tick.',
       meta: {
-        message_id: info.messageId,
-        inbox_id: inbox.id,
-        to: campaignLead.leads.email,
+        campaign_id: (campaignLead as any).campaign_id ?? null,
+        blocked_by_reason: allocator.blocked_by_reason,
+        allocator_reason: allocator.reason,
       },
     });
-  
+
     return {
-      message_id: info.messageId,
-      to: campaignLead.leads.email,
+      skipped: true,
+      reason: allocator.reason || 'no_eligible_sender',
     };
   }
-  
-  
-  
-  
-  
-  
+
+  const selectedInboxId = String(allocator.selected.inbox_id);
+  if (String(campaignLead.assigned_inbox_id ?? '') !== selectedInboxId) {
+    const { error: assignError } = await supabase
+      .from('campaign_leads')
+      .update({ assigned_inbox_id: selectedInboxId })
+      .eq('id', campaignLeadId)
+      .eq('status', 'processing');
+    if (assignError) throw assignError;
+    campaignLead.assigned_inbox_id = selectedInboxId;
+  }
+
+  const { data: inbox, error: inboxError } = await supabase
+    .from('inboxes')
+    .select(`
+      id,
+      email_address,
+      smtp_account_id,
+      sending_domain_id
+    `)
+    .eq('id', campaignLead.assigned_inbox_id)
+    .single();
+
+  if (inboxError || !inbox) {
+    throw new Error('Inbox not found');
+  }
+
+  const { data: smtp, error: smtpError } = await supabase
+    .from('smtp_accounts')
+    .select(`
+      provider,
+      host,
+      port,
+      username,
+      password,
+      encryption
+    `)
+    .eq('id', inbox.smtp_account_id)
+    .single();
+
+  if (smtpError || !smtp) {
+    throw new Error('SMTP account missing for inbox');
+  }
+
+  const { data: stepRow, error: stepError } = await supabase
+    .from('campaign_leads')
+    .select(`
+      current_step,
+      campaigns:campaign_id (
+        sequences:sequence_id (
+          sequence_steps (
+            step_number,
+            subject,
+            body
+          )
+        )
+      )
+    `)
+    .eq('id', campaignLeadId)
+    .single();
+
+  if (stepError || !stepRow) {
+    throw new Error('Failed to load sequence');
+  }
+
+  const steps = stepRow.campaigns.sequences.sequence_steps;
+  const step = steps.find((s: any) => s.step_number === stepRow.current_step);
+  if (!step) {
+    throw new Error('Sequence step not found');
+  }
+
+  const transporter = createSmtpTransport({
+    provider: smtp.provider,
+    host: smtp.host,
+    port: smtp.port,
+    username: smtp.username,
+    password: decryptSecret(smtp.password),
+    encryption: smtp.encryption,
+  });
+
+  const info = await transporter.sendMail({
+    from: `"${inbox.email_address}" <${inbox.email_address}>`,
+    to: campaignLead.leads.email,
+    subject: step.subject,
+    html: step.body,
+  });
+
+  await supabase.from('email_logs').insert({
+    lead_id: campaignLead.leads.id,
+    inbox_id: inbox.id,
+    subject: step.subject,
+    body: step.body,
+    status: 'sent',
+    sent_at: new Date().toISOString(),
+  });
+
+  await supabase
+    .from('inboxes')
+    .update({ last_sent_at: new Date().toISOString() })
+    .eq('id', inbox.id);
+
+  await supabase.from('system_events').insert({
+    type: 'email_sent',
+    entity_id: campaignLeadId,
+    meta: {
+      message_id: info.messageId,
+      inbox_id: inbox.id,
+      domain_id: allocator.selected.sending_domain_id,
+      to: campaignLead.leads.email,
+    },
+  });
+
+  return {
+    message_id: info.messageId,
+    to: campaignLead.leads.email,
+  };
+}
 /**
  * STEP SUCCESS
  */
