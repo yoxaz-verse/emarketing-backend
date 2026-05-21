@@ -35,9 +35,23 @@ router.get('/campaigns/:id/next-executions', async (req, res) => {
       batchSize
     );
 
+    const claimedCount = Number(claim?.meta?.claimed_count ?? 0);
+    const reason = String(claim?.meta?.reason ?? '');
+    const shouldSend = claimedCount > 0;
     res.json({
       executions: claim.executions,
       meta: claim.meta,
+      runner: {
+        should_send: shouldSend,
+        claimed_count: claimedCount,
+        reason: reason || null,
+        queue_snapshot: {
+          queued_count: Number(claim?.meta?.queued_count ?? 0),
+          processing_count: Number(claim?.meta?.processing_count ?? 0),
+          paused_count: Number(claim?.meta?.paused_count ?? 0),
+          pending_count: Number(claim?.meta?.pending_count ?? 0),
+        },
+      },
     });
   } catch (err: any) {
     console.error('[NEXT EXECUTIONS ERROR]', err);

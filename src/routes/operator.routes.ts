@@ -7,7 +7,12 @@ import {
   resumeCampaign
 } from '../services/operatorService.js';
 import { getCampaignStats } from '../services/operatorReadService.js';
-import { getOperatorReplies, reviewLeadInterest } from '../services/operatorRepliesService.js';
+import {
+  getOperatorReplies,
+  getUnmatchedReplyEvents,
+  mapUnmatchedReplyToLead,
+  reviewLeadInterest
+} from '../services/operatorRepliesService.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 import { getEffectiveOperatorId } from '../utils/getEffectiveOperatorId.js';
 import { supabase } from '../supabase.js';
@@ -132,8 +137,14 @@ router.get('/replies', async (req, res) => {
   const reviewStatusRaw = typeof req.query.review_status === 'string' ? req.query.review_status : 'all';
   const reviewStatus =
     reviewStatusRaw === 'unreviewed' || reviewStatusRaw === 'reviewed' ? reviewStatusRaw : 'all';
+  const includeUnmatched = String(req.query.include_unmatched ?? '').toLowerCase() === 'true';
   const replies = await getOperatorReplies(operatorId, { campaignId, reviewStatus });
-  res.json(replies);
+  if (!includeUnmatched) {
+    return res.json(replies);
+  }
+
+  const unmatched = await getUnmatchedReplyEvents(operatorId, { campaignId });
+  return res.json({ replies, unmatched });
 });
 
 router.get('/replies/operators', async (req, res) => {
@@ -230,6 +241,29 @@ router.patch('/replies/:leadId/review', async (req, res) => {
     return res.json(result);
   } catch (err: any) {
     return res.status(400).json({ error: err?.message ?? 'Failed to review reply interest' });
+  }
+});
+
+router.patch('/replies/unmatched/:replyEventId/map', async (req, res) => {
+  try {
+    const replyEventId = String(req.params.replyEventId ?? '');
+    const leadId = req.body?.lead_id ? String(req.body.lead_id) : '';
+    const leadEmail = req.body?.lead_email ? String(req.body.lead_email) : '';
+    const campaignLeadId = req.body?.campaign_lead_id ? String(req.body.campaign_lead_id) : null;
+    if (!replyEventId) {
+      return res.status(400).json({ error: 'replyEventId is required' });
+    }
+    const reviewedBy = String((req as any)?.auth?.user_id ?? (req as any)?.auth?.operator_id ?? '') || null;
+    const result = await mapUnmatchedReplyToLead({
+      replyEventId,
+      leadId: leadId || undefined,
+      leadEmail: leadEmail || undefined,
+      campaignLeadId,
+      reviewedBy,
+    });
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(400).json({ error: err?.message ?? 'Failed to map unmatched reply' });
   }
 });
 

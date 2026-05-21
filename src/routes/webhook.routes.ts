@@ -3,7 +3,7 @@ import { advanceInboxWarmup } from '../services/webhook/warmup.service';
 import { handleBounce } from '../services/execution.service';
 import { dailyHealthRecovery } from '../services/webhook/health.service';
 import { ingestInboundReply } from '../services/replyIngestService.js';
-import { ingestProviderEmailEvent } from '../services/emailTracking.service.js';
+import { ingestPixelOpenEvent, ingestProviderEmailEvent } from '../services/emailTracking.service.js';
 
 const router = Router();
 
@@ -65,6 +65,21 @@ router.post('/webhooks/email-event', async (req, res) => {
   } catch (err: any) {
     return res.status(400).json({ error: err?.message ?? 'Failed to ingest provider email event' });
   }
+});
+
+router.get('/tracking/open/:token', async (req, res) => {
+  try {
+    await ingestPixelOpenEvent(String(req.params.token ?? ''));
+  } catch (err: any) {
+    console.warn('[PIXEL_OPEN_TRACKING_WARN]', err?.message ?? err);
+  }
+
+  const pixel = Buffer.from('R0lGODlhAQABAPAAAAAAAAAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==', 'base64');
+  res.setHeader('Content-Type', 'image/gif');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  return res.status(200).send(pixel);
 });
   
   router.post('/internal/health/recover', async (_req, res) => {

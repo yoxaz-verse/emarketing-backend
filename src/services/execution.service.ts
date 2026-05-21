@@ -3,6 +3,7 @@ import { decryptSecret } from '../utils/sendEncryption';
 import { updateRow } from './crudService';
 import { createSmtpTransport } from './email/smtpTransport';
 import { renderPlainTextAsHtml } from './email/emailBodyRender';
+import { makePixelToken } from './emailTracking.service.js';
 import {
   getSendingLimitsConfig,
   isNowWithinSendingSchedule,
@@ -14,6 +15,7 @@ const RUNNER_WINDOW_START_HOUR = 9;
 const RUNNER_WINDOW_END_HOUR = 18;
 const DEFAULT_STALE_PROCESSING_TIMEOUT_MINUTES = 10;
 const FIXED_CAMPAIGN_SENDER_NAME = 'OBAOL Team';
+const FORBIDDEN_SIGNOFF_MARKERS = ['regards, jacob', 'regards, joshua', 'joshua', 'jacob alwin joy', 'jacob supreme'];
 
 type EmptyClaimReason =
   | 'schedule_blocked'
@@ -735,6 +737,13 @@ export async function sendCampaignEmail(campaignLeadId: string) {
     throw new Error('Sequence step not found');
   }
 
+  const bodyRaw = String(step.body ?? '');
+  const bodyLower = bodyRaw.toLowerCase();
+  const blockedMarker = FORBIDDEN_SIGNOFF_MARKERS.find((marker) => bodyLower.includes(marker));
+  if (blockedMarker && !bodyLower.includes('obaol team')) {
+    throw new Error(`Content blocked: personal sign-off detected (${blockedMarker}). Use OBAOL Team signature.`);
+  }
+
   const transporter = createSmtpTransport({
     provider: smtp.provider,
     host: smtp.host,
@@ -744,11 +753,28 @@ export async function sendCampaignEmail(campaignLeadId: string) {
     encryption: smtp.encryption,
   });
 
+  const sentAtIso = new Date().toISOString();
+  const pixelToken = makePixelToken({
+    campaignLeadId: String(campaignLeadId),
+    campaignId: String((campaignLead as any).campaign_id ?? ''),
+    leadId: String((campaignLead as any)?.leads?.id ?? ''),
+    toEmail: String((campaignLead as any)?.leads?.email ?? ''),
+    sentAtIso,
+  });
+  const trackingBase = String(
+    process.env.TRACKING_PIXEL_BASE_URL ||
+    process.env.PUBLIC_BACKEND_URL ||
+    process.env.BACKEND_PUBLIC_URL ||
+    'https://emarketing-backend.infra.obaol.com'
+  ).replace(/\/$/, '');
+  const pixelHtml = `<img src="${trackingBase}/tracking/open/${pixelToken}" alt="" width="1" height="1" style="display:none;opacity:0;" />`;
+  const htmlBody = `${renderPlainTextAsHtml(bodyRaw)}\n${pixelHtml}`;
+
   const info = await transporter.sendMail({
     from: `"${FIXED_CAMPAIGN_SENDER_NAME}" <${inbox.email_address}>`,
     to: campaignLead.leads.email,
     subject: step.subject,
-    html: renderPlainTextAsHtml(step.body ?? ''),
+    html: htmlBody,
   });
 
   await supabase.from('email_logs').insert({
@@ -760,9 +786,9 @@ export async function sendCampaignEmail(campaignLeadId: string) {
     provider_name: String(smtp.provider ?? 'smtp'),
     provider_message_id: normalizeMessageId(info.messageId),
     subject: step.subject,
-    body: step.body,
+    body: bodyRaw,
     status: 'sent',
-    sent_at: new Date().toISOString(),
+    sent_at: sentAtIso,
   });
 
   await supabase

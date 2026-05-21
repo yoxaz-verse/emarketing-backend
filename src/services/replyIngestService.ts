@@ -37,25 +37,8 @@ export async function ingestInboundReply(input: InboundReplyPayload) {
     : new Date().toISOString();
   const dedupeKey = toDedupeKey({ fromEmail, message, messageId, receivedAtIso });
 
-  // Resolve lead by explicit leadId (legacy path) or by from email (webhook path).
+  // Resolve order: message-id correlation -> explicit leadId -> from-email fallback.
   let lead: any = null;
-  if (input.leadId) {
-    const { data } = await supabase
-      .from('leads')
-      .select('id, email, status, interest_status')
-      .eq('id', String(input.leadId))
-      .maybeSingle();
-    lead = data;
-  } else if (fromEmail) {
-    const { data } = await supabase
-      .from('leads')
-      .select('id, email, status, interest_status')
-      .eq('email', fromEmail)
-      .maybeSingle();
-    lead = data;
-  }
-
-  const leadId = String(lead?.id ?? '');
   let campaignLeadId: string | null = null;
   let campaignId: string | null = null;
   let resolvedInboxId: string | null = null;
@@ -73,7 +56,7 @@ export async function ingestInboundReply(input: InboundReplyPayload) {
     campaignId = String((mailLog as any)?.campaign_id ?? '') || null;
     resolvedInboxId = String((mailLog as any)?.inbox_id ?? '') || null;
 
-    if (!leadId && (mailLog as any)?.lead_id) {
+    if ((mailLog as any)?.lead_id) {
       const derivedLeadId = String((mailLog as any).lead_id);
       const { data } = await supabase
         .from('leads')
@@ -85,6 +68,25 @@ export async function ingestInboundReply(input: InboundReplyPayload) {
       }
     }
   }
+
+  if (!lead && input.leadId) {
+    const { data } = await supabase
+      .from('leads')
+      .select('id, email, status, interest_status')
+      .eq('id', String(input.leadId))
+      .maybeSingle();
+    lead = data;
+  }
+
+  if (!lead && fromEmail) {
+    const { data } = await supabase
+      .from('leads')
+      .select('id, email, status, interest_status')
+      .eq('email', fromEmail)
+      .maybeSingle();
+    lead = data;
+  }
+
   const resolvedLeadId = String(lead?.id ?? '');
 
   const { error: ingestInsertError } = await supabase
