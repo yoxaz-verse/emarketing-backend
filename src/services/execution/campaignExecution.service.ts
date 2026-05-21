@@ -11,7 +11,7 @@ export async function getNextLeadsForCampaign(campaignId: string, limit = 10) {
       leads ( email )
     `)
     .eq('campaign_id', campaignId)
-    .eq('status', 'pending')
+    .eq('status', 'queued')
     .order('created_at', { ascending: true })
     .limit(limit);
 
@@ -28,7 +28,7 @@ export async function markLeadProcessing(id: string, executionId: string) {
       processing_at: new Date().toISOString(),
     })
     .eq('id', id)
-    .eq('status', 'pending');
+    .eq('status', 'queued');
 
   if (error) throw error;
 }

@@ -12,6 +12,7 @@ import {
   requeueRiskyPausedLeads,
   requeueStaleProcessingLeads,
   getCampaignExecutionWakeState,
+  getCampaignExecutionDiagnostics,
 } from '../services/execution.service';
 import { supabase } from '../supabase';
 import { ingestInboundReply } from '../services/replyIngestService.js';
@@ -29,15 +30,29 @@ router.get('/campaigns/:id/next-executions', async (req, res) => {
     const { id: campaignId } = req.params;
     const batchSize = Number(req.query.batch_size ?? 10);
 
-    const executions = await getNextCampaignExecutions(
+    const claim = await getNextCampaignExecutions(
       campaignId,
       batchSize
     );
 
-    res.json({ executions });
+    res.json({
+      executions: claim.executions,
+      meta: claim.meta,
+    });
   } catch (err: any) {
     console.error('[NEXT EXECUTIONS ERROR]', err);
     res.status(400).json({ error: err.message });
+  }
+});
+
+router.get('/campaigns/:id/diagnostics', async (req, res) => {
+  try {
+    const { id: campaignId } = req.params;
+    const diagnostics = await getCampaignExecutionDiagnostics(campaignId);
+    res.json(diagnostics);
+  } catch (err: any) {
+    console.error('[EXECUTION DIAGNOSTICS ERROR]', err);
+    res.status(400).json({ error: err.message ?? 'Failed to read execution diagnostics' });
   }
 });
 

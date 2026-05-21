@@ -13,6 +13,31 @@ const RUNNER_WINDOW_START_HOUR = 9;
 const RUNNER_WINDOW_END_HOUR = 18;
 const DEFAULT_STALE_PROCESSING_TIMEOUT_MINUTES = 10;
 
+type EmptyClaimReason =
+  | 'schedule_blocked'
+  | 'no_queued_leads'
+  | 'all_processing'
+  | 'all_paused'
+  | 'claim_function_unavailable'
+  | 'no_claimable_rows';
+
+export type ClaimExecutionResult = {
+  executions: any[];
+  meta: {
+    campaign_id: string;
+    batch_size: number;
+    queued_count: number;
+    processing_count: number;
+    paused_count: number;
+    pending_count: number;
+    stale_requeued_count: number;
+    claimed_count: number;
+    reason: EmptyClaimReason | null;
+    schedule_allowed: boolean;
+    schedule_reason: string | null;
+  };
+};
+
 function isWithinRunnerWindow(now: Date = new Date()): boolean {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: RUNNER_WINDOW_TIMEZONE,
@@ -67,60 +92,272 @@ export async function getCampaignExecutionWakeState(lastSeenVersion?: string | n
   };
 }
 
+async function migratePendingLeadsToQueued(campaignId: string): Promise<number> {
+  const { data: campaign, error: campaignError } = await supabase
+    .from('campaigns')
+    .select('status')
+    .eq('id', campaignId)
+    .maybeSingle();
+
+  if (campaignError) throw campaignError;
+
+  const campaignStatus = String((campaign as any)?.status ?? '').toLowerCase();
+  if (campaignStatus !== 'running') {
+    return 0;
+  }
+
+  const { data: updatedRows, error: updateError } = await supabase
+    .from('campaign_leads')
+    .update({
+      status: 'queued',
+      status_reason: 'migrated_from_pending_compat',
+    })
+    .eq('campaign_id', campaignId)
+    .eq('status', 'pending')
+    .select('id');
+
+  if (updateError) {
+    throw updateError;
+  }
+
+  return (updatedRows ?? []).length;
+}
+
+export async function getCampaignExecutionDiagnostics(campaignId: string) {
+  const config = await getSendingLimitsConfig();
+  const scheduleGate = isNowWithinSendingSchedule(config);
+
+  const { data: campaign, error: campaignError } = await supabase
+    .from('campaigns')
+    .select('id,status,operator_id,sequence_id')
+    .eq('id', campaignId)
+    .maybeSingle();
+
+  if (campaignError) throw campaignError;
+
+  const [statusRowsResult, pausedRiskyResult, inboxesResult] = await Promise.all([
+    supabase
+      .from('campaign_leads')
+      .select('status')
+      .eq('campaign_id', campaignId),
+    supabase
+      .from('campaign_leads')
+      .select('id', { count: 'exact', head: true })
+      .eq('campaign_id', campaignId)
+      .eq('status', 'paused')
+      .eq('status_reason', 'risky_daily_cap_reached'),
+    supabase
+      .from('campaign_inboxes')
+      .select(`
+        inbox_id,
+        inboxes:inbox_id (
+          id,
+          is_paused
+        )
+      `)
+      .eq('campaign_id', campaignId),
+  ]);
+
+  if (statusRowsResult.error) throw statusRowsResult.error;
+  if (pausedRiskyResult.error) throw pausedRiskyResult.error;
+  if (inboxesResult.error) throw inboxesResult.error;
+
+  const counts: Record<string, number> = {
+    queued: 0,
+    processing: 0,
+    paused: 0,
+    sent: 0,
+    failed: 0,
+    replied: 0,
+    pending: 0,
+    completed: 0,
+    other: 0,
+  };
+
+  for (const row of statusRowsResult.data ?? []) {
+    const status = String((row as any)?.status ?? '').toLowerCase();
+    if (status in counts) counts[status] += 1;
+    else counts.other += 1;
+  }
+
+  const inboxRows = inboxesResult.data ?? [];
+  const totalInboxes = inboxRows.length;
+  const pausedInboxes = inboxRows.filter((r: any) => Boolean(r?.inboxes?.is_paused)).length;
+  const activeInboxes = Math.max(0, totalInboxes - pausedInboxes);
+
+  const claimHealth = await supabase.rpc('claim_campaign_executions', {
+    p_campaign_id: campaignId,
+    p_limit: 0,
+  });
+
+  const claimFunctionCallable = !claimHealth.error;
+  const claimFunctionError = claimHealth.error
+    ? String((claimHealth.error as any)?.message ?? 'unknown_error')
+    : null;
+
+  return {
+    campaign: {
+      id: campaignId,
+      exists: Boolean(campaign),
+      status: String((campaign as any)?.status ?? ''),
+      operator_id: (campaign as any)?.operator_id ?? null,
+      sequence_id: (campaign as any)?.sequence_id ?? null,
+    },
+    lead_counts: counts,
+    schedule_gate: {
+      allowed: scheduleGate.allowed,
+      reason: scheduleGate.reason ?? null,
+      timezone: config.schedule_timezone,
+      allowed_weekdays: config.allowed_weekdays,
+      send_window_start: config.send_window_start,
+      send_window_end: config.send_window_end,
+    },
+    inboxes: {
+      total: totalInboxes,
+      active: activeInboxes,
+      paused: pausedInboxes,
+    },
+    risky_cap_paused_count: Number(pausedRiskyResult.count ?? 0),
+    claim_function: {
+      callable: claimFunctionCallable,
+      error: claimFunctionError,
+    },
+  };
+}
+
 
   
   
 export async function getNextCampaignExecutions(
-    campaignId: string,
-    batchSize: number
-  ) {
-    const config = await getSendingLimitsConfig();
-    const scheduleGate = isNowWithinSendingSchedule(config);
-    if (!scheduleGate.allowed) {
-      console.log('[CLAIM EXECUTIONS SKIPPED: SCHEDULE]', {
-        campaign_id: campaignId,
-        batch_size: batchSize,
-        reason: scheduleGate.reason ?? 'schedule_not_allowed',
-      });
-      return [];
-    }
+  campaignId: string,
+  batchSize: number
+): Promise<ClaimExecutionResult> {
+  const normalizedBatchSize = Number.isFinite(Number(batchSize))
+    ? Math.max(0, Math.floor(Number(batchSize)))
+    : 10;
 
-    const staleRecovery = await requeueStaleProcessingLeads({
-      campaignId,
-      olderThanMinutes: DEFAULT_STALE_PROCESSING_TIMEOUT_MINUTES,
-    });
-
-    const [queuedCount, processingCount] = await Promise.all([
-      countCampaignLeadsByStatus(campaignId, 'queued'),
-      countCampaignLeadsByStatus(campaignId, 'processing'),
-    ]);
-    
-    const { data, error } = await supabase.rpc(
-      'claim_campaign_executions',
-      {
-        p_campaign_id: campaignId,
-        p_limit: batchSize
-      }
-    );
-    console.log("Outside Function");
-
-    if (error) {
-      console.error('[CLAIM EXECUTIONS ERROR]', error);
-      throw error;
-    }
-
-    const executions = data ?? [];
-    console.log('[CLAIM EXECUTIONS DIAGNOSTICS]', {
+  const migratedPendingCount = await migratePendingLeadsToQueued(campaignId);
+  if (migratedPendingCount > 0) {
+    console.info('[CLAIM_EXECUTIONS_PENDING_MIGRATED]', {
       campaign_id: campaignId,
-      batch_size: batchSize,
+      migrated_count: migratedPendingCount,
+    });
+  }
+
+  const config = await getSendingLimitsConfig();
+  const scheduleGate = isNowWithinSendingSchedule(config);
+  if (!scheduleGate.allowed) {
+    console.log('[CLAIM EXECUTIONS SKIPPED: SCHEDULE]', {
+      campaign_id: campaignId,
+      batch_size: normalizedBatchSize,
+      reason: scheduleGate.reason ?? 'schedule_not_allowed',
+    });
+    return {
+      executions: [],
+      meta: {
+        campaign_id: campaignId,
+        batch_size: normalizedBatchSize,
+        queued_count: 0,
+        processing_count: 0,
+        paused_count: 0,
+        pending_count: 0,
+        stale_requeued_count: 0,
+        claimed_count: 0,
+        reason: 'schedule_blocked',
+        schedule_allowed: false,
+        schedule_reason: scheduleGate.reason ?? 'schedule_not_allowed',
+      },
+    };
+  }
+
+  const staleRecovery = await requeueStaleProcessingLeads({
+    campaignId,
+    olderThanMinutes: DEFAULT_STALE_PROCESSING_TIMEOUT_MINUTES,
+  });
+
+  const [queuedCount, processingCount, pausedCount, pendingCount] = await Promise.all([
+    countCampaignLeadsByStatus(campaignId, 'queued'),
+    countCampaignLeadsByStatus(campaignId, 'processing'),
+    countCampaignLeadsByStatus(campaignId, 'paused'),
+    countCampaignLeadsByStatus(campaignId, 'pending'),
+  ]);
+
+  const { data, error } = await supabase.rpc(
+    'claim_campaign_executions',
+    {
+      p_campaign_id: campaignId,
+      p_limit: normalizedBatchSize,
+    }
+  );
+
+  if (error) {
+    const message = String((error as any)?.message ?? '').toLowerCase();
+    const fnMissing =
+      message.includes('claim_campaign_executions') &&
+      (message.includes('does not exist') || message.includes('not exist'));
+
+    if (fnMissing) {
+      return {
+        executions: [],
+        meta: {
+          campaign_id: campaignId,
+          batch_size: normalizedBatchSize,
+          queued_count: queuedCount,
+          processing_count: processingCount,
+          paused_count: pausedCount,
+          pending_count: pendingCount,
+          stale_requeued_count: staleRecovery.requeued,
+          claimed_count: 0,
+          reason: 'claim_function_unavailable',
+          schedule_allowed: true,
+          schedule_reason: null,
+        },
+      };
+    }
+
+    console.error('[CLAIM EXECUTIONS ERROR]', error);
+    throw error;
+  }
+
+  const executions = data ?? [];
+  const claimedCount = Array.isArray(executions) ? executions.length : 0;
+  let reason: EmptyClaimReason | null = null;
+  if (claimedCount === 0) {
+    if (queuedCount === 0 && pendingCount === 0 && processingCount > 0) reason = 'all_processing';
+    else if (queuedCount === 0 && pendingCount === 0 && pausedCount > 0) reason = 'all_paused';
+    else if (queuedCount === 0 && pendingCount === 0) reason = 'no_queued_leads';
+    else reason = 'no_claimable_rows';
+  }
+
+  console.log('[CLAIM EXECUTIONS DIAGNOSTICS]', {
+    campaign_id: campaignId,
+    batch_size: normalizedBatchSize,
+    queued_count: queuedCount,
+    processing_count: processingCount,
+    paused_count: pausedCount,
+    pending_count: pendingCount,
+    stale_requeued_count: staleRecovery.requeued,
+    claimed_count: claimedCount,
+    reason,
+  });
+
+  return {
+    executions,
+    meta: {
+      campaign_id: campaignId,
+      batch_size: normalizedBatchSize,
       queued_count: queuedCount,
       processing_count: processingCount,
+      paused_count: pausedCount,
+      pending_count: pendingCount,
       stale_requeued_count: staleRecovery.requeued,
-      claimed_count: Array.isArray(executions) ? executions.length : 0,
-    });
-    
-    return executions;
-  }
+      claimed_count: claimedCount,
+      reason,
+      schedule_allowed: true,
+      schedule_reason: null,
+    },
+  };
+}
 
 type RequeueStaleProcessingInput = {
   campaignId?: string;
