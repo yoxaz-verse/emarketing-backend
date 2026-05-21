@@ -344,6 +344,9 @@ export async function getNextCampaignExecutions(
     const fnMissing =
       message.includes('claim_campaign_executions') &&
       (message.includes('does not exist') || message.includes('not exist'));
+    const fnOverloaded =
+      message.includes('could not choose the best candidate function') &&
+      message.includes('claim_campaign_executions');
 
     if (fnMissing) {
       return {
@@ -362,6 +365,13 @@ export async function getNextCampaignExecutions(
           schedule_reason: null,
         },
       };
+    }
+    if (fnOverloaded) {
+      const migrationError: Error & { statusCode?: number } = new Error(
+        'Claim RPC overload mismatch detected. Apply migration 20260521_claim_campaign_executions_drop_overloads_and_recreate_uuid.sql and restart backend.'
+      );
+      migrationError.statusCode = 503;
+      throw migrationError;
     }
 
     console.error('[CLAIM EXECUTIONS ERROR]', error);

@@ -8,7 +8,6 @@ import {
 } from '../services/social/socialAuth.service';
 
 const router = Router();
-router.use(requireAuth('viewer'));
 
 function resolveOperatorId(req: any): string | null {
   const role = String(req.auth?.role ?? '').toLowerCase();
@@ -24,6 +23,36 @@ function resolveOperatorId(req: any): string | null {
 function socialRedirectBase() {
   return process.env.SOCIAL_OAUTH_SUCCESS_REDIRECT || 'http://localhost:3000/dashboard/social-connectors';
 }
+
+async function handleCallback(req: any, res: any, platformInput?: string) {
+  const frontend = socialRedirectBase();
+  try {
+    const platform = String(platformInput ?? req.params?.platform ?? req.query?.platform ?? 'linkedin');
+    await handlePlatformCallback({
+      platform,
+      code: String(req.query?.code ?? ''),
+      state: String(req.query?.state ?? ''),
+    });
+
+    res.redirect(`${frontend}?social_connected=${encodeURIComponent(platform)}`);
+  } catch (err: any) {
+    console.error('[SOCIAL CONNECT CALLBACK ERROR]', err?.message ?? err);
+    const message = encodeURIComponent(err?.message ?? 'connect_failed');
+    res.redirect(`${frontend}?social_connect_error=${message}`);
+  }
+}
+
+router.get('/callback/:platform', async (req, res) => {
+  return handleCallback(req, res, String(req.params.platform ?? ''));
+});
+
+// Compatibility callback path for existing LinkedIn app redirects.
+// Accepts ?platform=...; defaults to linkedin for current production setup.
+router.get('/oauth2-credential/callback', async (req, res) => {
+  return handleCallback(req, res, String(req.query?.platform ?? 'linkedin'));
+});
+
+router.use(requireAuth('viewer'));
 
 router.get('/connections', async (req, res) => {
   try {
@@ -49,23 +78,6 @@ router.get('/connect/:platform', async (req, res) => {
   } catch (err: any) {
     console.error('[SOCIAL CONNECT START ERROR]', err?.message ?? err);
     const message = encodeURIComponent(err?.message ?? 'Failed to start social connect flow');
-    res.redirect(`${frontend}?social_connect_error=${message}`);
-  }
-});
-
-router.get('/callback/:platform', async (req, res) => {
-  const frontend = socialRedirectBase();
-  try {
-    await handlePlatformCallback({
-      platform: req.params.platform,
-      code: String(req.query?.code ?? ''),
-      state: String(req.query?.state ?? ''),
-    });
-
-    res.redirect(`${frontend}?social_connected=${encodeURIComponent(req.params.platform)}`);
-  } catch (err: any) {
-    console.error('[SOCIAL CONNECT CALLBACK ERROR]', err?.message ?? err);
-    const message = encodeURIComponent(err?.message ?? 'connect_failed');
     res.redirect(`${frontend}?social_connect_error=${message}`);
   }
 });

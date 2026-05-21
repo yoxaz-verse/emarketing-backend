@@ -121,6 +121,14 @@ app.use('/newsletter', newsletterRoutes);
 app.use('/marketplaces', marketplacesRoutes);
 app.use('/social', socialRoutes);
 app.use('/social', socialAuthRoutes);
+app.get('/oauth2-credential/callback', (req, res) => {
+  const query = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+  res.redirect(`/social/oauth2-credential/callback${query}`);
+});
+app.get('/rest/oauth2-credential/callback', (req, res) => {
+  const query = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+  res.redirect(`/social/oauth2-credential/callback${query}`);
+});
 app.use('/blogs', blogsRoutes);
 app.use('/communities', communitiesRoutes);
 app.use('/inquiries', inquiriesRoutes);
@@ -263,7 +271,28 @@ async function checkSocialAppsSchemaReadiness() {
       table: 'social_global_oauth_apps',
       requiredColumns: ['platform_code', 'client_secret_encrypted', 'metadata'],
     });
-    return;
+  }
+
+  const stateCheck = await supabase
+    .from('social_oauth_states')
+    .select('state_hash,platform_code,user_id,operator_id,expires_at')
+    .limit(1);
+  if (!stateCheck.error) {
+    console.info('[SOCIAL_OAUTH_STATES_SCHEMA_CHECK_OK]', {
+      table: 'social_oauth_states',
+      requiredColumns: ['state_hash', 'platform_code', 'user_id', 'operator_id', 'expires_at'],
+    });
+  }
+
+  const connCheck = await supabase
+    .from('social_oauth_connections')
+    .select('platform_code,user_id,operator_id,access_token_encrypted,refresh_token_encrypted,expires_at,scopes,metadata,status,last_error')
+    .limit(1);
+  if (!connCheck.error) {
+    console.info('[SOCIAL_OAUTH_CONNECTIONS_SCHEMA_CHECK_OK]', {
+      table: 'social_oauth_connections',
+      requiredColumns: ['platform_code', 'user_id', 'operator_id', 'access_token_encrypted', 'scopes', 'metadata'],
+    });
   }
 }
 

@@ -2,7 +2,7 @@
 -- Sender assignment is resolved in backend allocator at send time.
 
 create or replace function public.claim_campaign_executions(
-  p_campaign_id text,
+  p_campaign_id uuid,
   p_limit integer
 )
 returns table (

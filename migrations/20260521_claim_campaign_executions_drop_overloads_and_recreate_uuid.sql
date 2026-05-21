@@ -1,13 +1,8 @@
--- Standardize legacy pending rows and define deterministic claim function.
+-- Resolve RPC ambiguity by removing overloaded claim function signatures.
+-- Keep only UUID signature expected by campaigns.id/campaign_leads.campaign_id.
 
-update public.campaign_leads cl
-set
-  status = 'queued',
-  status_reason = coalesce(cl.status_reason, 'migrated_from_pending_compat')
-from public.campaigns c
-where cl.campaign_id = c.id
-  and c.status = 'running'
-  and cl.status = 'pending';
+drop function if exists public.claim_campaign_executions(text, integer);
+drop function if exists public.claim_campaign_executions(uuid, integer);
 
 create or replace function public.claim_campaign_executions(
   p_campaign_id uuid,
