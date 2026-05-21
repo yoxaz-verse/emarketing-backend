@@ -148,8 +148,29 @@ export async function requeueStaleProcessingLeads(input: RequeueStaleProcessingI
     scopedQuery = scopedQuery.eq('campaign_id', campaignId);
   }
 
-  const { data: staleRows, error: staleRowsError } = await scopedQuery;
+  let { data: staleRows, error: staleRowsError } = await scopedQuery;
   if (staleRowsError) {
+    const message = String((staleRowsError as any)?.message ?? '');
+    const code = String((staleRowsError as any)?.code ?? '');
+    const missingProcessingAt = code === '42703' || message.includes('processing_at');
+
+    // Backward compatibility: if older DB schema does not have processing_at,
+    // skip stale requeue instead of breaking claim endpoint.
+    if (missingProcessingAt) {
+      console.warn('[REQUEUE STALE PROCESSING SKIPPED]', {
+        reason: 'missing_processing_at_column',
+        campaign_id: campaignId ?? null,
+      });
+      return {
+        scanned: 0,
+        requeued: 0,
+        campaign_id: campaignId ?? null,
+        older_than_minutes: olderThanMinutes,
+        cutoff_iso: cutoffIso,
+        skipped_reason: 'missing_processing_at_column',
+      };
+    }
+
     throw staleRowsError;
   }
 
