@@ -11,7 +11,7 @@ function createHttpError(message: string, statusCode: number) {
   return error;
 }
 
-async function assertCampaignIsDraftForLeadMutation(campaignId: string) {
+async function assertCampaignIsMutableForLeadMutation(campaignId: string) {
   const { data: campaign, error } = await supabase
     .from('campaigns')
     .select('id,status')
@@ -20,8 +20,9 @@ async function assertCampaignIsDraftForLeadMutation(campaignId: string) {
 
   if (error) throw error;
   if (!campaign) throw createHttpError('Campaign not found.', 404);
-  if (String(campaign.status ?? '').toLowerCase() !== 'draft') {
-    throw createHttpError('Campaign leads can only be modified while campaign is draft.', 409);
+  const normalizedStatus = String(campaign.status ?? '').toLowerCase();
+  if (normalizedStatus === 'running') {
+    throw createHttpError('Campaign leads cannot be modified while campaign is running. Pause it first.', 409);
   }
 }
 
@@ -59,7 +60,7 @@ export async function attachLeadsToCampaign(
       skipped_missing: 0,
     };
   }
-  await assertCampaignIsDraftForLeadMutation(campaignId);
+  await assertCampaignIsMutableForLeadMutation(campaignId);
 
   const dedupedLeadIds = Array.from(new Set(leadIds.map((id) => String(id))));
   const requested = dedupedLeadIds.length;
@@ -81,7 +82,7 @@ export async function attachLeadsToCampaign(
 
   const { data: leadRows, error: leadFetchError } = await supabase
     .from('leads')
-    .select('id, email_eligibility, permanently_failed')
+    .select('id, email_eligibility, permanently_failed, is_used')
     .in('id', dedupedLeadIds);
 
   if (leadFetchError) {
@@ -89,7 +90,7 @@ export async function attachLeadsToCampaign(
   }
 
   const allowedStatuses = new Set(['eligible', 'risky']);
-  const leadStateMap = new Map<string, { eligibility: string; isBlocked: boolean }>(
+  const leadStateMap = new Map<string, { eligibility: string; isBlocked: boolean; isUsed: boolean }>(
     (leadRows ?? []).map((row: any) => [
       String(row.id),
       {
@@ -97,6 +98,7 @@ export async function attachLeadsToCampaign(
         isBlocked:
           String(row.email_eligibility ?? '').toLowerCase() === 'blocked' ||
           row.permanently_failed === true,
+        isUsed: row.is_used === true,
       },
     ])
   );
@@ -112,6 +114,7 @@ export async function attachLeadsToCampaign(
     if (!state) return false;
     if (!allowedStatuses.has(state.eligibility)) return false;
     if (state.isBlocked) return false;
+    if (state.isUsed) return false;
     return true;
   });
   const skippedExisting = requested - newLeadIds.length;
@@ -188,7 +191,7 @@ export async function detachLeadsFromCampaign(
       skipped_missing: 0,
     };
   }
-  await assertCampaignIsDraftForLeadMutation(campaignId);
+  await assertCampaignIsMutableForLeadMutation(campaignId);
 
   const dedupedLeadIds = Array.from(new Set(leadIds.map((id) => String(id))));
   const requested = dedupedLeadIds.length;

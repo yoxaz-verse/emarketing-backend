@@ -50,6 +50,33 @@ function mapCrudWriteError(table: AllowedTable, error: any): Error {
   return new Error(message);
 }
 
+function mapCrudDeleteError(table: AllowedTable, error: any): Error {
+  const code = String(error?.code ?? '');
+  const message = String(error?.message ?? 'Delete failed');
+  const details = String(error?.details ?? '');
+
+  if (table === 'campaigns' && code === '23503') {
+    return createHttpError(
+      'Campaign cannot be deleted due to dependent records. Remove related records and retry.',
+      409
+    );
+  }
+
+  if (code === '42501') {
+    return createHttpError('Permission denied for delete operation.', 403);
+  }
+
+  if (code === '23503') {
+    return createHttpError(`Delete blocked by dependency constraint. ${message || details}`.trim(), 409);
+  }
+
+  if (code === '22P02') {
+    return createHttpError('Invalid id format for delete operation.', 400);
+  }
+
+  return createHttpError(message, 400);
+}
+
 function parseBoolean(value: unknown): boolean | null {
   if (value === true || value === 'true' || value === '1' || value === 1) return true;
   if (value === false || value === 'false' || value === '0' || value === 0) return false;
@@ -491,7 +518,7 @@ export async function deleteRow(
     .delete()
     .eq('id', id);
 
-  if (error) throw error;
+  if (error) throw mapCrudDeleteError(table, error);
 }
 
 export async function deleteRowsBulk(
@@ -511,7 +538,7 @@ export async function deleteRowsBulk(
 
   const uniqueIds = Array.from(new Set((ids ?? []).filter((id): id is string => typeof id === 'string' && id.trim().length > 0)));
   if (uniqueIds.length === 0) {
-    return { deletedCount: 0 };
+    return { deletedCount: 0, requestedCount: 0, filteredCount: 0 };
   }
 
   let existingQuery: any = supabase
@@ -534,7 +561,7 @@ export async function deleteRowsBulk(
       if (campaignError) throw campaignError;
       const allowedCampaignIds = (campaignRows ?? []).map((row: any) => String(row.id)).filter(Boolean);
       if (allowedCampaignIds.length === 0) {
-        return { deletedCount: 0 };
+        return { deletedCount: 0, requestedCount: uniqueIds.length, filteredCount: uniqueIds.length };
       }
       existingQuery = existingQuery.in('campaign_id', allowedCampaignIds);
     }
@@ -546,7 +573,7 @@ export async function deleteRowsBulk(
   const existingIds = (existingRows ?? []).map((row: any) => row.id).filter(Boolean);
 
   if (existingIds.length === 0) {
-    return { deletedCount: 0 };
+    return { deletedCount: 0, requestedCount: uniqueIds.length, filteredCount: uniqueIds.length };
   }
 
   const { error } = await supabase
@@ -555,5 +582,9 @@ export async function deleteRowsBulk(
     .in('id', existingIds);
 
   if (error) throw error;
-  return { deletedCount: existingIds.length };
+  return {
+    deletedCount: existingIds.length,
+    requestedCount: uniqueIds.length,
+    filteredCount: Math.max(0, uniqueIds.length - existingIds.length),
+  };
 }

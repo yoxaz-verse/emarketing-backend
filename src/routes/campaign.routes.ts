@@ -137,6 +137,7 @@ router.post('/:id/leads/attach', async (req, res) => {
     }
 
     let scopedLeadIds = lead_ids;
+    let skippedOutOfScope = 0;
     if (isOperatorScopedRequest(req)) {
       const operatorId = String(req?.auth?.operator_id ?? '').trim();
       const { data: ownedLeads, error: ownedLeadsError } = await supabase
@@ -147,6 +148,7 @@ router.post('/:id/leads/attach', async (req, res) => {
       if (ownedLeadsError) throw ownedLeadsError;
       const allowedIds = new Set((ownedLeads ?? []).map((row: any) => String(row.id)));
       scopedLeadIds = lead_ids.filter((id: any) => allowedIds.has(String(id)));
+      skippedOutOfScope = lead_ids.length - scopedLeadIds.length;
     }
 
     const result = await attachLeadsToCampaign(campaignId, scopedLeadIds);
@@ -154,6 +156,7 @@ router.post('/:id/leads/attach', async (req, res) => {
     res.json({
       success: true,
       ...result,
+      skipped_out_of_scope: skippedOutOfScope,
     });
   } catch (err: any) {
     console.error('[ATTACH LEADS ERROR]', err);
@@ -219,10 +222,26 @@ router.post('/:id/leads/detach', async (req, res) => {
       });
     }
 
-    const result = await detachLeadsFromCampaign(campaignId, lead_ids);
+    let scopedLeadIds = lead_ids;
+    let skippedOutOfScope = 0;
+    if (isOperatorScopedRequest(req)) {
+      const operatorId = String(req?.auth?.operator_id ?? '').trim();
+      const { data: ownedLeads, error: ownedLeadsError } = await supabase
+        .from('leads')
+        .select('id')
+        .eq('operator_id', operatorId)
+        .in('id', lead_ids);
+      if (ownedLeadsError) throw ownedLeadsError;
+      const allowedIds = new Set((ownedLeads ?? []).map((row: any) => String(row.id)));
+      scopedLeadIds = lead_ids.filter((id: any) => allowedIds.has(String(id)));
+      skippedOutOfScope = lead_ids.length - scopedLeadIds.length;
+    }
+
+    const result = await detachLeadsFromCampaign(campaignId, scopedLeadIds);
     return res.json({
       success: true,
       ...result,
+      skipped_out_of_scope: skippedOutOfScope,
     });
   } catch (err: any) {
     console.error('[DETACH LEADS ERROR]', err);
@@ -245,15 +264,59 @@ router.post('/:id/leads/detach/', async (req, res) => {
       });
     }
 
-    const result = await detachLeadsFromCampaign(campaignId, lead_ids);
+    let scopedLeadIds = lead_ids;
+    let skippedOutOfScope = 0;
+    if (isOperatorScopedRequest(req)) {
+      const operatorId = String(req?.auth?.operator_id ?? '').trim();
+      const { data: ownedLeads, error: ownedLeadsError } = await supabase
+        .from('leads')
+        .select('id')
+        .eq('operator_id', operatorId)
+        .in('id', lead_ids);
+      if (ownedLeadsError) throw ownedLeadsError;
+      const allowedIds = new Set((ownedLeads ?? []).map((row: any) => String(row.id)));
+      scopedLeadIds = lead_ids.filter((id: any) => allowedIds.has(String(id)));
+      skippedOutOfScope = lead_ids.length - scopedLeadIds.length;
+    }
+
+    const result = await detachLeadsFromCampaign(campaignId, scopedLeadIds);
     return res.json({
       success: true,
       ...result,
+      skipped_out_of_scope: skippedOutOfScope,
     });
   } catch (err: any) {
     console.error('[DETACH LEADS ERROR]', err);
     return res.status(resolveStatusCode(err)).json({
       error: err.message ?? 'Failed to detach leads',
+    });
+  }
+});
+
+router.get('/:id/mutation-health', async (req, res) => {
+  try {
+    const campaignId = req.params.id;
+    await assertCampaignAccess(req, campaignId);
+    const apiBase = String(process.env.NEXT_PUBLIC_API_BASE_URL ?? '').trim();
+    return res.json({
+      ok: true,
+      campaign_id: campaignId,
+      diagnostics: {
+        api_base_configured: apiBase.length > 0,
+        route_contract_version: 'campaign-mutations-v1',
+        required_routes: {
+          attach: '/campaigns/:id/leads/attach',
+          detach: '/campaigns/:id/leads/detach',
+          attach_folder: '/campaigns/:id/leads/attach-folder',
+          campaign_delete: '/crud/campaigns/:id',
+        },
+      },
+    });
+  } catch (err: any) {
+    console.error('[CAMPAIGN MUTATION HEALTH ERROR]', err);
+    return res.status(resolveStatusCode(err)).json({
+      ok: false,
+      error: err.message ?? 'Failed to fetch mutation health',
     });
   }
 });

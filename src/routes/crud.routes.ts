@@ -99,7 +99,12 @@ router.post('/:table/bulk-delete', async (req, res) => {
     assertTablePermission(req, table);
     const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
     const result = await deleteRowsBulk(table, ids, req.auth);
-    res.json({ success: true, deletedCount: result.deletedCount });
+    res.json({
+      success: true,
+      deletedCount: result.deletedCount,
+      requestedCount: result.requestedCount,
+      filteredCount: result.filteredCount,
+    });
   } catch (err: any) {
     console.error('[CRUD BULK DELETE ERROR]', err);
     res.status(resolveStatusCode(err, 400)).json({

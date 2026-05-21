@@ -7,6 +7,12 @@ export async function runBeforeDelete(
   table: AllowedTable,
   id: string
 ) {
+  const throwHttpError = (message: string, statusCode: number) => {
+    const err = new Error(message) as Error & { statusCode?: number };
+    err.statusCode = statusCode;
+    throw err;
+  };
+
   if (table === 'voice_agents') {
     await handleVoiceAgentsBeforeDelete();
   }
@@ -22,9 +28,11 @@ export async function runBeforeDelete(
 
     if (error) throw error;
     if (campaign && String(campaign.status).toLowerCase() === 'running') {
-      throw new Error('Cannot delete a running campaign. Pause it first.');
+      throwHttpError('Cannot delete a running campaign. Pause it first.', 409);
     }
-    if (campaign && String(campaign.status).toLowerCase() === 'draft') {
+    // Clean dependent rows for any non-running campaign state so delete does not fail
+    // because of residual campaign_leads / campaign_inboxes references.
+    if (campaign) {
       const { error: deleteCampaignLeadsError } = await supabase
         .from('campaign_leads')
         .delete()
@@ -48,8 +56,9 @@ export async function runBeforeDelete(
     if (error) throw error;
     if ((linkedCampaigns ?? []).length > 0) {
       const campaignStatus = String(linkedCampaigns?.[0]?.status ?? 'unknown');
-      throw new Error(
-        `Sequence is linked to campaign(s) (first status: ${campaignStatus}) and cannot be deleted.`
+      throwHttpError(
+        `Sequence is linked to campaign(s) (first status: ${campaignStatus}) and cannot be deleted.`,
+        409
       );
     }
   }
