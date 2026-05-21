@@ -27,6 +27,7 @@ import inquiriesRoutes from './routes/inquiries.routes';
 import quotesRoutes from './routes/quotes.routes';
 import { startSequenceRunner } from './worker/sequenceRunner';
 import { startAgentMissionRunner } from './worker/agentMissionRunner';
+import { startReplyCaptureWorker } from './worker/replyCapture.worker';
 import {
   getEmailValidationWorkerHealth,
   startEmailValidationQueueWorker,
@@ -377,6 +378,12 @@ try {
   startAgentMissionRunner();
 } catch (error) {
   console.error('[AGENT_MISSION_RUNNER_BOOT_ERROR]', error);
+}
+
+try {
+  startReplyCaptureWorker();
+} catch (error) {
+  console.error('[REPLY_CAPTURE_WORKER_BOOT_ERROR]', error);
 }
 
 try {

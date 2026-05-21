@@ -361,6 +361,16 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
   const not_opened = Math.max(sent - opened, 0);
   const not_replied = Math.max(sent - replied, 0);
   const pending_outcome = Math.max(sent - delivered - bounced_total, 0);
+  const confirmedOpenEvents = (eventRows ?? []).filter((row: any) => {
+    const type = String(row?.event_type ?? '').toLowerCase();
+    if (type !== 'open') return false;
+    const source = String((row as any)?.raw_payload?.source ?? '');
+    return source === 'pixel_fallback' || source === 'provider_webhook';
+  }).length;
+  const open_rate_visible = confirmedOpenEvents > 0;
+  const open_rate_visibility_reason = open_rate_visible
+    ? null
+    : 'Open rate hidden until pixel/webhook-confirmed opens are captured.';
   const outcome_vs_step_mismatch = (campaignLeads ?? []).filter((lead: any) => {
     const clid = String(lead?.id ?? '');
     const stepStatus = String(lead?.status ?? '').toLowerCase();
@@ -412,6 +422,14 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
   if (outcome_vs_step_mismatch > 0) {
     spam_hints.push('Some leads are step-completed but missing delivery/bounce events.');
   }
+  if (!open_rate_visible) {
+    spam_hints.push('Open tracking is currently unconfirmed for this campaign (no pixel/webhook open events yet).');
+  }
+
+  const lowConfidenceCount = outcome_rows.filter((row: any) => row.confidence === 'low').length;
+  const open_confidence: 'high' | 'medium' | 'low' = !open_rate_visible
+    ? 'low'
+    : (lowConfidenceCount > 0 ? 'medium' : 'high');
 
   return {
     campaign_id: campaignId,
@@ -431,6 +449,9 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
     delivery_rate: sent > 0 ? Number(((delivered / sent) * 100).toFixed(2)) : 0,
     bounce_rate: sent > 0 ? Number(((bounced_total / sent) * 100).toFixed(2)) : 0,
     open_rate: sent > 0 ? Number(((opened / sent) * 100).toFixed(2)) : 0,
+    open_rate_visible,
+    open_rate_visibility_reason,
+    open_confidence,
     reply_rate: sent > 0 ? Number(((replied / sent) * 100).toFixed(2)) : 0,
     outcome_rows,
     spam_hints,

@@ -18,6 +18,7 @@ import {
 import { supabase } from '../supabase';
 import { ingestInboundReply } from '../services/replyIngestService.js';
 import { initiateCampaignVoiceCall } from '../services/voice/voiceExecution.service';
+import { getReplyCaptureHealth } from '../worker/replyCapture.worker.js';
 
 const router = Router();
 
@@ -216,6 +217,15 @@ router.get('/system/wake-check', async (req, res) => {
     console.error('[WAKE CHECK ERROR]', err);
     const statusCode = Number(err?.statusCode ?? 400);
     res.status(statusCode).json({ error: err.message ?? 'Failed to read wake-check state' });
+  }
+});
+
+router.get('/system/reply-capture-health', async (_req, res) => {
+  try {
+    const health = getReplyCaptureHealth();
+    return res.json(health);
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message ?? 'Failed to read reply capture health' });
   }
 });
 
