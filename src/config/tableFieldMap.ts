@@ -555,6 +555,10 @@ export const TABLE_FIELD_MAP: Record<
       db: 'status',
       behavior: 'plain',
     },
+    sender_display_name: {
+      db: 'sender_display_name',
+      behavior: 'plain',
+    },
     created_at: {
       db: 'created_at',
       behavior: 'readonly',

@@ -615,6 +615,9 @@ export async function sendCampaignEmail(campaignLeadId: string) {
       status,
       current_step,
       assigned_inbox_id,
+      campaigns:campaign_id (
+        sender_display_name
+      ),
       leads:lead_id (
         id,
         email,
@@ -740,9 +743,9 @@ export async function sendCampaignEmail(campaignLeadId: string) {
   const bodyRaw = String(step.body ?? '');
   const bodyLower = bodyRaw.toLowerCase();
   const blockedMarker = FORBIDDEN_SIGNOFF_MARKERS.find((marker) => bodyLower.includes(marker));
-  if (blockedMarker && !bodyLower.includes('obaol team')) {
-    throw new Error(`Content blocked: personal sign-off detected (${blockedMarker}). Use OBAOL Team signature.`);
-  }
+  const personalSignoffWarning = blockedMarker && !bodyLower.includes('obaol team')
+    ? `Personal sign-off detected (${blockedMarker}). Recommended: OBAOL Team signature.`
+    : null;
 
   const transporter = createSmtpTransport({
     provider: smtp.provider,
@@ -770,8 +773,11 @@ export async function sendCampaignEmail(campaignLeadId: string) {
   const pixelHtml = `<img src="${trackingBase}/tracking/open/${pixelToken}" alt="" width="1" height="1" style="display:none;opacity:0;" />`;
   const htmlBody = `${renderPlainTextAsHtml(bodyRaw)}\n${pixelHtml}`;
 
+  const campaignSenderDisplayName = String((campaignLead as any)?.campaigns?.sender_display_name ?? '').trim();
+  const effectiveSenderDisplayName = campaignSenderDisplayName || FIXED_CAMPAIGN_SENDER_NAME;
+
   const info = await transporter.sendMail({
-    from: `"${FIXED_CAMPAIGN_SENDER_NAME}" <${inbox.email_address}>`,
+    from: `"${effectiveSenderDisplayName}" <${inbox.email_address}>`,
     to: campaignLead.leads.email,
     subject: step.subject,
     html: htmlBody,
@@ -804,6 +810,8 @@ export async function sendCampaignEmail(campaignLeadId: string) {
       inbox_id: inbox.id,
       domain_id: allocator.selected.sending_domain_id,
       to: campaignLead.leads.email,
+      sender_display_name: effectiveSenderDisplayName,
+      personal_signoff_warning: personalSignoffWarning,
     },
   });
 

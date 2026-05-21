@@ -306,6 +306,18 @@ export async function listRows(
   }
   if (
     error &&
+    table === 'campaigns' &&
+    String(error?.code ?? '') === '42703' &&
+    String(error?.message ?? '').includes('sender_display_name')
+  ) {
+    query = await applyFilters(
+      supabase.from(table).select(buildSelect('campaigns', { excludeColumns: ['sender_display_name'] }))
+    );
+    ({ data, error } = await query);
+  }
+
+  if (
+    error &&
     (
       error.code === 'PGRST205' ||
       error.code === '42P01' ||
@@ -466,6 +478,10 @@ export async function updateRow(
 
   payload = await runBeforeWrite(table, payload, 'update', id);
   const data = await transformForWrite(table, payload);
+  if (table === 'campaigns' && typeof (data as any)?.sender_display_name === 'string') {
+    const trimmed = String((data as any).sender_display_name).trim();
+    (data as any).sender_display_name = trimmed.length > 0 ? trimmed : null;
+  }
   console.log('[Update DATA]', table, data);
 
   const { error } = await supabase
@@ -473,7 +489,23 @@ export async function updateRow(
     .update(data)
     .eq('id', id);
 
-  if (error) throw mapCrudWriteError(table, error);
+  if (error) {
+    if (
+      table === 'campaigns' &&
+      String((error as any)?.code ?? '') === '42703' &&
+      String((error as any)?.message ?? '').includes('sender_display_name')
+    ) {
+      const fallbackData: any = { ...(data as any) };
+      delete fallbackData.sender_display_name;
+      const { error: fallbackError } = await supabase
+        .from(table)
+        .update(fallbackData)
+        .eq('id', id);
+      if (!fallbackError) return;
+      throw mapCrudWriteError(table, fallbackError);
+    }
+    throw mapCrudWriteError(table, error);
+  }
 }
 
 export async function deleteRow(

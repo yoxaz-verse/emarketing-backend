@@ -73,6 +73,96 @@ function createHttpError(message: string, statusCode: number) {
   return error;
 }
 
+const DEFAULT_SENDER_DISPLAY_NAME = 'OBAOL Team';
+const PERSONAL_NAME_HEURISTIC = /\b(joshua|jacob|alwin|joy)\b/i;
+
+function senderWarningForName(name: string | null): string | null {
+  const normalized = String(name ?? '').trim();
+  if (!normalized) return null;
+  if (PERSONAL_NAME_HEURISTIC.test(normalized)) {
+    return 'Sender name looks personal. Recommended: team/brand identity (e.g., OBAOL Team).';
+  }
+  return null;
+}
+
+router.get('/:id/sender-settings', async (req, res) => {
+  try {
+    const campaignId = String(req.params.id ?? '');
+    await assertCampaignAccess(req, campaignId);
+
+    const { data, error } = await supabase
+      .from('campaigns')
+      .select('id,sender_display_name')
+      .eq('id', campaignId)
+      .maybeSingle();
+
+    if (error) {
+      const message = String((error as any)?.message ?? '');
+      const code = String((error as any)?.code ?? '');
+      const missingColumn = code === '42703' || message.includes('sender_display_name');
+      if (missingColumn) {
+        return res.json({
+          sender_display_name: null,
+          effective_sender_display_name: DEFAULT_SENDER_DISPLAY_NAME,
+          warning: null,
+          schema_ready: false,
+        });
+      }
+      throw error;
+    }
+
+    const senderDisplayName = String((data as any)?.sender_display_name ?? '').trim() || null;
+    return res.json({
+      sender_display_name: senderDisplayName,
+      effective_sender_display_name: senderDisplayName || DEFAULT_SENDER_DISPLAY_NAME,
+      warning: senderWarningForName(senderDisplayName),
+      schema_ready: true,
+    });
+  } catch (err: any) {
+    return res.status(resolveStatusCode(err)).json({ error: err?.message ?? 'Failed to load sender settings' });
+  }
+});
+
+router.patch('/:id/sender-settings', async (req, res) => {
+  try {
+    const campaignId = String(req.params.id ?? '');
+    await assertCampaignAccess(req, campaignId);
+
+    const rawValue = typeof req.body?.sender_display_name === 'string'
+      ? req.body.sender_display_name
+      : '';
+    const trimmed = rawValue.trim();
+    const nextValue = trimmed.length > 0 ? trimmed : null;
+
+    const { error } = await supabase
+      .from('campaigns')
+      .update({ sender_display_name: nextValue })
+      .eq('id', campaignId);
+
+    if (error) {
+      const message = String((error as any)?.message ?? '');
+      const code = String((error as any)?.code ?? '');
+      const missingColumn = code === '42703' || message.includes('sender_display_name');
+      if (missingColumn) {
+        return res.status(503).json({
+          error: 'sender_display_name column is missing. Apply DB migration and retry.',
+          code: 'SENDER_DISPLAY_NAME_SCHEMA_MISSING',
+        });
+      }
+      throw error;
+    }
+
+    return res.json({
+      success: true,
+      sender_display_name: nextValue,
+      effective_sender_display_name: nextValue || DEFAULT_SENDER_DISPLAY_NAME,
+      warning: senderWarningForName(nextValue),
+    });
+  } catch (err: any) {
+    return res.status(resolveStatusCode(err)).json({ error: err?.message ?? 'Failed to update sender settings' });
+  }
+});
+
 router.get('/:id/inbox-locks', async (req, res) => {
   try {
     const campaignId = req.params.id;
