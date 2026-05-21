@@ -17,6 +17,7 @@ type UploadInput = {
   leads?: UploadRow[];
   source?: string;
   tags?: string[];
+  duplicate_mode?: 'skip' | 'replace';
 };
 
 type InvalidRow = {
@@ -28,6 +29,7 @@ type InvalidRow = {
 type UploadReport = {
   success: boolean;
   insertedCount: number;
+  replacedCount?: number;
   duplicateCount: number;
   invalidCount: number;
   duplicateEmails: string[];
@@ -230,6 +232,11 @@ export async function uploadLeads(
   operatorId: string | null,
   input: UploadInput
 ): Promise<UploadReport> {
+  const duplicateMode = input.duplicate_mode ?? 'skip';
+  if (duplicateMode !== 'skip' && duplicateMode !== 'replace') {
+    throw new Error('Invalid duplicate_mode. Allowed values: skip | replace');
+  }
+
   const rows = (input.rows ?? input.leads ?? []) as UploadRow[];
 
   if (!rows.length) {
@@ -273,6 +280,7 @@ export async function uploadLeads(
     return {
       success: true,
       insertedCount: 0,
+      replacedCount: 0,
       duplicateCount: duplicateEmails.length,
       invalidCount: invalidRows.length,
       duplicateEmails,
@@ -280,10 +288,10 @@ export async function uploadLeads(
     };
   }
 
-  const incomingEmails = preparedRows.map((row) => row.email);
+  const incomingEmails = preparedRows.map((row) => normalizeEmail(String(row.email)));
   let existsQuery = supabase
     .from('leads')
-    .select('email')
+    .select('id,email')
     .in('email', incomingEmails);
 
   if (operatorId) {
@@ -293,18 +301,62 @@ export async function uploadLeads(
   const { data: existingRows, error: existingError } = await existsQuery;
   if (existingError) throw existingError;
 
-  const existingSet = new Set((existingRows ?? []).map((row: any) => normalizeEmail(String(row.email))));
-  const rowsToInsert = preparedRows.filter((row) => {
-    const isDup = existingSet.has(normalizeEmail(row.email));
-    if (isDup) duplicateEmails.push(row.email);
-    return !isDup;
-  });
+  const existingByEmail = new Map<string, { id: string; email: string }>();
+  for (const row of existingRows ?? []) {
+    const normalized = normalizeEmail(String((row as any).email ?? ''));
+    const id = String((row as any).id ?? '');
+    if (normalized && id) {
+      existingByEmail.set(normalized, { id, email: String((row as any).email ?? '') });
+    }
+  }
+
+  const rowsToInsert: Record<string, any>[] = [];
+  const rowsToReplace: Array<{ id: string; update: Record<string, any>; email: string }> = [];
+
+  for (const row of preparedRows) {
+    const normalized = normalizeEmail(String(row.email ?? ''));
+    const existing = existingByEmail.get(normalized);
+    if (!existing) {
+      rowsToInsert.push(row);
+      continue;
+    }
+
+    duplicateEmails.push(normalized);
+    if (duplicateMode !== 'replace') {
+      continue;
+    }
+
+    const updatePayload: Record<string, any> = {};
+    for (const [key, value] of Object.entries(row)) {
+      if (key === 'id' || key === 'created_at' || key === 'operator_id' || key === 'email') continue;
+      if (value === null || value === undefined) continue;
+      if (typeof value === 'string' && value.trim() === '') continue;
+      updatePayload[key] = value;
+    }
+
+    if (Object.keys(updatePayload).length > 0) {
+      rowsToReplace.push({ id: existing.id, update: updatePayload, email: normalized });
+    }
+  }
 
   const insertResult = await insertWithSchemaFallback(rowsToInsert);
+  let replacedCount = 0;
+
+  if (duplicateMode === 'replace' && rowsToReplace.length > 0) {
+    for (const row of rowsToReplace) {
+      const { error: updateError } = await supabase
+        .from('leads')
+        .update(row.update)
+        .eq('id', row.id);
+      if (updateError) throw updateError;
+      replacedCount += 1;
+    }
+  }
 
   return {
     success: true,
     insertedCount: insertResult.insertedCount,
+    replacedCount,
     duplicateCount: duplicateEmails.length,
     invalidCount: invalidRows.length,
     duplicateEmails,

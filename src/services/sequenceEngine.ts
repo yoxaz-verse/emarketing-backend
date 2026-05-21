@@ -2,6 +2,7 @@ import { supabase } from '../supabase';
 import { decryptSecret } from '../utils/sendEncryption';
 import { createSmtpTransport } from './email/smtpTransport';
 import { chatWithAgentRole } from './agents/openclawChat.service';
+import { renderPlainTextAsHtml } from './email/emailBodyRender';
 
 type GraphNode = {
   id: string;
@@ -34,6 +35,7 @@ const ALLOWED_NODE_TYPES = new Set([
   'Condition',
   'AI Agent',
 ]);
+const FIXED_CAMPAIGN_SENDER_NAME = 'OBAOL Team';
 
 export function validateSequenceGraph(graph: Graph): {
   valid: boolean;
@@ -194,13 +196,14 @@ async function sendEmail(node: GraphNode, contact: any) {
     encryption: smtp.encryption,
   });
 
-  const from = node.data?.from || smtp.username;
+  const defaultFrom = `"${FIXED_CAMPAIGN_SENDER_NAME}" <${smtp.username}>`;
+  const from = node.data?.from || defaultFrom;
 
   const info = await transporter.sendMail({
     from,
     to: contact.email,
     subject: node.data?.subject,
-    html: node.data?.body ?? '',
+    html: renderPlainTextAsHtml(node.data?.body ?? ''),
     replyTo: node.data?.reply_to,
   });
 

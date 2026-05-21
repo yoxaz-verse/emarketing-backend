@@ -8,6 +8,7 @@ import {
   startCampaign,
   pauseCampaign
 } from '../services/campaign.domain';
+import { getCampaignRepliesFeed, getCampaignReplyOpenAnalytics } from '../services/emailTracking.service.js';
 
 const router = Router();
 router.use(requireAuth('viewer'));
@@ -352,6 +353,30 @@ router.post('/:id/inboxes/sync', async (req, res) => {
     return res.status(500).json({
       error: err.message ?? 'Failed to sync campaign inboxes',
     });
+  }
+});
+
+router.get('/:id/reply-open-analytics', async (req, res) => {
+  try {
+    const campaignId = req.params.id;
+    await assertCampaignAccess(req, campaignId);
+    const summary = await getCampaignReplyOpenAnalytics(campaignId);
+    return res.json(summary);
+  } catch (err: any) {
+    console.error('[CAMPAIGN REPLY OPEN ANALYTICS ERROR]', err);
+    return res.status(resolveStatusCode(err)).json({ error: err.message ?? 'Failed to fetch campaign analytics' });
+  }
+});
+
+router.get('/:id/replies-feed', async (req, res) => {
+  try {
+    const campaignId = req.params.id;
+    await assertCampaignAccess(req, campaignId);
+    const rows = await getCampaignRepliesFeed(campaignId);
+    return res.json(rows);
+  } catch (err: any) {
+    console.error('[CAMPAIGN REPLIES FEED ERROR]', err);
+    return res.status(resolveStatusCode(err)).json({ error: err.message ?? 'Failed to fetch campaign replies feed' });
   }
 });
 

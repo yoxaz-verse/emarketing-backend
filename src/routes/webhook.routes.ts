@@ -3,6 +3,7 @@ import { advanceInboxWarmup } from '../services/webhook/warmup.service';
 import { handleBounce } from '../services/execution.service';
 import { dailyHealthRecovery } from '../services/webhook/health.service';
 import { ingestInboundReply } from '../services/replyIngestService.js';
+import { ingestProviderEmailEvent } from '../services/emailTracking.service.js';
 
 const router = Router();
 
@@ -41,6 +42,28 @@ router.post('/webhooks/reply', async (req, res) => {
     res.json(result);
   } catch (err: any) {
     res.status(400).json({ error: err?.message ?? 'Failed to ingest reply webhook' });
+  }
+});
+
+router.post('/webhooks/email-event', async (req, res) => {
+  try {
+    const result = await ingestProviderEmailEvent(req.body ?? {});
+    if (result.success === false) {
+      return res.status(400).json(result);
+    }
+    if (result.event_type === 'bounced_hard' || result.event_type === 'bounced_soft') {
+      const bounceEmail = String(result.to_email ?? '').trim().toLowerCase();
+      if (bounceEmail) {
+        await handleBounce(
+          bounceEmail,
+          result.event_type === 'bounced_hard' ? 'hard' : 'soft',
+          String((req.body as any)?.reason ?? '')
+        );
+      }
+    }
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(400).json({ error: err?.message ?? 'Failed to ingest provider email event' });
   }
 });
   

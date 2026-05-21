@@ -2,6 +2,7 @@ import { supabase } from '../supabase';
 import { decryptSecret } from '../utils/sendEncryption';
 import { updateRow } from './crudService';
 import { createSmtpTransport } from './email/smtpTransport';
+import { renderPlainTextAsHtml } from './email/emailBodyRender';
 import {
   getSendingLimitsConfig,
   isNowWithinSendingSchedule,
@@ -12,6 +13,7 @@ const RUNNER_WINDOW_TIMEZONE = 'Asia/Kolkata';
 const RUNNER_WINDOW_START_HOUR = 9;
 const RUNNER_WINDOW_END_HOUR = 18;
 const DEFAULT_STALE_PROCESSING_TIMEOUT_MINUTES = 10;
+const FIXED_CAMPAIGN_SENDER_NAME = 'OBAOL Team';
 
 type EmptyClaimReason =
   | 'schedule_blocked'
@@ -35,8 +37,19 @@ export type ClaimExecutionResult = {
     reason: EmptyClaimReason | null;
     schedule_allowed: boolean;
     schedule_reason: string | null;
+    claim_path?: 'rpc' | 'fallback';
   };
 };
+
+async function claimCampaignExecutionsViaFallback(
+  campaignId: string,
+  batchSize: number
+) {
+  return supabase.rpc('claim_campaign_executions_fallback', {
+    p_campaign_id: campaignId,
+    p_limit: batchSize,
+  });
+}
 
 function isWithinRunnerWindow(now: Date = new Date()): boolean {
   const parts = new Intl.DateTimeFormat('en-US', {
@@ -339,7 +352,11 @@ export async function getNextCampaignExecutions(
     }
   );
 
+  let claimPath: 'rpc' | 'fallback' = 'rpc';
+  let executions = data ?? [];
+
   if (error) {
+    const errorCode = String((error as any)?.code ?? '');
     const message = String((error as any)?.message ?? '').toLowerCase();
     const fnMissing =
       message.includes('claim_campaign_executions') &&
@@ -347,38 +364,71 @@ export async function getNextCampaignExecutions(
     const fnOverloaded =
       message.includes('could not choose the best candidate function') &&
       message.includes('claim_campaign_executions');
+    const ambiguousIdReference = message.includes('column reference "id" is ambiguous');
 
-    if (fnMissing) {
-      return {
-        executions: [],
-        meta: {
+    const shouldTryFallback = fnMissing || fnOverloaded || ambiguousIdReference;
+    if (shouldTryFallback) {
+      const fallback = await claimCampaignExecutionsViaFallback(campaignId, normalizedBatchSize);
+      if (!fallback.error) {
+        claimPath = 'fallback';
+        executions = fallback.data ?? [];
+        console.warn('[CLAIM EXECUTIONS FALLBACK USED]', {
           campaign_id: campaignId,
           batch_size: normalizedBatchSize,
-          queued_count: queuedCount,
-          processing_count: processingCount,
-          paused_count: pausedCount,
-          pending_count: pendingCount,
-          stale_requeued_count: staleRecovery.requeued,
-          claimed_count: 0,
-          reason: 'claim_function_unavailable',
-          schedule_allowed: true,
-          schedule_reason: null,
-        },
-      };
-    }
-    if (fnOverloaded) {
-      const migrationError: Error & { statusCode?: number } = new Error(
-        'Claim RPC overload mismatch detected. Apply migration 20260521_claim_campaign_executions_drop_overloads_and_recreate_uuid.sql and restart backend.'
-      );
-      migrationError.statusCode = 503;
-      throw migrationError;
+          rpc_error_code: errorCode,
+          rpc_error_message: String((error as any)?.message ?? ''),
+          claimed_count: Array.isArray(executions) ? executions.length : 0,
+        });
+      } else {
+        console.error('[CLAIM EXECUTIONS FALLBACK ERROR]', {
+          campaign_id: campaignId,
+          batch_size: normalizedBatchSize,
+          rpc_error_code: errorCode,
+          rpc_error_message: String((error as any)?.message ?? ''),
+          fallback_error_code: String((fallback.error as any)?.code ?? ''),
+          fallback_error_message: String((fallback.error as any)?.message ?? ''),
+        });
+      }
     }
 
-    console.error('[CLAIM EXECUTIONS ERROR]', error);
-    throw error;
+    if (claimPath !== 'fallback') {
+      if (fnMissing) {
+        return {
+          executions: [],
+          meta: {
+            campaign_id: campaignId,
+            batch_size: normalizedBatchSize,
+            queued_count: queuedCount,
+            processing_count: processingCount,
+            paused_count: pausedCount,
+            pending_count: pendingCount,
+            stale_requeued_count: staleRecovery.requeued,
+            claimed_count: 0,
+            reason: 'claim_function_unavailable',
+            schedule_allowed: true,
+            schedule_reason: null,
+            claim_path: 'rpc',
+          },
+        };
+      }
+      if (fnOverloaded || ambiguousIdReference) {
+        const migrationError: Error & { statusCode?: number } = new Error(
+          'Claim RPC drift detected. Apply migration 20260521_claim_campaign_executions_ambiguous_id_fix_and_fallback.sql and restart backend.'
+        );
+        migrationError.statusCode = 503;
+        throw migrationError;
+      }
+
+      console.error('[CLAIM EXECUTIONS ERROR]', {
+        code: errorCode,
+        message: String((error as any)?.message ?? ''),
+        campaign_id: campaignId,
+        batch_size: normalizedBatchSize,
+      });
+      throw error;
+    }
   }
 
-  const executions = data ?? [];
   const claimedCount = Array.isArray(executions) ? executions.length : 0;
   let reason: EmptyClaimReason | null = null;
   if (claimedCount === 0) {
@@ -398,6 +448,7 @@ export async function getNextCampaignExecutions(
     stale_requeued_count: staleRecovery.requeued,
     claimed_count: claimedCount,
     reason,
+    claim_path: claimPath,
   });
 
   return {
@@ -414,6 +465,7 @@ export async function getNextCampaignExecutions(
       reason,
       schedule_allowed: true,
       schedule_reason: null,
+      claim_path: claimPath,
     },
   };
 }
@@ -693,15 +745,20 @@ export async function sendCampaignEmail(campaignLeadId: string) {
   });
 
   const info = await transporter.sendMail({
-    from: `"${inbox.email_address}" <${inbox.email_address}>`,
+    from: `"${FIXED_CAMPAIGN_SENDER_NAME}" <${inbox.email_address}>`,
     to: campaignLead.leads.email,
     subject: step.subject,
-    html: step.body,
+    html: renderPlainTextAsHtml(step.body ?? ''),
   });
 
   await supabase.from('email_logs').insert({
     lead_id: campaignLead.leads.id,
     inbox_id: inbox.id,
+    campaign_id: campaignLead.campaign_id,
+    campaign_lead_id: campaignLeadId,
+    to_email: campaignLead.leads.email,
+    provider_name: String(smtp.provider ?? 'smtp'),
+    provider_message_id: normalizeMessageId(info.messageId),
     subject: step.subject,
     body: step.body,
     status: 'sent',
@@ -725,9 +782,13 @@ export async function sendCampaignEmail(campaignLeadId: string) {
   });
 
   return {
-    message_id: info.messageId,
+    message_id: normalizeMessageId(info.messageId),
     to: campaignLead.leads.email,
   };
+}
+
+function normalizeMessageId(value: unknown): string {
+  return String(value ?? '').trim().replace(/[<>]/g, '').toLowerCase();
 }
 /**
  * STEP SUCCESS

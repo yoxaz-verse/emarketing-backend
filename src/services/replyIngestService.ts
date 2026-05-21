@@ -10,6 +10,10 @@ type InboundReplyPayload = {
   leadId?: string;
 };
 
+function normalizeMessageId(value: unknown): string {
+  return String(value ?? '').trim().replace(/[<>]/g, '').toLowerCase();
+}
+
 function toDedupeKey(payload: {
   fromEmail: string;
   message: string;
@@ -26,7 +30,7 @@ function toDedupeKey(payload: {
 export async function ingestInboundReply(input: InboundReplyPayload) {
   const fromEmail = String(input.from_email ?? '').trim().toLowerCase();
   const message = String(input.message ?? '').trim();
-  const messageId = String(input.message_id ?? '').trim();
+  const messageId = normalizeMessageId(input.message_id);
   const inboxEmail = String(input.inbox_email ?? '').trim().toLowerCase();
   const receivedAtIso = input.received_at
     ? new Date(input.received_at).toISOString()
@@ -52,12 +56,43 @@ export async function ingestInboundReply(input: InboundReplyPayload) {
   }
 
   const leadId = String(lead?.id ?? '');
+  let campaignLeadId: string | null = null;
+  let campaignId: string | null = null;
+  let resolvedInboxId: string | null = null;
+
+  if (messageId) {
+    const { data: mailLog } = await supabase
+      .from('email_logs')
+      .select('campaign_lead_id,campaign_id,inbox_id,lead_id')
+      .eq('provider_message_id', messageId)
+      .order('sent_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    campaignLeadId = String((mailLog as any)?.campaign_lead_id ?? '') || null;
+    campaignId = String((mailLog as any)?.campaign_id ?? '') || null;
+    resolvedInboxId = String((mailLog as any)?.inbox_id ?? '') || null;
+
+    if (!leadId && (mailLog as any)?.lead_id) {
+      const derivedLeadId = String((mailLog as any).lead_id);
+      const { data } = await supabase
+        .from('leads')
+        .select('id, email, status, interest_status')
+        .eq('id', derivedLeadId)
+        .maybeSingle();
+      if (data) {
+        lead = data;
+      }
+    }
+  }
+  const resolvedLeadId = String(lead?.id ?? '');
+
   const { error: ingestInsertError } = await supabase
     .from('reply_ingest_events')
     .insert({
       dedupe_key: dedupeKey,
-      lead_id: leadId || null,
-      matched: Boolean(leadId),
+      lead_id: resolvedLeadId || null,
+      matched: Boolean(resolvedLeadId),
       from_email: fromEmail || null,
       inbox_email: inboxEmail || null,
       message_id: messageId || null,
@@ -67,12 +102,14 @@ export async function ingestInboundReply(input: InboundReplyPayload) {
 
   if (ingestInsertError) {
     if (String((ingestInsertError as any)?.code ?? '') === '23505') {
-      return { success: true, matched: Boolean(leadId), lead_id: leadId || undefined, deduped: true };
+      return { success: true, matched: Boolean(resolvedLeadId), lead_id: resolvedLeadId || undefined, deduped: true };
     }
     throw ingestInsertError;
   }
 
-  if (!leadId) {
+  const finalLeadId = resolvedLeadId;
+
+  if (!finalLeadId) {
     await supabase.from('system_events').insert({
       type: 'UNMATCHED_REPLY_RECEIVED',
       entity: 'reply_ingest_events',
@@ -84,7 +121,7 @@ export async function ingestInboundReply(input: InboundReplyPayload) {
         dedupe_key: dedupeKey,
       },
     });
-    return { success: true, matched: false, deduped: false };
+    return { success: true, matched: false, deduped: false, campaign_lead_id: campaignLeadId ?? undefined };
   }
 
   // Mark lead replied and keep manual review queue.
@@ -97,29 +134,38 @@ export async function ingestInboundReply(input: InboundReplyPayload) {
       reply_message: message || null,
       interest_status: 'unreviewed',
     })
-    .eq('id', leadId);
+    .eq('id', finalLeadId);
 
-  // Stop active campaign progression for this lead.
-  await supabase
-    .from('campaign_leads')
-    .update({ status: 'replied' })
-    .eq('lead_id', leadId)
-    .in('status', ['queued', 'processing', 'paused']);
+  if (campaignLeadId) {
+    await supabase
+      .from('campaign_leads')
+      .update({ status: 'replied' })
+      .eq('id', campaignLeadId)
+      .in('status', ['queued', 'processing', 'paused', 'completed']);
+  } else {
+    await supabase
+      .from('campaign_leads')
+      .update({ status: 'replied' })
+      .eq('lead_id', finalLeadId)
+      .in('status', ['queued', 'processing', 'paused', 'completed']);
+  }
 
   await supabase.from('system_events').insert({
     type: 'LEAD_REPLIED',
     entity: 'lead',
-    entity_id: leadId,
+    entity_id: finalLeadId,
     message: 'Reply received and campaign lead flow stopped.',
     meta: {
       from_email: fromEmail || null,
-      inbox_email: inboxEmail || null,
+      inbox_email: inboxEmail || resolvedInboxId || null,
       message_id: messageId || null,
       dedupe_key: dedupeKey,
+      campaign_id: campaignId,
+      campaign_lead_id: campaignLeadId,
     },
   });
 
-  return { success: true, matched: true, lead_id: leadId, deduped: false };
+  return { success: true, matched: true, lead_id: finalLeadId, campaign_lead_id: campaignLeadId ?? undefined, deduped: false };
 }
 
 // Backward-compat wrapper for existing internal routes.

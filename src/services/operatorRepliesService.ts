@@ -1,8 +1,10 @@
 import { supabase } from '../supabase.js';
 
-export async function getOperatorReplies(  operatorId: string | null
+export async function getOperatorReplies(
+  operatorId: string | null,
+  options?: { campaignId?: string | null; reviewStatus?: 'all' | 'unreviewed' | 'reviewed' }
 ) {
-  const { data } = await supabase
+  let query: any = supabase
     .from('leads')
     .select(`
       id,
@@ -26,11 +28,28 @@ export async function getOperatorReplies(  operatorId: string | null
         email_address
       )
     `)
-    .eq('operator_id', operatorId)
     .eq('status', 'replied')
     .order('replied_at', { ascending: false });
 
-  return data ?? [];
+  if (operatorId) {
+    query = query.eq('operator_id', operatorId);
+  }
+
+  if (options?.reviewStatus === 'unreviewed') {
+    query = query.eq('interest_status', 'unreviewed');
+  } else if (options?.reviewStatus === 'reviewed') {
+    query = query.in('interest_status', ['interested', 'not_interested']);
+  }
+
+  const { data } = await query;
+  let rows: any[] = data ?? [];
+  if (options?.campaignId) {
+    rows = rows.filter((row) =>
+      Array.isArray(row?.campaign_leads) &&
+      row.campaign_leads.some((cl: any) => String(cl?.campaign_id ?? '') === String(options.campaignId))
+    );
+  }
+  return rows;
 }
 
 export async function reviewLeadInterest(params: {
