@@ -13,6 +13,7 @@ import {
   requeueStaleProcessingLeads,
   getCampaignExecutionWakeState,
   getCampaignExecutionDiagnostics,
+  runCampaignExecutionBatch,
 } from '../services/execution.service';
 import { supabase } from '../supabase';
 import { ingestInboundReply } from '../services/replyIngestService.js';
@@ -56,6 +57,21 @@ router.get('/campaigns/:id/next-executions', async (req, res) => {
   } catch (err: any) {
     console.error('[NEXT EXECUTIONS ERROR]', err);
     res.status(400).json({ error: err.message });
+  }
+});
+
+// Backend-orchestrated batch runner (new primary path).
+router.post('/campaigns/:id/run-batch', async (req, res) => {
+  try {
+    const { id: campaignId } = req.params;
+    const batchSize = Number(req.query.batch_size ?? req.body?.batch_size ?? 10);
+
+    const summary = await runCampaignExecutionBatch(campaignId, batchSize);
+    const statusCode = summary.fatal_error ? 500 : 200;
+    res.status(statusCode).json(summary);
+  } catch (err: any) {
+    console.error('[RUN BATCH ERROR]', err);
+    res.status(400).json({ error: err.message ?? 'Failed to run campaign batch' });
   }
 });
 

@@ -43,6 +43,46 @@ export type ClaimExecutionResult = {
   };
 };
 
+type RunBatchSkipReason =
+  | 'schedule_blocked'
+  | 'send_skipped'
+  | 'send_skipped_unknown'
+  | 'send_error';
+
+export type CampaignBatchRunSummary = {
+  campaign_id: string;
+  batch_size: number;
+  claimed_count: number;
+  sent_count: number;
+  failed_count: number;
+  skipped_count: number;
+  skip_reasons: Record<string, number>;
+  queue_snapshot_before: {
+    queued_count: number;
+    processing_count: number;
+    paused_count: number;
+    pending_count: number;
+  };
+  queue_snapshot_after: {
+    queued_count: number;
+    processing_count: number;
+    paused_count: number;
+    pending_count: number;
+  };
+  did_complete_step_check: boolean;
+  completed_step: boolean;
+  stale_requeued_count: number;
+  migrated_pending_count: number;
+  claim_reason: string | null;
+  claim_path: 'rpc' | 'fallback' | null;
+  errors: Array<{
+    campaign_lead_id: string | null;
+    reason: string;
+    detail?: string | null;
+  }>;
+  fatal_error: string | null;
+};
+
 async function claimCampaignExecutionsViaFallback(
   campaignId: string,
   batchSize: number
@@ -233,6 +273,25 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
     ? String((claimHealth.error as any)?.message ?? 'unknown_error')
     : null;
   const allocator = await allocateCampaignSender({ campaignId });
+  const next_actions: string[] = [];
+  if (!scheduleGate.allowed) {
+    next_actions.push(`Wait for sending window: ${scheduleGate.reason ?? 'outside_allowed_schedule'}`);
+  }
+  if (counts.queued === 0 && counts.pending > 0) {
+    next_actions.push('No queued leads yet; verify pending->queued migration conditions and campaign status.');
+  }
+  if (staleProcessingCount > 0) {
+    next_actions.push('Run stale processing recovery; leads appear stuck in processing.');
+  }
+  if (pausedInboxes > 0 && activeInboxes === 0) {
+    next_actions.push('All assigned inboxes are paused; unpause an inbox or assign a healthy inbox.');
+  }
+  if (!allocator.selected) {
+    next_actions.push(`Allocator blocked sending: ${allocator.reason || 'no_eligible_sender'}.`);
+  }
+  if (next_actions.length === 0) {
+    next_actions.push('No immediate blockers detected; run batch execution and inspect per-lead outcomes.');
+  }
 
   return {
     campaign: {
@@ -286,7 +345,169 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
         rem_hour_domain: candidate.rem_hour_domain,
       })),
     },
+    next_actions,
   };
+}
+
+function bumpReason(counter: Record<string, number>, reason: string) {
+  const key = reason.trim().length > 0 ? reason : 'unknown';
+  counter[key] = Number(counter[key] ?? 0) + 1;
+}
+
+export async function runCampaignExecutionBatch(
+  campaignId: string,
+  batchSize: number
+): Promise<CampaignBatchRunSummary> {
+  const normalizedBatchSize = Number.isFinite(Number(batchSize))
+    ? Math.max(0, Math.floor(Number(batchSize)))
+    : 10;
+
+  const summary: CampaignBatchRunSummary = {
+    campaign_id: campaignId,
+    batch_size: normalizedBatchSize,
+    claimed_count: 0,
+    sent_count: 0,
+    failed_count: 0,
+    skipped_count: 0,
+    skip_reasons: {},
+    queue_snapshot_before: {
+      queued_count: 0,
+      processing_count: 0,
+      paused_count: 0,
+      pending_count: 0,
+    },
+    queue_snapshot_after: {
+      queued_count: 0,
+      processing_count: 0,
+      paused_count: 0,
+      pending_count: 0,
+    },
+    did_complete_step_check: false,
+    completed_step: false,
+    stale_requeued_count: 0,
+    migrated_pending_count: 0,
+    claim_reason: null,
+    claim_path: null,
+    errors: [],
+    fatal_error: null,
+  };
+
+  try {
+    const [queuedBefore, processingBefore, pausedBefore, pendingBefore] = await Promise.all([
+      countCampaignLeadsByStatus(campaignId, 'queued'),
+      countCampaignLeadsByStatus(campaignId, 'processing'),
+      countCampaignLeadsByStatus(campaignId, 'paused'),
+      countCampaignLeadsByStatus(campaignId, 'pending'),
+    ]);
+    summary.queue_snapshot_before = {
+      queued_count: queuedBefore,
+      processing_count: processingBefore,
+      paused_count: pausedBefore,
+      pending_count: pendingBefore,
+    };
+
+    const migratedPendingCount = await migratePendingLeadsToQueued(campaignId);
+    summary.migrated_pending_count = migratedPendingCount;
+
+    const staleRecovery = await requeueStaleProcessingLeads({
+      campaignId,
+      olderThanMinutes: DEFAULT_STALE_PROCESSING_TIMEOUT_MINUTES,
+    });
+    summary.stale_requeued_count = Number(staleRecovery?.requeued ?? 0);
+
+    const claim = await getNextCampaignExecutions(campaignId, normalizedBatchSize);
+    const executions = Array.isArray(claim.executions) ? claim.executions : [];
+    summary.claimed_count = executions.length;
+    summary.claim_reason = claim.meta.reason ?? null;
+    summary.claim_path = claim.meta.claim_path ?? null;
+
+    if (!claim.meta.schedule_allowed) {
+      summary.skipped_count = summary.claimed_count;
+      bumpReason(summary.skip_reasons, 'schedule_blocked');
+    }
+
+    for (const execution of executions) {
+      const campaignLeadId = String((execution as any)?.campaign_lead_id ?? (execution as any)?.id ?? '').trim();
+      if (!campaignLeadId) {
+        summary.failed_count += 1;
+        summary.errors.push({
+          campaign_lead_id: null,
+          reason: 'invalid_claim_row',
+          detail: 'Claim row missing campaign_lead_id',
+        });
+        continue;
+      }
+
+      try {
+        const sendResult: any = await sendCampaignEmail(campaignLeadId);
+        if (sendResult?.skipped === true) {
+          const skipReason = String(sendResult?.reason ?? 'send_skipped_unknown') as RunBatchSkipReason;
+          summary.skipped_count += 1;
+          bumpReason(summary.skip_reasons, skipReason);
+          continue;
+        }
+
+        await markCampaignLeadSent(campaignLeadId, 'batch_sent_successfully');
+        summary.sent_count += 1;
+      } catch (err: any) {
+        const reason = String(err?.message ?? 'send_error');
+        try {
+          await markCampaignLeadFailed(campaignLeadId, reason, 'run_batch_send_failed');
+        } catch (markErr: any) {
+          summary.errors.push({
+            campaign_lead_id: campaignLeadId,
+            reason: 'mark_failed_error',
+            detail: String(markErr?.message ?? 'failed to mark failed'),
+          });
+        }
+        summary.failed_count += 1;
+        bumpReason(summary.skip_reasons, 'send_error');
+        summary.errors.push({
+          campaign_lead_id: campaignLeadId,
+          reason: 'send_error',
+          detail: reason,
+        });
+      }
+    }
+
+    summary.did_complete_step_check = true;
+    summary.completed_step = await completeCampaignIfDone(campaignId);
+
+    const [queuedAfter, processingAfter, pausedAfter, pendingAfter] = await Promise.all([
+      countCampaignLeadsByStatus(campaignId, 'queued'),
+      countCampaignLeadsByStatus(campaignId, 'processing'),
+      countCampaignLeadsByStatus(campaignId, 'paused'),
+      countCampaignLeadsByStatus(campaignId, 'pending'),
+    ]);
+    summary.queue_snapshot_after = {
+      queued_count: queuedAfter,
+      processing_count: processingAfter,
+      paused_count: pausedAfter,
+      pending_count: pendingAfter,
+    };
+
+    await supabase.from('system_events').insert({
+      type: 'CAMPAIGN_BATCH_EXECUTED',
+      entity: 'campaigns',
+      entity_id: campaignId,
+      message: `Batch run claimed=${summary.claimed_count}, sent=${summary.sent_count}, failed=${summary.failed_count}, skipped=${summary.skipped_count}`,
+      meta: summary,
+    });
+  } catch (err: any) {
+    summary.fatal_error = String(err?.message ?? 'run_batch_failed');
+    await supabase.from('system_events').insert({
+      type: 'CAMPAIGN_BATCH_EXECUTION_FATAL',
+      entity: 'campaigns',
+      entity_id: campaignId,
+      message: summary.fatal_error,
+      meta: {
+        campaign_id: campaignId,
+        batch_size: normalizedBatchSize,
+      },
+    });
+  }
+
+  return summary;
 }
 
 
