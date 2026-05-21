@@ -11,6 +11,7 @@ import {
 const RUNNER_WINDOW_TIMEZONE = 'Asia/Kolkata';
 const RUNNER_WINDOW_START_HOUR = 9;
 const RUNNER_WINDOW_END_HOUR = 18;
+const DEFAULT_STALE_PROCESSING_TIMEOUT_MINUTES = 10;
 
 function isWithinRunnerWindow(now: Date = new Date()): boolean {
   const parts = new Intl.DateTimeFormat('en-US', {
@@ -76,10 +77,23 @@ export async function getNextCampaignExecutions(
     const config = await getSendingLimitsConfig();
     const scheduleGate = isNowWithinSendingSchedule(config);
     if (!scheduleGate.allowed) {
+      console.log('[CLAIM EXECUTIONS SKIPPED: SCHEDULE]', {
+        campaign_id: campaignId,
+        batch_size: batchSize,
+        reason: scheduleGate.reason ?? 'schedule_not_allowed',
+      });
       return [];
     }
 
-    console.log("getNextCampaignExecutions");
+    const staleRecovery = await requeueStaleProcessingLeads({
+      campaignId,
+      olderThanMinutes: DEFAULT_STALE_PROCESSING_TIMEOUT_MINUTES,
+    });
+
+    const [queuedCount, processingCount] = await Promise.all([
+      countCampaignLeadsByStatus(campaignId, 'queued'),
+      countCampaignLeadsByStatus(campaignId, 'processing'),
+    ]);
     
     const { data, error } = await supabase.rpc(
       'claim_campaign_executions',
@@ -94,9 +108,118 @@ export async function getNextCampaignExecutions(
       console.error('[CLAIM EXECUTIONS ERROR]', error);
       throw error;
     }
-  
-    return data ?? [];
+
+    const executions = data ?? [];
+    console.log('[CLAIM EXECUTIONS DIAGNOSTICS]', {
+      campaign_id: campaignId,
+      batch_size: batchSize,
+      queued_count: queuedCount,
+      processing_count: processingCount,
+      stale_requeued_count: staleRecovery.requeued,
+      claimed_count: Array.isArray(executions) ? executions.length : 0,
+    });
+    
+    return executions;
   }
+
+type RequeueStaleProcessingInput = {
+  campaignId?: string;
+  olderThanMinutes?: number;
+};
+
+export async function requeueStaleProcessingLeads(input: RequeueStaleProcessingInput = {}) {
+  const campaignId = typeof input.campaignId === 'string' && input.campaignId.trim().length > 0
+    ? input.campaignId.trim()
+    : undefined;
+  const requestedMinutes = Number(input.olderThanMinutes);
+  const olderThanMinutes = Number.isFinite(requestedMinutes) && requestedMinutes > 0
+    ? Math.floor(requestedMinutes)
+    : DEFAULT_STALE_PROCESSING_TIMEOUT_MINUTES;
+
+  const cutoffIso = new Date(Date.now() - (olderThanMinutes * 60 * 1000)).toISOString();
+
+  let scopedQuery = supabase
+    .from('campaign_leads')
+    .select('id, campaign_id')
+    .eq('status', 'processing')
+    .lt('processing_at', cutoffIso);
+
+  if (campaignId) {
+    scopedQuery = scopedQuery.eq('campaign_id', campaignId);
+  }
+
+  const { data: staleRows, error: staleRowsError } = await scopedQuery;
+  if (staleRowsError) {
+    throw staleRowsError;
+  }
+
+  const staleIds = (staleRows ?? []).map((row: any) => String(row.id)).filter(Boolean);
+  const scanned = staleIds.length;
+
+  if (staleIds.length === 0) {
+    return {
+      scanned: 0,
+      requeued: 0,
+      campaign_id: campaignId ?? null,
+      older_than_minutes: olderThanMinutes,
+      cutoff_iso: cutoffIso,
+    };
+  }
+
+  const { data: updatedRows, error: updateError } = await supabase
+    .from('campaign_leads')
+    .update({
+      status: 'queued',
+      status_reason: 'requeued_processing_timeout',
+      execution_id: null,
+      processing_at: null,
+    })
+    .in('id', staleIds)
+    .eq('status', 'processing')
+    .select('id');
+
+  if (updateError) {
+    throw updateError;
+  }
+
+  const requeued = (updatedRows ?? []).length;
+
+  await supabase.from('system_events').insert({
+    type: 'PROCESSING_REQUEUED_TIMEOUT',
+    entity: 'campaign_leads',
+    entity_id: campaignId ?? null,
+    message: `Requeued ${requeued} stale processing lead(s).`,
+    meta: {
+      campaign_id: campaignId ?? null,
+      scanned,
+      requeued,
+      older_than_minutes: olderThanMinutes,
+      cutoff_iso: cutoffIso,
+    },
+  });
+
+  return {
+    scanned,
+    requeued,
+    campaign_id: campaignId ?? null,
+    older_than_minutes: olderThanMinutes,
+    cutoff_iso: cutoffIso,
+  };
+}
+
+async function countCampaignLeadsByStatus(campaignId: string, status: string): Promise<number> {
+  const { count, error } = await supabase
+    .from('campaign_leads')
+    .select('id', { count: 'exact', head: true })
+    .eq('campaign_id', campaignId)
+    .eq('status', status);
+
+  if (error) {
+    throw error;
+  }
+
+  return Number(count ?? 0);
+}
   
   
   /**

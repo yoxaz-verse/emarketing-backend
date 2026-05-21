@@ -10,6 +10,7 @@ import {
   resetInboxCounters,
   markCampaignLeadFailed,
   requeueRiskyPausedLeads,
+  requeueStaleProcessingLeads,
   getCampaignExecutionWakeState,
 } from '../services/execution.service';
 import { supabase } from '../supabase';
@@ -133,6 +134,29 @@ router.post('/system/requeue-risky-paused', async (_req, res) => {
   } catch (err: any) {
     console.error('[REQUEUE RISKY PAUSED ERROR]', err);
     res.status(400).json({ error: err.message ?? 'Failed to requeue risky paused leads' });
+  }
+});
+
+router.post('/system/requeue-stale-processing', async (req, res) => {
+  try {
+    const campaignIdRaw = req.body?.campaign_id;
+    const campaignId = typeof campaignIdRaw === 'string' && campaignIdRaw.trim().length > 0
+      ? campaignIdRaw.trim()
+      : undefined;
+    const olderThanRaw = req.body?.older_than_minutes;
+    const olderThanMinutes = Number.isFinite(Number(olderThanRaw))
+      ? Number(olderThanRaw)
+      : undefined;
+
+    const result = await requeueStaleProcessingLeads({
+      campaignId,
+      olderThanMinutes,
+    });
+
+    res.json({ success: true, ...result });
+  } catch (err: any) {
+    console.error('[REQUEUE STALE PROCESSING ERROR]', err);
+    res.status(400).json({ error: err.message ?? 'Failed to requeue stale processing leads' });
   }
 });
 
