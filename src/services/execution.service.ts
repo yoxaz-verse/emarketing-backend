@@ -1,4 +1,5 @@
 import { supabase } from '../supabase';
+import IORedis from 'ioredis';
 import { decryptSecret } from '../utils/sendEncryption';
 import { updateRow } from './crudService';
 import { createSmtpTransport } from './email/smtpTransport';
@@ -16,6 +17,13 @@ const RUNNER_WINDOW_END_HOUR = 18;
 const DEFAULT_STALE_PROCESSING_TIMEOUT_MINUTES = 10;
 const FIXED_CAMPAIGN_SENDER_NAME = 'OBAOL Team';
 const FORBIDDEN_SIGNOFF_MARKERS = ['regards, jacob', 'regards, joshua', 'joshua', 'jacob alwin joy', 'jacob supreme'];
+const CAMPAIGN_MINUTE_LOCK_PREFIX = 'campaign-minute-lock';
+const CAMPAIGN_MINUTE_LOCK_SAFETY_SECONDS = 2;
+const LOCAL_LOCK_SWEEP_MS = 30_000;
+
+let minuteLockRedis: IORedis | null | undefined;
+const localMinuteLocks = new Map<string, number>();
+let lastLocalLockSweepAt = 0;
 
 type EmptyClaimReason =
   | 'schedule_blocked'
@@ -55,6 +63,7 @@ export type ClaimExecutionResult = {
 
 type RunBatchSkipReason =
   | 'schedule_blocked'
+  | 'campaign_minute_throttled'
   | 'send_skipped'
   | 'send_skipped_unknown'
   | 'send_error';
@@ -143,6 +152,88 @@ async function getCampaignMinuteGate(campaignId: string): Promise<{
     blocked: sentCountInWindow >= 1,
     minuteWindowStart,
     sentCountInWindow,
+  };
+}
+
+function resolveMinuteLockRedis(): IORedis | null {
+  if (minuteLockRedis !== undefined) return minuteLockRedis;
+  const redisUrl = String(process.env.REDIS_URL ?? '').trim();
+  if (!redisUrl) {
+    minuteLockRedis = null;
+    return minuteLockRedis;
+  }
+
+  minuteLockRedis = new IORedis(redisUrl, {
+    maxRetriesPerRequest: null,
+    enableReadyCheck: false,
+  });
+  minuteLockRedis.on('error', (err: Error) => {
+    console.warn('[CAMPAIGN_MINUTE_LOCK_REDIS_ERROR]', err.message);
+  });
+  return minuteLockRedis;
+}
+
+function buildMinuteLockKey(campaignId: string, minuteWindowStartIso: string): string {
+  return `${CAMPAIGN_MINUTE_LOCK_PREFIX}:${campaignId}:${minuteWindowStartIso}`;
+}
+
+function minuteLockTtlSeconds(now: Date = new Date()): number {
+  const msIntoMinute = (now.getUTCSeconds() * 1000) + now.getUTCMilliseconds();
+  const msRemaining = Math.max(1_000, 60_000 - msIntoMinute);
+  return Math.max(2, Math.ceil(msRemaining / 1000) + CAMPAIGN_MINUTE_LOCK_SAFETY_SECONDS);
+}
+
+function sweepLocalMinuteLocks(nowMs: number): void {
+  if (nowMs - lastLocalLockSweepAt < LOCAL_LOCK_SWEEP_MS) return;
+  for (const [key, expiresAtMs] of localMinuteLocks.entries()) {
+    if (expiresAtMs <= nowMs) localMinuteLocks.delete(key);
+  }
+  lastLocalLockSweepAt = nowMs;
+}
+
+async function acquireCampaignMinuteLock(campaignId: string): Promise<{
+  acquired: boolean;
+  minuteWindowStart: string;
+  lock_key: string;
+  lock_backend: 'redis' | 'local_memory';
+  lock_ttl_seconds: number;
+}> {
+  const now = new Date();
+  const minuteWindowStart = currentMinuteWindowStartUtc(now);
+  const lockKey = buildMinuteLockKey(campaignId, minuteWindowStart);
+  const lockTtlSeconds = minuteLockTtlSeconds(now);
+  const lockClient = resolveMinuteLockRedis();
+
+  if (lockClient) {
+    const setResult = await lockClient.set(lockKey, String(Date.now()), 'EX', lockTtlSeconds, 'NX');
+    return {
+      acquired: setResult === 'OK',
+      minuteWindowStart,
+      lock_key: lockKey,
+      lock_backend: 'redis',
+      lock_ttl_seconds: lockTtlSeconds,
+    };
+  }
+
+  const nowMs = Date.now();
+  sweepLocalMinuteLocks(nowMs);
+  const existingExpiry = localMinuteLocks.get(lockKey) ?? 0;
+  if (existingExpiry > nowMs) {
+    return {
+      acquired: false,
+      minuteWindowStart,
+      lock_key: lockKey,
+      lock_backend: 'local_memory',
+      lock_ttl_seconds: lockTtlSeconds,
+    };
+  }
+  localMinuteLocks.set(lockKey, nowMs + (lockTtlSeconds * 1000));
+  return {
+    acquired: true,
+    minuteWindowStart,
+    lock_key: lockKey,
+    lock_backend: 'local_memory',
+    lock_ttl_seconds: lockTtlSeconds,
   };
 }
 
@@ -311,6 +402,21 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
     : null;
   const allocator = await allocateCampaignSender({ campaignId });
   const minuteGate = await getCampaignMinuteGate(campaignId);
+  const { count: minuteThrottleEventsCount, error: minuteThrottleEventsError } = await supabase
+    .from('system_events')
+    .select('id', { count: 'exact', head: true })
+    .eq('type', 'CAMPAIGN_MINUTE_THROTTLED')
+    .eq('entity_id', campaignId);
+  if (minuteThrottleEventsError) throw minuteThrottleEventsError;
+  const { data: lastMinuteThrottleEvent, error: lastMinuteThrottleEventError } = await supabase
+    .from('system_events')
+    .select('created_at')
+    .eq('type', 'CAMPAIGN_MINUTE_THROTTLED')
+    .eq('entity_id', campaignId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (lastMinuteThrottleEventError) throw lastMinuteThrottleEventError;
   const next_actions: string[] = [];
   if (!scheduleGate.allowed) {
     next_actions.push(`Wait for sending window: ${scheduleGate.reason ?? 'outside_allowed_schedule'}`);
@@ -394,6 +500,9 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
       blocked: minuteGate.blocked,
       current_minute_window_start: minuteGate.minuteWindowStart,
       sent_count_in_window: minuteGate.sentCountInWindow,
+      throttle_hit_count: Number(minuteThrottleEventsCount ?? 0),
+      last_throttle_at: String((lastMinuteThrottleEvent as any)?.created_at ?? '') || null,
+      active_runner_path: 'backend_run_batch_primary',
     },
     next_actions,
   };
@@ -965,8 +1074,52 @@ export async function sendCampaignEmail(campaignLeadId: string) {
     throw new Error('Campaign lead is not in processing state');
   }
 
+  const campaignId = String((campaignLead as any).campaign_id ?? '');
+  const minuteLock = await acquireCampaignMinuteLock(campaignId);
+  if (!minuteLock.acquired) {
+    const minuteGate = await getCampaignMinuteGate(campaignId);
+    await supabase.from('system_events').insert({
+      type: 'CAMPAIGN_MINUTE_THROTTLED',
+      entity: 'campaigns',
+      entity_id: campaignId,
+      message: 'Send blocked by campaign minute lock (send-time guard).',
+      meta: {
+        campaign_lead_id: campaignLeadId,
+        lock_key: minuteLock.lock_key,
+        lock_backend: minuteLock.lock_backend,
+        minute_window_start: minuteLock.minuteWindowStart,
+        sent_count_in_window: minuteGate.sentCountInWindow,
+      },
+    });
+    return {
+      skipped: true,
+      reason: 'campaign_minute_throttled',
+    };
+  }
+
+  const minuteGate = await getCampaignMinuteGate(campaignId);
+  if (minuteGate.blocked) {
+    await supabase.from('system_events').insert({
+      type: 'CAMPAIGN_MINUTE_THROTTLED',
+      entity: 'campaigns',
+      entity_id: campaignId,
+      message: 'Send blocked by campaign minute gate at send-time.',
+      meta: {
+        campaign_lead_id: campaignLeadId,
+        lock_key: minuteLock.lock_key,
+        lock_backend: minuteLock.lock_backend,
+        minute_window_start: minuteGate.minuteWindowStart,
+        sent_count_in_window: minuteGate.sentCountInWindow,
+      },
+    });
+    return {
+      skipped: true,
+      reason: 'campaign_minute_throttled',
+    };
+  }
+
   const allocator = await allocateCampaignSender({
-    campaignId: String((campaignLead as any).campaign_id ?? ''),
+    campaignId,
     leadEligibility: String((campaignLead as any)?.leads?.email_eligibility ?? ''),
   });
 
