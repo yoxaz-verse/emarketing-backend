@@ -330,12 +330,77 @@ async function checkInquirySchemaReadiness() {
   });
 }
 
+async function checkReplyTrackingSchemaReadiness() {
+  const checks: Array<{
+    table: string;
+    columns: string[];
+    fix: string;
+  }> = [
+    {
+      table: 'reply_ingest_events',
+      columns: ['dedupe_key', 'matched', 'from_email', 'inbox_email', 'message_id', 'message', 'received_at', 'lead_id'],
+      fix: 'Apply Backend/sql/20260522_reply_open_tracking_recovery.sql and restart backend.',
+    },
+    {
+      table: 'email_tracking_events',
+      columns: ['dedupe_key', 'event_type', 'provider_message_id', 'campaign_id', 'campaign_lead_id', 'lead_id', 'event_at', 'matched', 'raw_payload'],
+      fix: 'Apply Backend/sql/20260522_reply_open_tracking_recovery.sql and restart backend.',
+    },
+    {
+      table: 'email_logs',
+      columns: ['provider_message_id', 'campaign_id', 'campaign_lead_id', 'to_email'],
+      fix: 'Apply Backend/sql/20260522_reply_open_tracking_recovery.sql and restart backend.',
+    },
+    {
+      table: 'leads',
+      columns: ['interest_status', 'interest_note', 'interest_reviewed_at', 'interest_reviewed_by'],
+      fix: 'Apply Backend/sql/20260522_reply_open_tracking_recovery.sql and restart backend.',
+    },
+  ];
+
+  for (const check of checks) {
+    const { error } = await supabase.from(check.table).select(check.columns.join(',')).limit(1);
+    if (!error) continue;
+
+    const message = String(error?.message ?? '');
+    const code = String(error?.code ?? '');
+    if (
+      code === '42P01' ||
+      code === '42703' ||
+      code === 'PGRST205' ||
+      message.toLowerCase().includes('does not exist') ||
+      message.toLowerCase().includes('schema cache')
+    ) {
+      console.error('[REPLY_TRACKING_SCHEMA_CHECK_FAILED]', {
+        table: check.table,
+        requiredColumns: check.columns,
+        code,
+        message,
+        fix: check.fix,
+      });
+      return;
+    }
+    console.warn('[REPLY_TRACKING_SCHEMA_CHECK_WARN]', {
+      table: check.table,
+      requiredColumns: check.columns,
+      code,
+      message,
+    });
+  }
+
+  console.info('[REPLY_TRACKING_SCHEMA_CHECK_OK]', {
+    tables: checks.map((c) => c.table),
+    endpoints: ['/operator/replies', '/execution/system/reply-capture-health', '/campaigns/:id/reply-open-analytics'],
+  });
+}
+
 async function boot() {
   await assertAttachLeadSchema();
   await checkSendingLimitsScheduleSchema();
   await checkOperatorsSchemaReadiness();
   await checkSocialAppsSchemaReadiness();
   await checkInquirySchemaReadiness();
+  await checkReplyTrackingSchemaReadiness();
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);

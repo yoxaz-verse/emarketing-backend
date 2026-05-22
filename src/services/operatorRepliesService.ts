@@ -110,9 +110,31 @@ export async function getUnmatchedReplyEvents(
   const rows = data ?? [];
   if (!options?.campaignId) return rows;
 
+  const targetCampaignId = String(options.campaignId);
+  const messageIds = rows
+    .map((row: any) => String(row?.message_id ?? '').trim().toLowerCase())
+    .filter(Boolean);
+
+  if (messageIds.length === 0) {
+    return [];
+  }
+
+  const { data: logRows, error: logErr } = await supabase
+    .from('email_logs')
+    .select('provider_message_id,campaign_id')
+    .in('provider_message_id', messageIds)
+    .eq('campaign_id', targetCampaignId);
+  if (logErr) throw logErr;
+
+  const campaignMessageIds = new Set(
+    (logRows ?? [])
+      .map((row: any) => String(row?.provider_message_id ?? '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+
   return rows.filter((row: any) => {
-    const campaignId = String(row?.campaign_id ?? row?.meta?.campaign_id ?? '');
-    return campaignId === String(options.campaignId);
+    const messageId = String(row?.message_id ?? '').trim().toLowerCase();
+    return messageId && campaignMessageIds.has(messageId);
   });
 }
 

@@ -20,6 +20,22 @@ lsof -nP -iTCP:3004 -sTCP:LISTEN
 ```
 If no process is listening, restart backend with `npm run start`.
 
+## Reply/Open Tracking Recovery (MXroute)
+
+If replies/open metrics show empty or zero while real mail activity exists:
+
+1. Apply DB patch in Supabase SQL editor:
+   - `Backend/sql/20260522_reply_open_tracking_recovery.sql`
+2. Restart backend.
+3. Verify worker health:
+```bash
+curl http://localhost:3004/execution/system/reply-capture-health
+```
+Expected:
+- `running: true`
+- `stale: false`
+- per inbox `connect_ok/auth_ok/mailbox_open_ok: true`
+
 ## OpenClaw Task Queue (Task-Creator-Only)
 
 ### Required backend env vars
