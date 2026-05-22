@@ -39,6 +39,39 @@ export function classifyTrackingEventType(eventTypeRaw: unknown, bounceHintRaw?:
   return null;
 }
 
+export function buildEffectiveDeliveredSets(input: {
+  sentLeadIds: string[];
+  confirmedDeliveredLeadIds: string[];
+  hardBouncedLeadIds: string[];
+  softBouncedLeadIds: string[];
+}) {
+  const sentSet = new Set(input.sentLeadIds.filter(Boolean));
+  const confirmedDeliveredSet = new Set(
+    input.confirmedDeliveredLeadIds.filter((id) => Boolean(id) && sentSet.has(id))
+  );
+  const bouncedSet = new Set([
+    ...input.hardBouncedLeadIds.filter(Boolean),
+    ...input.softBouncedLeadIds.filter(Boolean),
+  ]);
+  const inferredDeliveredSet = new Set<string>();
+  for (const leadId of sentSet) {
+    if (!confirmedDeliveredSet.has(leadId) && !bouncedSet.has(leadId)) {
+      inferredDeliveredSet.add(leadId);
+    }
+  }
+  const effectiveDeliveredSet = new Set<string>([
+    ...confirmedDeliveredSet,
+    ...inferredDeliveredSet,
+  ]);
+
+  return {
+    confirmedDeliveredSet,
+    inferredDeliveredSet,
+    effectiveDeliveredSet,
+    bouncedSet,
+  };
+}
+
 function readPath(input: Record<string, unknown>, path: string): unknown {
   const parts = path.split('.');
   let current: any = input;
@@ -624,18 +657,7 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
 
   const total = (campaignLeads ?? []).length;
   const sentLeadSet = new Set(sentRows.map((r: any) => String(r.campaign_lead_id ?? '')).filter(Boolean));
-  const sentIdentitySet = new Set(
-    sentRows.map((row: any) => {
-      const clid = String(row?.campaign_lead_id ?? '').trim();
-      if (clid) return `clid:${clid}`;
-      const mid = String(row?.provider_message_id ?? '').trim().toLowerCase();
-      if (mid) return `mid:${mid}`;
-      const to = cleanEmail(row?.to_email);
-      const sentAt = String(row?.sent_at ?? '').trim();
-      return to && sentAt ? `to:${to}|at:${sentAt}` : '';
-    }).filter(Boolean)
-  );
-  const deliveredSet = new Set<string>();
+  const confirmedDeliveredSet = new Set<string>();
   const openedSet = new Set<string>();
   const repliedSet = new Set<string>();
   const hardBounceSet = new Set<string>();
@@ -655,7 +677,7 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
     if (!prev || eventAt > String(prev.event_at ?? '')) {
       lastEventByLead.set(leadId, row);
     }
-    if (eventType === 'delivered') deliveredSet.add(leadId);
+    if (eventType === 'delivered') confirmedDeliveredSet.add(leadId);
     else if (eventType === 'open') openedSet.add(leadId);
     else if (eventType === 'reply') repliedSet.add(leadId);
     else if (eventType === 'bounced_hard') hardBounceSet.add(leadId);
@@ -672,7 +694,17 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
     [...inferredRepliedSet].filter((id) => !repliedSet.has(id))
   );
 
-  const bouncedSet = new Set<string>([...hardBounceSet, ...softBounceSet]);
+  const {
+    confirmedDeliveredSet: confirmedDeliveredForSentSet,
+    inferredDeliveredSet,
+    effectiveDeliveredSet,
+    bouncedSet,
+  } = buildEffectiveDeliveredSets({
+    sentLeadIds: [...sentLeadSet],
+    confirmedDeliveredLeadIds: [...confirmedDeliveredSet],
+    hardBouncedLeadIds: [...hardBounceSet],
+    softBouncedLeadIds: [...softBounceSet],
+  });
   const failedDeliveryByStatusSet = new Set<string>(
     (campaignLeads ?? [])
       .filter((r: any) => String(r?.status ?? '').toLowerCase() === 'failed')
@@ -680,8 +712,8 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
       .filter(Boolean)
   );
   const deliveryFailedSet = new Set<string>([...hardBounceSet, ...failedDeliveryByStatusSet]);
-  const sent = sentIdentitySet.size;
-  const delivered = [...deliveredSet].filter((id) => sentLeadSet.has(id)).length;
+  const sent = sentLeadSet.size;
+  const delivered = effectiveDeliveredSet.size;
   const opened = [...openedSet].filter((id) => sentLeadSet.has(id)).length;
   const replied = [...repliedSet].filter((id) => sentLeadSet.has(id)).length;
   const bounced_hard = hardBounceSet.size;
@@ -690,7 +722,7 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
   const delivery_failed = deliveryFailedSet.size;
   const not_opened = Math.max(sent - opened, 0);
   const not_replied = Math.max(sent - replied, 0);
-  const pending_outcome = Math.max(sentLeadSet.size - delivered - bounced_total, 0);
+  const pending_outcome = Math.max(sent - delivered - bounced_total, 0);
   const unmatchedEventRows = (eventRows ?? []).filter((row: any) => {
     const matched = row?.matched;
     const hasCampaignLead = Boolean(String(row?.campaign_lead_id ?? ''));
@@ -711,7 +743,7 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
     const clid = String(lead?.id ?? '');
     const stepStatus = String(lead?.status ?? '').toLowerCase();
     const stepSaysSent = stepStatus === 'completed' || stepStatus === 'replied';
-    const realDelivered = deliveredSet.has(clid);
+    const realDelivered = effectiveDeliveredSet.has(clid);
     const realBounced = bouncedSet.has(clid);
     return stepSaysSent && !realDelivered && !realBounced;
   }).length;
@@ -728,7 +760,7 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
     else if (hardBounceSet.has(clid)) outcome = 'Hard Bounce';
     else if (softBounceSet.has(clid)) outcome = 'Soft Bounce';
     else if (openedSet.has(clid)) outcome = 'Opened';
-    else if (deliveredSet.has(clid)) outcome = 'Delivered';
+    else if (effectiveDeliveredSet.has(clid)) outcome = 'Delivered';
     else if (sentLeadSet.has(clid)) outcome = 'Pending Outcome';
     if (lastEvent?.raw_payload?.source) source = String(lastEvent.raw_payload.source);
     const confRaw = String(lastEvent?.raw_payload?.correlation_confidence ?? lastEvent?.raw_payload?.confidence ?? '');
@@ -758,7 +790,9 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
     spam_hints.push('Bounce rate is elevated; verify list quality and sender reputation.');
   }
   if (pending_outcome > 0 && delivered === 0 && sent > 0) {
-    spam_hints.push('No delivery confirmations yet; webhook coverage or inbox placement may be limited.');
+    spam_hints.push('No delivery evidence yet; verify send pipeline/webhook coverage and inbox placement.');
+  } else if (sent > 0 && confirmedDeliveredForSentSet.size === 0 && inferredDeliveredSet.size > 0) {
+    spam_hints.push('Delivery is inferred from successful sends (and no bounce) because provider delivery webhooks are missing.');
   }
   if (outcome_vs_step_mismatch > 0) {
     spam_hints.push('Some leads are step-completed but missing delivery/bounce events.');
@@ -822,6 +856,9 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
     },
     diagnostics: {
       unmatched_events_count,
+      confirmed_delivered_count: confirmedDeliveredForSentSet.size,
+      inferred_delivered_count: inferredDeliveredSet.size,
+      delivery_mode: 'confirmed_plus_inferred',
       unmatched_sample: unmatchedEventRows.slice(0, 5).map((row: any) => ({
         event_type: String(row?.event_type ?? ''),
         provider_message_id: String(row?.provider_message_id ?? ''),

@@ -16,6 +16,7 @@ import {
 import { requireAuth } from '../middleware/requireAuth.js';
 import { getEffectiveOperatorId } from '../utils/getEffectiveOperatorId.js';
 import { supabase } from '../supabase.js';
+import { getReplyCaptureHealth } from '../worker/replyCapture.worker.js';
 
 const router = Router();
 
@@ -145,7 +146,35 @@ router.get('/replies', async (req, res) => {
     }
 
     const unmatched = await getUnmatchedReplyEvents(operatorId, { campaignId });
-    return res.json({ replies, unmatched });
+    const mappingConfidenceBreakdown = {
+      high: 0,
+      medium: 0,
+      low: 0,
+      unknown: 0,
+    };
+
+    for (const row of unmatched as any[]) {
+      const confidence = String((row as any)?.scope_confidence ?? '').toLowerCase();
+      if (confidence === 'high') mappingConfidenceBreakdown.high += 1;
+      else if (confidence === 'medium') mappingConfidenceBreakdown.medium += 1;
+      else if (confidence === 'low') mappingConfidenceBreakdown.low += 1;
+      else mappingConfidenceBreakdown.unknown += 1;
+    }
+
+    const workerHealth = getReplyCaptureHealth();
+    return res.json({
+      replies,
+      unmatched,
+      matched_count: Array.isArray(replies) ? replies.length : 0,
+      unmatched_count: Array.isArray(unmatched) ? unmatched.length : 0,
+      mapping_confidence_breakdown: mappingConfidenceBreakdown,
+      worker_health_snapshot: {
+        stale: Boolean(workerHealth?.stale),
+        failed_inbox_count: Number(workerHealth?.failed_inbox_count ?? 0),
+        active_inbox_count: Number(workerHealth?.active_inbox_count ?? 0),
+        last_poll_at: workerHealth?.last_poll_at ?? null,
+      },
+    });
   } catch (err: any) {
     console.error('[OPERATOR_REPLIES_LOAD_ERROR]', err);
     return res.status(500).json({
