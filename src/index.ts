@@ -348,7 +348,7 @@ async function checkReplyTrackingSchemaReadiness() {
     },
     {
       table: 'email_logs',
-      columns: ['provider_message_id', 'campaign_id', 'campaign_lead_id', 'to_email'],
+      columns: ['provider_name', 'provider_message_id', 'campaign_id', 'campaign_lead_id', 'to_email'],
       fix: 'Apply Backend/sql/20260522_reply_open_tracking_recovery.sql and restart backend.',
     },
     {

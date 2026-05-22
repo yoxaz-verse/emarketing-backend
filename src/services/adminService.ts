@@ -97,6 +97,33 @@ export async function enableSequence(sequenceId: string) {
 
 
 export async function listOperators() {
-  return supabase.from('operators').select('id, name, region');
-}
+  const { data: activeUsers, error: activeUsersError } = await supabase
+    .from('users')
+    .select('operator_id')
+    .eq('active', true)
+    .not('operator_id', 'is', null);
 
+  if (activeUsersError) {
+    return { data: null, error: activeUsersError };
+  }
+
+  const operatorIds = Array.from(
+    new Set(
+      (Array.isArray(activeUsers) ? activeUsers : [])
+        .map((row: any) => String(row?.operator_id ?? '').trim())
+        .filter(Boolean)
+    )
+  );
+
+  if (operatorIds.length === 0) {
+    return { data: [], error: null };
+  }
+
+  const { data, error } = await supabase
+    .from('operators')
+    .select('id, name, region')
+    .in('id', operatorIds)
+    .order('name', { ascending: true });
+
+  return { data: data ?? [], error };
+}

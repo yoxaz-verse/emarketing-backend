@@ -3,7 +3,7 @@ import { advanceInboxWarmup } from '../services/webhook/warmup.service';
 import { handleBounce } from '../services/execution.service';
 import { dailyHealthRecovery } from '../services/webhook/health.service';
 import { ingestInboundReply } from '../services/replyIngestService.js';
-import { ingestPixelOpenEvent, ingestProviderEmailEvent } from '../services/emailTracking.service.js';
+import { ingestClickProxyOpen, ingestPixelOpenEvent, ingestProviderEmailEvent } from '../services/emailTracking.service.js';
 
 const router = Router();
 
@@ -81,6 +81,20 @@ router.get('/tracking/open/:token', async (req, res) => {
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
   return res.status(200).send(pixel);
+});
+
+router.get('/tracking/click/:token', async (req, res) => {
+  try {
+    const result = await ingestClickProxyOpen(String(req.params.token ?? ''));
+    const redirectUrl = String(result.redirect_url ?? '').trim();
+    if (!redirectUrl) {
+      return res.status(400).send('Invalid click tracking token');
+    }
+    return res.redirect(302, redirectUrl);
+  } catch (err: any) {
+    console.warn('[CLICK_PROXY_TRACKING_WARN]', err?.message ?? err);
+    return res.status(400).send('Invalid click tracking token');
+  }
 });
   
   router.post('/internal/health/recover', async (_req, res) => {

@@ -4,7 +4,7 @@ import { decryptSecret } from '../utils/sendEncryption';
 import { updateRow } from './crudService';
 import { createSmtpTransport } from './email/smtpTransport';
 import { renderPlainTextAsHtml } from './email/emailBodyRender';
-import { makePixelToken } from './emailTracking.service.js';
+import { makeClickToken, makePixelToken } from './emailTracking.service.js';
 import {
   getSendingLimitsConfig,
   isNowWithinSendingSchedule,
@@ -1251,14 +1251,18 @@ export async function sendCampaignEmail(campaignLeadId: string) {
     toEmail: String((campaignLead as any)?.leads?.email ?? ''),
     sentAtIso,
   });
-  const trackingBase = String(
-    process.env.TRACKING_PIXEL_BASE_URL ||
-    process.env.PUBLIC_BACKEND_URL ||
-    process.env.BACKEND_PUBLIC_URL ||
-    'https://emarketing-backend.infra.obaol.com'
-  ).replace(/\/$/, '');
+  const trackingBase = resolveTrackingBaseUrl();
   const pixelHtml = `<img src="${trackingBase}/tracking/open/${pixelToken}" alt="" width="1" height="1" style="display:none;opacity:0;" />`;
-  const htmlBody = `${renderPlainTextAsHtml(bodyRaw)}\n${pixelHtml}`;
+  const renderedBody = renderPlainTextAsHtml(bodyRaw);
+  const trackedBody = withTrackedLinks(renderedBody, {
+    campaignLeadId: String(campaignLeadId),
+    campaignId: String((campaignLead as any).campaign_id ?? ''),
+    leadId: String((campaignLead as any)?.leads?.id ?? ''),
+    toEmail: String((campaignLead as any)?.leads?.email ?? ''),
+    sentAtIso,
+    trackingBase,
+  });
+  const htmlBody = wrapCampaignHtmlBody(`${trackedBody}\n${pixelHtml}`);
 
   const campaignSenderDisplayName = String((campaignLead as any)?.campaigns?.sender_display_name ?? '').trim();
   const effectiveSenderDisplayName = campaignSenderDisplayName || FIXED_CAMPAIGN_SENDER_NAME;
@@ -1314,6 +1318,68 @@ export async function sendCampaignEmail(campaignLeadId: string) {
 
 function normalizeMessageId(value: unknown): string {
   return String(value ?? '').trim().replace(/[<>]/g, '').toLowerCase();
+}
+
+function resolveTrackingBaseUrl(): string {
+  const configured = String(
+    process.env.TRACKING_PIXEL_BASE_URL ||
+    process.env.PUBLIC_BACKEND_URL ||
+    process.env.BACKEND_PUBLIC_URL ||
+    'https://emarketing-backend.infra.obaol.com'
+  ).trim();
+  const sanitized = configured.replace(/\/$/, '');
+  if (/^http:\/\//i.test(sanitized) && !/localhost|127\.0\.0\.1/i.test(sanitized)) {
+    return sanitized.replace(/^http:\/\//i, 'https://');
+  }
+  return sanitized;
+}
+
+function withTrackedLinks(
+  html: string,
+  context: {
+    campaignLeadId: string;
+    campaignId: string;
+    leadId: string;
+    toEmail: string;
+    sentAtIso: string;
+    trackingBase: string;
+  }
+): string {
+  const urlRegex = /(https?:\/\/[^\s<]+)/gi;
+  return html.replace(urlRegex, (rawUrl: string) => {
+    const normalizedUrl = rawUrl.trim().replace(/[),.;!?]+$/g, '');
+    let parsed: URL;
+    try {
+      parsed = new URL(normalizedUrl);
+    } catch {
+      return rawUrl;
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return rawUrl;
+    const token = makeClickToken({
+      campaignLeadId: context.campaignLeadId,
+      campaignId: context.campaignId,
+      leadId: context.leadId,
+      toEmail: context.toEmail,
+      sentAtIso: context.sentAtIso,
+      redirectUrl: parsed.toString(),
+    });
+    const trackedHref = `${context.trackingBase}/tracking/click/${token}`;
+    return `<a href="${trackedHref}" target="_blank" rel="noopener noreferrer">${normalizedUrl}</a>`;
+  });
+}
+
+function wrapCampaignHtmlBody(contentHtml: string): string {
+  return [
+    '<!doctype html>',
+    '<html>',
+    '<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>',
+    '<body style="margin:0;padding:0;background:#ffffff;color:#111827;font-family:Arial,Helvetica,sans-serif;">',
+    '<div style="max-width:680px;margin:0 auto;padding:12px 16px;line-height:1.55;font-size:16px;">',
+    contentHtml,
+    '</div>',
+    '</body>',
+    '</html>',
+  ].join('');
 }
 /**
  * STEP SUCCESS

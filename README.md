@@ -106,3 +106,14 @@ When rotating `JWT_SECRET` in production, old browser cookies contain tokens sig
 - Backend boot logs do not show missing JWT secret.
 - `/auth/me` succeeds after fresh login.
 - Repeated `[requireAuthLite] Token verification failed: invalid signature` stops for fresh sessions.
+
+## Inquiry Fetching Schema Bootstrap
+
+If Inquiry Fetching shows errors such as:
+- `Could not find the table 'public.inquiry_fetch_runs' in the schema cache`
+- `DB seed missing or unavailable. Showing fallback source catalog.`
+
+Apply DB patch in Supabase SQL editor:
+- `Backend/sql/20260523_inquiry_pipeline_bootstrap.sql`
+
+Then restart backend so runtime/schema caches refresh.

@@ -125,26 +125,34 @@ router.get('/campaign/stats', async (req, res) => {
 });
  
 router.get('/replies', async (req, res) => {
-  const role = String(req?.auth?.role ?? '').toLowerCase();
-  const isAdmin = role === 'admin' || role === 'superadmin';
-  const operatorIdFromQuery = typeof req.query.operator_id === 'string' ? req.query.operator_id : null;
+  try {
+    const role = String(req?.auth?.role ?? '').toLowerCase();
+    const isAdmin = role === 'admin' || role === 'superadmin';
+    const operatorIdFromQuery = typeof req.query.operator_id === 'string' ? req.query.operator_id : null;
 
-  const operatorId = isAdmin
-    ? operatorIdFromQuery
-    : getEffectiveOperatorId(req);
+    const operatorId = isAdmin
+      ? operatorIdFromQuery
+      : getEffectiveOperatorId(req);
 
-  const campaignId = typeof req.query.campaign_id === 'string' ? req.query.campaign_id : null;
-  const reviewStatusRaw = typeof req.query.review_status === 'string' ? req.query.review_status : 'all';
-  const reviewStatus =
-    reviewStatusRaw === 'unreviewed' || reviewStatusRaw === 'reviewed' ? reviewStatusRaw : 'all';
-  const includeUnmatched = String(req.query.include_unmatched ?? '').toLowerCase() === 'true';
-  const replies = await getOperatorReplies(operatorId, { campaignId, reviewStatus });
-  if (!includeUnmatched) {
-    return res.json(replies);
+    const campaignId = typeof req.query.campaign_id === 'string' ? req.query.campaign_id : null;
+    const reviewStatusRaw = typeof req.query.review_status === 'string' ? req.query.review_status : 'all';
+    const reviewStatus =
+      reviewStatusRaw === 'unreviewed' || reviewStatusRaw === 'reviewed' ? reviewStatusRaw : 'all';
+    const includeUnmatched = String(req.query.include_unmatched ?? '').toLowerCase() === 'true';
+    const replies = await getOperatorReplies(operatorId, { campaignId, reviewStatus });
+    if (!includeUnmatched) {
+      return res.json(replies);
+    }
+
+    const unmatched = await getUnmatchedReplyEvents(operatorId, { campaignId });
+    return res.json({ replies, unmatched });
+  } catch (err: any) {
+    console.error('[OPERATOR_REPLIES_LOAD_ERROR]', err);
+    return res.status(500).json({
+      error: err?.message ?? 'Failed to load replies',
+      code: 'REPLIES_LOAD_FAILED',
+    });
   }
-
-  const unmatched = await getUnmatchedReplyEvents(operatorId, { campaignId });
-  return res.json({ replies, unmatched });
 });
 
 router.get('/replies/operators', async (req, res) => {

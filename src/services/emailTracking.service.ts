@@ -15,6 +15,30 @@ type NormalizedEmailEvent = {
   confidence?: 'high' | 'medium' | 'low';
 };
 
+const DELIVERED_EVENT_HINTS = [
+  'deliver',
+  'sent',
+  'accept',
+  'processed',
+  'success',
+  'ok',
+];
+
+const HARD_BOUNCE_HINT_REGEX = /hard|permanent|5\.\d\.\d|invalid|rejected|does not exist|not found/;
+
+export function classifyTrackingEventType(eventTypeRaw: unknown, bounceHintRaw?: unknown): NormalizedEmailEvent['event_type'] | null {
+  const eventType = String(eventTypeRaw ?? '').trim().toLowerCase();
+  const bounceHint = String(bounceHintRaw ?? '').trim().toLowerCase();
+
+  if (eventType.includes('reply')) return 'reply';
+  if (eventType.includes('open')) return 'open';
+  if (DELIVERED_EVENT_HINTS.some((hint) => eventType.includes(hint))) return 'delivered';
+  if (eventType.includes('bounce') || bounceHint.length > 0) {
+    return HARD_BOUNCE_HINT_REGEX.test(bounceHint) ? 'bounced_hard' : 'bounced_soft';
+  }
+  return null;
+}
+
 function readPath(input: Record<string, unknown>, path: string): unknown {
   const parts = path.split('.');
   let current: any = input;
@@ -94,14 +118,7 @@ export function normalizeProviderEmailEvent(input: Record<string, unknown>) {
     ]) ?? ''
   ).toLowerCase();
 
-  let event_type: NormalizedEmailEvent['event_type'] | null = null;
-  if (eventTypeRaw.includes('reply')) event_type = 'reply';
-  else if (eventTypeRaw.includes('open')) event_type = 'open';
-  else if (eventTypeRaw.includes('deliver')) event_type = 'delivered';
-  else if (eventTypeRaw.includes('bounce') || bounceHint.length > 0) {
-    const isHard = /hard|permanent|5\.\d\.\d|invalid|rejected|does not exist|not found/.test(bounceHint);
-    event_type = isHard ? 'bounced_hard' : 'bounced_soft';
-  }
+  const event_type = classifyTrackingEventType(eventTypeRaw, bounceHint);
 
   const provider_message_id = normalizeMessageId(
     firstDefined(input, [
@@ -300,6 +317,50 @@ export function makePixelToken(payload: { campaignLeadId: string; campaignId: st
   return Buffer.from(`${raw}|${sig}`).toString('base64url');
 }
 
+function clickTokenSecret(): string {
+  return String(process.env.TRACKING_CLICK_SECRET || process.env.JWT_SECRET || 'obaol-click-secret');
+}
+
+function signClickPayload(raw: string): string {
+  return createHash('sha256').update(`${raw}|${clickTokenSecret()}`).digest('hex').slice(0, 20);
+}
+
+export function makeClickToken(payload: {
+  campaignLeadId: string;
+  campaignId: string;
+  leadId: string;
+  toEmail: string;
+  sentAtIso: string;
+  redirectUrl: string;
+}) {
+  const raw = [
+    payload.campaignLeadId,
+    payload.campaignId,
+    payload.leadId,
+    payload.toEmail.toLowerCase(),
+    payload.sentAtIso,
+    payload.redirectUrl,
+  ].join('|');
+  const sig = signClickPayload(raw);
+  return Buffer.from(`${raw}|${sig}`).toString('base64url');
+}
+
+function decodeClickToken(token: string) {
+  const decoded = Buffer.from(token, 'base64url').toString('utf8');
+  const [campaignLeadId, campaignId, leadId, toEmail, sentAtIso, redirectUrl, sig] = decoded.split('|');
+  if (!campaignLeadId || !campaignId || !leadId || !toEmail || !sentAtIso || !redirectUrl || !sig) return null;
+  const raw = [campaignLeadId, campaignId, leadId, toEmail, sentAtIso, redirectUrl].join('|');
+  if (signClickPayload(raw) !== sig) return null;
+  return {
+    campaign_lead_id: campaignLeadId,
+    campaign_id: campaignId,
+    lead_id: leadId,
+    to_email: toEmail.toLowerCase(),
+    sent_at_iso: sentAtIso,
+    redirect_url: redirectUrl,
+  };
+}
+
 function decodePixelToken(token: string) {
   const decoded = Buffer.from(token, 'base64url').toString('utf8');
   const [campaignLeadId, campaignId, leadId, toEmail, sentAtIso, sig] = decoded.split('|');
@@ -351,6 +412,62 @@ export async function ingestPixelOpenEvent(token: string) {
   }
 
   return { success: true, deduped: String((error as any)?.code ?? '') === '23505' };
+}
+
+export async function ingestClickProxyOpen(token: string) {
+  const decoded = decodeClickToken(String(token ?? ''));
+  if (!decoded) {
+    return { success: false, error: 'invalid_click_token', redirect_url: null };
+  }
+
+  const eventAt = new Date().toISOString();
+  const dedupe_key = createHash('sha256')
+    .update(`click_proxy_open|${decoded.campaign_lead_id}|${eventAt.slice(0, 16)}`)
+    .digest('hex');
+
+  // Do not downgrade confidence if we already have high-confidence open.
+  const { data: existingOpenRows } = await supabase
+    .from('email_tracking_events')
+    .select('id,provider_name,raw_payload')
+    .eq('event_type', 'open')
+    .eq('campaign_lead_id', decoded.campaign_lead_id)
+    .order('event_at', { ascending: false })
+    .limit(20);
+
+  const existingHigh = (existingOpenRows ?? []).some((row: any) => {
+    const providerName = String(row?.provider_name ?? '').toLowerCase();
+    const source = String((row?.raw_payload as any)?.source ?? '').toLowerCase();
+    const conf = String((row?.raw_payload as any)?.correlation_confidence ?? (row?.raw_payload as any)?.confidence ?? '').toLowerCase();
+    return providerName === 'webhook' || source === 'provider_webhook' || conf === 'high';
+  });
+
+  if (!existingHigh) {
+    const { error } = await supabase.from('email_tracking_events').insert({
+      dedupe_key,
+      event_type: 'open',
+      provider_name: 'click_proxy',
+      provider_message_id: null,
+      campaign_id: decoded.campaign_id,
+      campaign_lead_id: decoded.campaign_lead_id,
+      lead_id: decoded.lead_id,
+      inbox_id: null,
+      from_email: null,
+      to_email: decoded.to_email,
+      event_at: eventAt,
+      matched: true,
+      raw_payload: {
+        source: 'click_proxy',
+        confidence: 'medium',
+        token_sent_at: decoded.sent_at_iso,
+        redirect_url: decoded.redirect_url,
+      },
+    });
+    if (error && String((error as any)?.code ?? '') !== '23505') {
+      throw error;
+    }
+  }
+
+  return { success: true, redirect_url: decoded.redirect_url };
 }
 
 export async function getCampaignReplyOpenAnalytics(campaignId: string) {
@@ -409,7 +526,16 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
   }
 
   const mappedOrphanRows: any[] = [];
-  const orphanBackfillUpdates: Array<{ id: string; campaign_id: string; campaign_lead_id: string; lead_id: string | null; inbox_id: string | null; to_email: string | null; matched: boolean; raw_payload: any }> = [];
+  const orphanBackfillUpdates: Array<{
+    id: string;
+    campaign_id: string;
+    campaign_lead_id: string | null;
+    lead_id: string | null;
+    inbox_id: string | null;
+    to_email: string | null;
+    matched: boolean;
+    raw_payload: any;
+  }> = [];
 
   for (const rawRow of (orphanEventRows ?? []) as any[]) {
     const row = { ...rawRow };
@@ -463,18 +589,16 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
     };
     mappedOrphanRows.push(row);
 
-    if (row.campaign_lead_id) {
-      orphanBackfillUpdates.push({
-        id: String(row.id),
-        campaign_id: String(row.campaign_id),
-        campaign_lead_id: String(row.campaign_lead_id),
-        lead_id: row.lead_id ? String(row.lead_id) : null,
-        inbox_id: row.inbox_id ? String(row.inbox_id) : null,
-        to_email: row.to_email ?? null,
-        matched: Boolean(row.matched),
-        raw_payload: row.raw_payload ?? {},
-      });
-    }
+    orphanBackfillUpdates.push({
+      id: String(row.id),
+      campaign_id: String(row.campaign_id),
+      campaign_lead_id: row.campaign_lead_id ? String(row.campaign_lead_id) : null,
+      lead_id: row.lead_id ? String(row.lead_id) : null,
+      inbox_id: row.inbox_id ? String(row.inbox_id) : null,
+      to_email: row.to_email ?? null,
+      matched: Boolean(row.matched),
+      raw_payload: row.raw_payload ?? {},
+    });
   }
 
   if (orphanBackfillUpdates.length > 0) {
@@ -499,7 +623,18 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
   const eventRows = [...((scopedEventRows ?? []) as any[]), ...mappedOrphanRows];
 
   const total = (campaignLeads ?? []).length;
-  const sentSet = new Set(sentRows.map((r: any) => String(r.campaign_lead_id ?? '')).filter(Boolean));
+  const sentLeadSet = new Set(sentRows.map((r: any) => String(r.campaign_lead_id ?? '')).filter(Boolean));
+  const sentIdentitySet = new Set(
+    sentRows.map((row: any) => {
+      const clid = String(row?.campaign_lead_id ?? '').trim();
+      if (clid) return `clid:${clid}`;
+      const mid = String(row?.provider_message_id ?? '').trim().toLowerCase();
+      if (mid) return `mid:${mid}`;
+      const to = cleanEmail(row?.to_email);
+      const sentAt = String(row?.sent_at ?? '').trim();
+      return to && sentAt ? `to:${to}|at:${sentAt}` : '';
+    }).filter(Boolean)
+  );
   const deliveredSet = new Set<string>();
   const openedSet = new Set<string>();
   const repliedSet = new Set<string>();
@@ -510,7 +645,11 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
   for (const row of eventRows ?? []) {
     const leadId = String((row as any)?.campaign_lead_id ?? '');
     if (!leadId) continue;
-    const eventType = String((row as any)?.event_type ?? '').toLowerCase();
+    const eventTypeRaw = String((row as any)?.event_type ?? '').toLowerCase();
+    const eventType = classifyTrackingEventType(
+      eventTypeRaw,
+      String((row as any)?.raw_payload?.reason ?? (row as any)?.raw_payload?.diagnostic ?? '').toLowerCase()
+    );
     const eventAt = String((row as any)?.event_at ?? '');
     const prev = lastEventByLead.get(leadId);
     if (!prev || eventAt > String(prev.event_at ?? '')) {
@@ -541,17 +680,17 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
       .filter(Boolean)
   );
   const deliveryFailedSet = new Set<string>([...hardBounceSet, ...failedDeliveryByStatusSet]);
-  const sent = sentSet.size;
-  const delivered = [...deliveredSet].filter((id) => sentSet.has(id)).length;
-  const opened = [...openedSet].filter((id) => sentSet.has(id)).length;
-  const replied = [...repliedSet].filter((id) => sentSet.has(id)).length;
+  const sent = sentIdentitySet.size;
+  const delivered = [...deliveredSet].filter((id) => sentLeadSet.has(id)).length;
+  const opened = [...openedSet].filter((id) => sentLeadSet.has(id)).length;
+  const replied = [...repliedSet].filter((id) => sentLeadSet.has(id)).length;
   const bounced_hard = hardBounceSet.size;
   const bounced_soft = softBounceSet.size;
   const bounced_total = bouncedSet.size;
   const delivery_failed = deliveryFailedSet.size;
   const not_opened = Math.max(sent - opened, 0);
   const not_replied = Math.max(sent - replied, 0);
-  const pending_outcome = Math.max(sent - delivered - bounced_total, 0);
+  const pending_outcome = Math.max(sentLeadSet.size - delivered - bounced_total, 0);
   const unmatchedEventRows = (eventRows ?? []).filter((row: any) => {
     const matched = row?.matched;
     const hasCampaignLead = Boolean(String(row?.campaign_lead_id ?? ''));
@@ -562,7 +701,7 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
     const type = String(row?.event_type ?? '').toLowerCase();
     if (type !== 'open') return false;
     const source = String((row as any)?.raw_payload?.source ?? '');
-    return source === 'pixel_fallback' || source === 'provider_webhook';
+    return source === 'pixel_fallback' || source === 'provider_webhook' || source === 'click_proxy';
   }).length;
   const open_rate_visible = confirmedOpenEvents > 0;
   const open_rate_visibility_reason = open_rate_visible
@@ -590,7 +729,7 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
     else if (softBounceSet.has(clid)) outcome = 'Soft Bounce';
     else if (openedSet.has(clid)) outcome = 'Opened';
     else if (deliveredSet.has(clid)) outcome = 'Delivered';
-    else if (sentSet.has(clid)) outcome = 'Pending Outcome';
+    else if (sentLeadSet.has(clid)) outcome = 'Pending Outcome';
     if (lastEvent?.raw_payload?.source) source = String(lastEvent.raw_payload.source);
     const confRaw = String(lastEvent?.raw_payload?.correlation_confidence ?? lastEvent?.raw_payload?.confidence ?? '');
     if (confRaw === 'high' || confRaw === 'medium' || confRaw === 'low') confidence = confRaw;
@@ -662,10 +801,24 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
     open_confidence,
     metrics_data_freshness: new Date().toISOString(),
     reply_rate: sent > 0 ? Number(((replied / sent) * 100).toFixed(2)) : 0,
-    inferred_replied_count: [...inferredOnlyRepliedSet].filter((id) => sentSet.has(id)).length,
+    inferred_replied_count: [...inferredOnlyRepliedSet].filter((id) => sentLeadSet.has(id)).length,
     response_provenance: {
       replied_source: 'tracking_only',
       fallback_enabled: false,
+    },
+    source_breakdown: {
+      webhook: eventRows.filter((row: any) =>
+        String(row?.event_type ?? '').toLowerCase() === 'open'
+        && String((row?.raw_payload as any)?.source ?? '') === 'provider_webhook'
+      ).length,
+      pixel: eventRows.filter((row: any) =>
+        String(row?.event_type ?? '').toLowerCase() === 'open'
+        && String((row?.raw_payload as any)?.source ?? '') === 'pixel_fallback'
+      ).length,
+      click_proxy: eventRows.filter((row: any) =>
+        String(row?.event_type ?? '').toLowerCase() === 'open'
+        && String((row?.raw_payload as any)?.source ?? '') === 'click_proxy'
+      ).length,
     },
     diagnostics: {
       unmatched_events_count,
