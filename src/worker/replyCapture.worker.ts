@@ -43,6 +43,7 @@ const INCLUDE_SPAM = String(process.env.REPLY_CAPTURE_INCLUDE_SPAM ?? 'false').t
 const DEFAULT_IMAP_PORT = Number(process.env.REPLY_CAPTURE_IMAP_PORT ?? 993);
 const DEFAULT_IMAP_SECURE = String(process.env.REPLY_CAPTURE_IMAP_SECURE ?? 'true').toLowerCase() !== 'false';
 const DEFAULT_IMAP_HOST = String(process.env.REPLY_CAPTURE_IMAP_HOST ?? '').trim().toLowerCase();
+const FORCE_GLOBAL_IMAP_HOST = String(process.env.REPLY_CAPTURE_FORCE_IMAP_HOST ?? 'false').toLowerCase() === 'true';
 
 let timer: NodeJS.Timeout | null = null;
 const mailboxState = new Map<string, { lastUid: number; lastPollAt: string | null; lastError: string | null; scanned: number; ingested: number; unmatched: number; parserFailures: number }>();
@@ -67,7 +68,7 @@ function normalizeMessageId(value: unknown): string | null {
 }
 
 function parseMailboxHost(smtpHost: string | null): string {
-  if (DEFAULT_IMAP_HOST) return DEFAULT_IMAP_HOST;
+  if (FORCE_GLOBAL_IMAP_HOST && DEFAULT_IMAP_HOST) return DEFAULT_IMAP_HOST;
   const host = String(smtpHost ?? '').trim().toLowerCase();
   if (!host) return '';
   if (host.startsWith('smtp.')) return host.replace(/^smtp\./, 'mail.');
