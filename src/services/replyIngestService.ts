@@ -79,12 +79,16 @@ export async function ingestInboundReply(input: InboundReplyPayload) {
   }
 
   if (!lead && fromEmail) {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('leads')
       .select('id, email, status, interest_status')
       .eq('email', fromEmail)
-      .maybeSingle();
-    lead = data;
+      .limit(2);
+    if (error) throw error;
+    const candidates = Array.isArray(data) ? data : [];
+    if (candidates.length === 1) {
+      lead = candidates[0];
+    }
   }
 
   const resolvedLeadId = String(lead?.id ?? '');

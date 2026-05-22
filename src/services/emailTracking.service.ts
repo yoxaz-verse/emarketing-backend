@@ -427,7 +427,10 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
   }
 
   const lowConfidenceCount = outcome_rows.filter((row: any) => row.confidence === 'low').length;
-  const open_confidence: 'high' | 'medium' | 'low' = !open_rate_visible
+  const trackedOutcomeCount = outcome_rows.filter((row: any) => String(row.outcome ?? '') !== 'Not Sent').length;
+  const open_confidence: 'high' | 'medium' | 'low' = trackedOutcomeCount === 0
+    ? 'low'
+    : !open_rate_visible
     ? 'low'
     : (lowConfidenceCount > 0 ? 'medium' : 'high');
 
@@ -452,6 +455,7 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
     open_rate_visible,
     open_rate_visibility_reason,
     open_confidence,
+    metrics_data_freshness: new Date().toISOString(),
     reply_rate: sent > 0 ? Number(((replied / sent) * 100).toFixed(2)) : 0,
     outcome_rows,
     spam_hints,

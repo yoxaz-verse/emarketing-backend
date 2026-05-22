@@ -3,6 +3,7 @@ import { supabase } from '../../supabase';
 export type ValidationRunMode = 'pending' | 'rerun_failed';
 export type ValidationRunStatus = 'queued' | 'running' | 'completed' | 'failed';
 export type ValidationRunOutcome = 'valid' | 'risky' | 'invalid' | 'failed';
+export type ValidationRunLifecycleStatus = 'idle' | 'queued' | 'running' | 'completed' | 'failed';
 
 export type ValidationRunRow = {
   id: string;
@@ -29,9 +30,20 @@ function applyOperatorRunScope(query: any, operatorId?: string) {
   return query.contains('scope', { operatorId: scopedOperatorId });
 }
 
-function deriveStatus(run: ValidationRunRow): 'idle' | 'queued' | 'running' | 'completed' | 'failed' {
+function deriveStatus(run: ValidationRunRow): ValidationRunLifecycleStatus {
   if (!run) return 'idle';
   return run.status;
+}
+
+export function shouldAutoCompleteValidationRun(
+  run: ValidationRunRow | null,
+  telemetry: { pendingAvailable: number; processingNow: number }
+): boolean {
+  if (!run) return false;
+  if (run.status !== 'running' && run.status !== 'queued') return false;
+  if (telemetry.processingNow > 0) return false;
+  if (telemetry.pendingAvailable > 0) return false;
+  return true;
 }
 
 export async function getActiveValidationRun(operatorId?: string): Promise<ValidationRunRow | null> {
@@ -114,6 +126,19 @@ export async function markRunFailed(runId: string, errorMessage: string): Promis
       status: 'failed',
       finished_at: new Date().toISOString(),
       last_error: errorMessage,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', runId);
+}
+
+export async function markRunCompleted(runId: string, totalTargeted: number, processedCount: number): Promise<void> {
+  const reconciledProcessed = Math.max(processedCount, totalTargeted);
+  await supabase
+    .from('validation_runs')
+    .update({
+      status: 'completed',
+      processed_count: reconciledProcessed,
+      finished_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     })
     .eq('id', runId);

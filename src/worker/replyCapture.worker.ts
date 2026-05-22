@@ -24,9 +24,15 @@ type ReplyCaptureHealth = {
   ingested: number;
   unmatched: number;
   parser_failures: number;
+  active_inbox_count: number;
+  failed_inbox_count: number;
   inboxes: Array<{
     inbox_email: string;
+    connect_ok: boolean;
+    auth_ok: boolean;
+    mailbox_open_ok: boolean;
     last_poll_at: string | null;
+    last_error_at: string | null;
     last_uid: number;
     scanned: number;
     ingested: number;
@@ -44,9 +50,24 @@ const DEFAULT_IMAP_PORT = Number(process.env.REPLY_CAPTURE_IMAP_PORT ?? 993);
 const DEFAULT_IMAP_SECURE = String(process.env.REPLY_CAPTURE_IMAP_SECURE ?? 'true').toLowerCase() !== 'false';
 const DEFAULT_IMAP_HOST = String(process.env.REPLY_CAPTURE_IMAP_HOST ?? '').trim().toLowerCase();
 const FORCE_GLOBAL_IMAP_HOST = String(process.env.REPLY_CAPTURE_FORCE_IMAP_HOST ?? 'false').toLowerCase() === 'true';
+const BACKFILL_DAYS = Math.max(1, Number(process.env.REPLY_CAPTURE_BACKFILL_DAYS ?? 7));
+const BACKFILL_ENABLED = String(process.env.REPLY_CAPTURE_BACKFILL_ENABLED ?? 'true').toLowerCase() === 'true';
 
 let timer: NodeJS.Timeout | null = null;
-const mailboxState = new Map<string, { lastUid: number; lastPollAt: string | null; lastError: string | null; scanned: number; ingested: number; unmatched: number; parserFailures: number }>();
+const mailboxState = new Map<string, {
+  lastUid: number;
+  lastPollAt: string | null;
+  lastError: string | null;
+  lastErrorAt: string | null;
+  scanned: number;
+  ingested: number;
+  unmatched: number;
+  parserFailures: number;
+  connectOk: boolean;
+  authOk: boolean;
+  mailboxOpenOk: boolean;
+  didBackfill: boolean;
+}>();
 const health: ReplyCaptureHealth = {
   enabled: ENABLED,
   running: false,
@@ -59,6 +80,8 @@ const health: ReplyCaptureHealth = {
   ingested: 0,
   unmatched: 0,
   parser_failures: 0,
+  active_inbox_count: 0,
+  failed_inbox_count: 0,
   inboxes: [],
 };
 
@@ -74,6 +97,10 @@ function parseMailboxHost(smtpHost: string | null): string {
   if (host.startsWith('smtp.')) return host.replace(/^smtp\./, 'mail.');
   if (host.startsWith('mail.')) return host;
   return host;
+}
+
+function backfillStartIso(): string {
+  return new Date(Date.now() - (BACKFILL_DAYS * 24 * 60 * 60 * 1000)).toISOString();
 }
 
 async function getInboxTargets(): Promise<InboxPollTarget[]> {
@@ -110,7 +137,7 @@ async function getInboxTargets(): Promise<InboxPollTarget[]> {
       username,
       password,
       host,
-      port: Number(smtp?.port ?? DEFAULT_IMAP_PORT) || DEFAULT_IMAP_PORT,
+      port: DEFAULT_IMAP_PORT,
       secure: encryption.includes('ssl') || encryption.includes('tls') || DEFAULT_IMAP_SECURE,
     });
   }
@@ -122,10 +149,15 @@ async function pollInbox(target: InboxPollTarget) {
     lastUid: 0,
     lastPollAt: null,
     lastError: null,
+    lastErrorAt: null,
     scanned: 0,
     ingested: 0,
     unmatched: 0,
     parserFailures: 0,
+    connectOk: false,
+    authOk: false,
+    mailboxOpenOk: false,
+    didBackfill: false,
   };
   mailboxState.set(target.inbox_id, state);
 
@@ -141,9 +173,23 @@ async function pollInbox(target: InboxPollTarget) {
 
   try {
     await client.connect();
+    state.connectOk = true;
+    state.authOk = true;
     await client.mailboxOpen('INBOX');
+    state.mailboxOpenOk = true;
     const maxUid = Number(client.mailbox?.exists ? client.mailbox.uidNext - 1 : 0);
-    const startUid = Math.max(1, state.lastUid + 1);
+    let startUid = Math.max(1, state.lastUid + 1);
+    if (BACKFILL_ENABLED && !state.didBackfill && maxUid > 0) {
+      const sinceIso = backfillStartIso();
+      for await (const backfillMsg of client.fetch('1:*', { uid: true, internalDate: true })) {
+        const msgAt = backfillMsg.internalDate ? new Date(backfillMsg.internalDate).toISOString() : null;
+        if (msgAt && msgAt >= sinceIso) {
+          startUid = Number(backfillMsg.uid ?? startUid);
+          break;
+        }
+      }
+      state.didBackfill = true;
+    }
     const endUid = Math.max(startUid, maxUid);
 
     for await (const msg of client.fetch(`${startUid}:${endUid}`, { uid: true, source: true, envelope: true, internalDate: true })) {
@@ -194,10 +240,15 @@ async function pollInbox(target: InboxPollTarget) {
     }
 
     state.lastError = null;
+    state.lastErrorAt = null;
     state.lastPollAt = new Date().toISOString();
     health.last_poll_at = state.lastPollAt;
   } catch (err: any) {
     state.lastError = String(err?.message ?? 'poll_failed');
+    state.lastErrorAt = new Date().toISOString();
+    state.connectOk = false;
+    state.authOk = false;
+    state.mailboxOpenOk = false;
   } finally {
     try {
       await client.logout();
@@ -210,6 +261,7 @@ async function pollInbox(target: InboxPollTarget) {
 async function runPollCycle() {
   if (!ENABLED) return;
   const targets = await getInboxTargets();
+  health.active_inbox_count = targets.length;
   for (const target of targets) {
     // eslint-disable-next-line no-await-in-loop
     await pollInbox(target);
@@ -218,11 +270,18 @@ async function runPollCycle() {
   const staleCutoffMs = STALE_THRESHOLD_MINUTES * 60 * 1000;
   const lastPollMs = health.last_poll_at ? new Date(health.last_poll_at).getTime() : 0;
   health.stale = !lastPollMs || (nowMs - lastPollMs) > staleCutoffMs;
+  let failed = 0;
   health.inboxes = targets.map((target) => {
     const state = mailboxState.get(target.inbox_id);
+    const hasError = Boolean(state?.lastError);
+    if (hasError) failed += 1;
     return {
       inbox_email: target.inbox_email,
+      connect_ok: Boolean(state?.connectOk),
+      auth_ok: Boolean(state?.authOk),
+      mailbox_open_ok: Boolean(state?.mailboxOpenOk),
       last_poll_at: state?.lastPollAt ?? null,
+      last_error_at: state?.lastErrorAt ?? null,
       last_uid: Number(state?.lastUid ?? 0),
       scanned: Number(state?.scanned ?? 0),
       ingested: Number(state?.ingested ?? 0),
@@ -231,6 +290,7 @@ async function runPollCycle() {
       last_error: state?.lastError ?? null,
     };
   });
+  health.failed_inbox_count = failed;
 }
 
 export function startReplyCaptureWorker() {

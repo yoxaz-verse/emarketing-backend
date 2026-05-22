@@ -8,7 +8,9 @@ import {
   getActiveValidationRun,
   getLatestValidationRun,
   listValidationRuns,
+  markRunCompleted,
   markRunFailed,
+  shouldAutoCompleteValidationRun,
   toValidationRunStatusPayload,
   type ValidationRunMode,
 } from './validation.run.service';
@@ -402,7 +404,7 @@ export async function forceUnlockAndRerunValidation(req: Request, res: Response)
 
 export async function getEmailValidationRunStatus(req: Request, res: Response) {
   const scope = resolveValidationScope(req);
-  const run = await getLatestValidationRun(scope.isAdmin ? undefined : scope.operatorId ?? undefined);
+  let run = await getLatestValidationRun(scope.isAdmin ? undefined : scope.operatorId ?? undefined);
   const recentUpdatesThreshold = new Date(Date.now() - 2 * 60 * 1000).toISOString();
 
   const [
@@ -509,12 +511,30 @@ export async function getEmailValidationRunStatus(req: Request, res: Response) {
       ? Math.max(0, Math.round((Date.now() - new Date(run.started_at).getTime()) / 1000))
       : 0;
 
+  const pendingAvailable = pendingAvailableResult.count ?? 0;
+  const processingNow = processingNowResult.count ?? 0;
+  const shouldReconcileRun = shouldAutoCompleteValidationRun(run, {
+    pendingAvailable,
+    processingNow,
+  });
+
+  if (run && shouldReconcileRun) {
+    await markRunCompleted(run.id, run.total_targeted ?? 0, run.processed_count ?? 0);
+    run = {
+      ...run,
+      status: 'completed',
+      processed_count: Math.max(run.processed_count ?? 0, run.total_targeted ?? 0),
+      finished_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+  }
+
   return res.json({
     success: true,
     ...toValidationRunStatusPayload(run),
     availability: {
-      pendingAvailable: pendingAvailableResult.count ?? 0,
-      processingNow: processingNowResult.count ?? 0,
+      pendingAvailable,
+      processingNow,
       stuckProcessing: stuckProcessingResult.count ?? 0,
       recentUpdates: recentUpdatesResult.count ?? 0,
       lastProgressAt: (lastProgressResult as any)?.data?.email_checked_at ?? null,
