@@ -28,6 +28,7 @@ type AllocationCandidate = {
   domain_headroom: number;
   inbox_headroom: number;
   last_sent_at: string | null;
+  rotation_index: number;
 };
 
 export type CampaignAllocatorResult = {
@@ -38,6 +39,10 @@ export type CampaignAllocatorResult = {
   candidates: AllocationCandidate[];
   schedule_allowed: boolean;
   schedule_reason: string | null;
+  rotation_next_inbox_id: string | null;
+  rotation_used_inbox_id: string | null;
+  rotation_fallback_used: boolean;
+  rotation_block_reason: string | null;
 };
 
 function asNumber(value: unknown, fallback = 0): number {
@@ -50,6 +55,10 @@ function getIsoDayStart(now: Date): string {
   const mm = String(now.getUTCMonth() + 1).padStart(2, '0');
   const dd = String(now.getUTCDate()).padStart(2, '0');
   return `${yyyy}-${mm}-${dd}T00:00:00.000Z`;
+}
+
+function minuteBucketUtc(now: Date): number {
+  return Math.floor(now.getTime() / 60000);
 }
 
 export async function allocateCampaignSender(input: {
@@ -74,18 +83,34 @@ export async function allocateCampaignSender(input: {
       candidates: [],
       schedule_allowed: false,
       schedule_reason: scheduleGate.reason ?? 'schedule_blocked',
+      rotation_next_inbox_id: null,
+      rotation_used_inbox_id: null,
+      rotation_fallback_used: false,
+      rotation_block_reason: 'schedule_blocked',
     };
   }
 
   const { data: campaignInboxRows, error: campaignInboxError } = await supabase
     .from('campaign_inboxes')
-    .select('inbox_id')
+    .select('inbox_id,created_at')
     .eq('campaign_id', campaignId);
   if (campaignInboxError) throw campaignInboxError;
 
-  const inboxIds = Array.from(
-    new Set((campaignInboxRows ?? []).map((r: any) => String(r?.inbox_id ?? '')).filter(Boolean))
-  );
+  type CampaignInboxRow = { inbox_id: string; created_at: string };
+  const orderedCampaignInboxIds: string[] = (campaignInboxRows ?? [])
+    .map((r: any): CampaignInboxRow => ({
+      inbox_id: String(r?.inbox_id ?? '').trim(),
+      created_at: String(r?.created_at ?? ''),
+    }))
+    .filter((r: CampaignInboxRow) => r.inbox_id.length > 0)
+    .sort((a: CampaignInboxRow, b: CampaignInboxRow) => {
+      const aTs = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const bTs = b.created_at ? new Date(b.created_at).getTime() : 0;
+      if (aTs !== bTs) return aTs - bTs;
+      return a.inbox_id.localeCompare(b.inbox_id);
+    })
+    .map((r: CampaignInboxRow) => r.inbox_id);
+  const inboxIds: string[] = Array.from(new Set(orderedCampaignInboxIds));
   if (inboxIds.length === 0) {
     return {
       eligible_count: 0,
@@ -95,6 +120,10 @@ export async function allocateCampaignSender(input: {
       candidates: [],
       schedule_allowed: true,
       schedule_reason: null,
+      rotation_next_inbox_id: null,
+      rotation_used_inbox_id: null,
+      rotation_fallback_used: false,
+      rotation_block_reason: 'no_campaign_inboxes',
     };
   }
 
@@ -308,6 +337,7 @@ export async function allocateCampaignSender(input: {
       domain_headroom: Math.min(remDailyDomain, remHourDomain),
       inbox_headroom: Math.min(remDailyInbox, remHourInbox),
       last_sent_at: (inbox as any).last_sent_at ? String((inbox as any).last_sent_at) : null,
+      rotation_index: inboxIds.indexOf(inboxId),
     });
   }
 
@@ -320,10 +350,22 @@ export async function allocateCampaignSender(input: {
       candidates: [],
       schedule_allowed: true,
       schedule_reason: null,
+      rotation_next_inbox_id: orderedCampaignInboxIds[0] ?? null,
+      rotation_used_inbox_id: null,
+      rotation_fallback_used: false,
+      rotation_block_reason: Object.keys(blockedByReason)[0] ?? 'no_eligible_sender',
     };
   }
 
+  const minuteBucket = minuteBucketUtc(now);
+  const ringSize = inboxIds.length;
+  const targetRotationIndex = ringSize > 0 ? (minuteBucket % ringSize) : 0;
+  const targetInboxId: string | null = inboxIds[targetRotationIndex] ?? null;
+
   candidates.sort((a, b) => {
+    const aDistance = ringSize > 0 ? ((a.rotation_index - targetRotationIndex + ringSize) % ringSize) : 0;
+    const bDistance = ringSize > 0 ? ((b.rotation_index - targetRotationIndex + ringSize) % ringSize) : 0;
+    if (aDistance !== bDistance) return aDistance - bDistance;
     if (b.domain_headroom !== a.domain_headroom) return b.domain_headroom - a.domain_headroom;
     if (b.inbox_headroom !== a.inbox_headroom) return b.inbox_headroom - a.inbox_headroom;
     const aTs = a.last_sent_at ? new Date(a.last_sent_at).getTime() : 0;
@@ -332,13 +374,21 @@ export async function allocateCampaignSender(input: {
     return a.inbox_id.localeCompare(b.inbox_id);
   });
 
+  const selected = candidates[0];
+  const rotationFallbackUsed = Boolean(targetInboxId && selected.inbox_id !== targetInboxId);
+  const rotationBlockReason = rotationFallbackUsed ? 'rotation_inbox_blocked_or_ineligible' : null;
+
   return {
     eligible_count: candidates.length,
     blocked_by_reason: blockedByReason,
-    selected: candidates[0],
+    selected,
     reason: 'eligible_sender_found',
     candidates,
     schedule_allowed: true,
     schedule_reason: null,
+    rotation_next_inbox_id: targetInboxId,
+    rotation_used_inbox_id: selected.inbox_id,
+    rotation_fallback_used: rotationFallbackUsed,
+    rotation_block_reason: rotationBlockReason,
   };
 }

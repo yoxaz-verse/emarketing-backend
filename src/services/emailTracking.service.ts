@@ -15,6 +15,26 @@ type NormalizedEmailEvent = {
   confidence?: 'high' | 'medium' | 'low';
 };
 
+function readPath(input: Record<string, unknown>, path: string): unknown {
+  const parts = path.split('.');
+  let current: any = input;
+  for (const part of parts) {
+    if (!current || typeof current !== 'object') return undefined;
+    current = current[part];
+  }
+  return current;
+}
+
+function firstDefined(input: Record<string, unknown>, paths: string[]): unknown {
+  for (const path of paths) {
+    const value = readPath(input, path);
+    if (value !== undefined && value !== null && String(value).trim() !== '') {
+      return value;
+    }
+  }
+  return undefined;
+}
+
 function cleanEmail(value: unknown): string | null {
   const v = String(value ?? '').trim().toLowerCase();
   return v.length > 0 ? v : null;
@@ -44,19 +64,34 @@ function dedupeKeyForEvent(evt: NormalizedEmailEvent): string {
 
 export function normalizeProviderEmailEvent(input: Record<string, unknown>) {
   const eventTypeRaw = String(
-    input.event_type ?? input.type ?? input.event ?? input.notification_type ?? ''
+    firstDefined(input, [
+      'event_type',
+      'eventType',
+      'type',
+      'event',
+      'notification_type',
+      'notificationType',
+      'mail.eventType',
+      'data.eventType',
+    ]) ?? ''
   )
     .trim()
     .toLowerCase();
 
   const bounceHint = String(
-    input.bounce_type ??
-    input.bounceKind ??
-    input.severity ??
-    input.subtype ??
-    input.reason ??
-    input.diagnostic ??
-    ''
+    firstDefined(input, [
+      'bounce_type',
+      'bounceType',
+      'bounceKind',
+      'severity',
+      'subtype',
+      'reason',
+      'diagnostic',
+      'bounce.bounceType',
+      'bounce.bounceSubType',
+      'mail.bounceType',
+      'data.reason',
+    ]) ?? ''
   ).toLowerCase();
 
   let event_type: NormalizedEmailEvent['event_type'] | null = null;
@@ -69,7 +104,19 @@ export function normalizeProviderEmailEvent(input: Record<string, unknown>) {
   }
 
   const provider_message_id = normalizeMessageId(
-    input.message_id ?? input.provider_message_id ?? input['Message-Id'] ?? input['message-id']
+    firstDefined(input, [
+      'message_id',
+      'messageId',
+      'provider_message_id',
+      'providerMessageId',
+      'Message-Id',
+      'message-id',
+      'mail.messageId',
+      'mail.message_id',
+      'data.message_id',
+      'data.messageId',
+      'headers.message-id',
+    ])
   );
 
   if (!event_type || !provider_message_id) {
@@ -78,12 +125,16 @@ export function normalizeProviderEmailEvent(input: Record<string, unknown>) {
 
   return {
     event_type,
-    provider_name: String(input.provider ?? input.provider_name ?? input.source ?? '').trim() || null,
+    provider_name: String(
+      firstDefined(input, ['provider', 'provider_name', 'providerName', 'source', 'mail.provider']) ?? ''
+    ).trim() || null,
     provider_message_id,
-    from_email: cleanEmail(input.from_email ?? input.from),
-    to_email: cleanEmail(input.to_email ?? input.recipient ?? input.to),
-    event_at: toIso(input.event_at ?? input.timestamp ?? input.received_at ?? input.date),
-    message: typeof input.message === 'string' ? input.message : null,
+    from_email: cleanEmail(firstDefined(input, ['from_email', 'fromEmail', 'from', 'mail.from', 'sender'])),
+    to_email: cleanEmail(firstDefined(input, ['to_email', 'toEmail', 'recipient', 'to', 'mail.to', 'mail.recipient'])),
+    event_at: toIso(firstDefined(input, ['event_at', 'eventAt', 'timestamp', 'received_at', 'date', 'mail.timestamp'])),
+    message: typeof firstDefined(input, ['message', 'text', 'mail.message']) === 'string'
+      ? String(firstDefined(input, ['message', 'text', 'mail.message']))
+      : null,
     raw_payload: input,
   } as NormalizedEmailEvent;
 }
@@ -313,7 +364,7 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
       .eq('status', 'sent'),
     supabase
       .from('email_tracking_events')
-      .select('campaign_lead_id,event_type,event_at,provider_message_id,raw_payload')
+      .select('campaign_lead_id,event_type,event_at,provider_message_id,raw_payload,matched,campaign_id')
       .eq('campaign_id', campaignId)
   ]);
 
@@ -342,6 +393,17 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
     else if (eventType === 'bounced_soft') softBounceSet.add(leadId);
   }
 
+  const inferredRepliedSet = new Set<string>(
+    (campaignLeads ?? [])
+      .filter((row: any) => String(row?.status ?? '').toLowerCase() === 'replied')
+      .map((row: any) => String(row?.id ?? ''))
+      .filter(Boolean)
+  );
+  const hybridRepliedSet = new Set<string>([...repliedSet, ...inferredRepliedSet]);
+  const inferredOnlyRepliedSet = new Set<string>(
+    [...inferredRepliedSet].filter((id) => !repliedSet.has(id))
+  );
+
   const bouncedSet = new Set<string>([...hardBounceSet, ...softBounceSet]);
   const failedDeliveryByStatusSet = new Set<string>(
     (campaignLeads ?? [])
@@ -353,7 +415,7 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
   const sent = sentSet.size;
   const delivered = [...deliveredSet].filter((id) => sentSet.has(id)).length;
   const opened = openedSet.size;
-  const replied = repliedSet.size;
+  const replied = [...hybridRepliedSet].filter((id) => sentSet.has(id)).length;
   const bounced_hard = hardBounceSet.size;
   const bounced_soft = softBounceSet.size;
   const bounced_total = bouncedSet.size;
@@ -361,6 +423,12 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
   const not_opened = Math.max(sent - opened, 0);
   const not_replied = Math.max(sent - replied, 0);
   const pending_outcome = Math.max(sent - delivered - bounced_total, 0);
+  const unmatchedEventRows = (eventRows ?? []).filter((row: any) => {
+    const matched = row?.matched;
+    const hasCampaignLead = Boolean(String(row?.campaign_lead_id ?? ''));
+    return matched === false || !hasCampaignLead;
+  });
+  const unmatched_events_count = unmatchedEventRows.length;
   const confirmedOpenEvents = (eventRows ?? []).filter((row: any) => {
     const type = String(row?.event_type ?? '').toLowerCase();
     if (type !== 'open') return false;
@@ -388,6 +456,7 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
     let source = 'none';
     let confidence: 'high' | 'medium' | 'low' = 'low';
     if (repliedSet.has(clid)) outcome = 'Replied';
+    else if (inferredOnlyRepliedSet.has(clid)) outcome = 'Replied';
     else if (hardBounceSet.has(clid)) outcome = 'Hard Bounce';
     else if (softBounceSet.has(clid)) outcome = 'Soft Bounce';
     else if (openedSet.has(clid)) outcome = 'Opened';
@@ -396,6 +465,10 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
     if (lastEvent?.raw_payload?.source) source = String(lastEvent.raw_payload.source);
     const confRaw = String(lastEvent?.raw_payload?.correlation_confidence ?? lastEvent?.raw_payload?.confidence ?? '');
     if (confRaw === 'high' || confRaw === 'medium' || confRaw === 'low') confidence = confRaw;
+    if (inferredOnlyRepliedSet.has(clid)) {
+      source = 'campaign_status_fallback';
+      confidence = 'low';
+    }
     if (outcome === 'Pending Outcome' && source === 'none') confidence = 'low';
 
     return {
@@ -421,6 +494,9 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
   }
   if (outcome_vs_step_mismatch > 0) {
     spam_hints.push('Some leads are step-completed but missing delivery/bounce events.');
+  }
+  if (unmatched_events_count > 0) {
+    spam_hints.push(`Tracking correlation warning: ${unmatched_events_count} event(s) could not be mapped to a campaign lead.`);
   }
   if (!open_rate_visible) {
     spam_hints.push('Open tracking is currently unconfirmed for this campaign (no pixel/webhook open events yet).');
@@ -457,6 +533,20 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
     open_confidence,
     metrics_data_freshness: new Date().toISOString(),
     reply_rate: sent > 0 ? Number(((replied / sent) * 100).toFixed(2)) : 0,
+    inferred_replied_count: [...inferredOnlyRepliedSet].filter((id) => sentSet.has(id)).length,
+    response_provenance: {
+      replied_source: inferredOnlyRepliedSet.size > 0 ? 'hybrid_fallback' : 'tracking_only',
+      fallback_enabled: true,
+    },
+    diagnostics: {
+      unmatched_events_count,
+      unmatched_sample: unmatchedEventRows.slice(0, 5).map((row: any) => ({
+        event_type: String(row?.event_type ?? ''),
+        provider_message_id: String(row?.provider_message_id ?? ''),
+        source: String((row?.raw_payload as any)?.source ?? 'provider_webhook'),
+        correlation_confidence: String((row?.raw_payload as any)?.correlation_confidence ?? 'low'),
+      })),
+    },
     outcome_rows,
     spam_hints,
   };

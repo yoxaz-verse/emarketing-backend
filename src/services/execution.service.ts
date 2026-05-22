@@ -19,6 +19,7 @@ const FORBIDDEN_SIGNOFF_MARKERS = ['regards, jacob', 'regards, joshua', 'joshua'
 
 type EmptyClaimReason =
   | 'schedule_blocked'
+  | 'campaign_minute_throttled'
   | 'no_queued_leads'
   | 'all_processing'
   | 'all_paused'
@@ -40,6 +41,15 @@ export type ClaimExecutionResult = {
     schedule_allowed: boolean;
     schedule_reason: string | null;
     claim_path?: 'rpc' | 'fallback';
+    campaign_minute_gate?: {
+      blocked: boolean;
+      current_minute_window_start: string;
+      sent_count_in_window: number;
+    };
+    rotation_next_inbox_id?: string | null;
+    rotation_used_inbox_id?: string | null;
+    rotation_fallback_used?: boolean;
+    rotation_block_reason?: string | null;
   };
 };
 
@@ -107,6 +117,33 @@ function isWithinRunnerWindow(now: Date = new Date()): boolean {
 
   return totalMinutes >= RUNNER_WINDOW_START_HOUR * 60
     && totalMinutes < RUNNER_WINDOW_END_HOUR * 60;
+}
+
+function currentMinuteWindowStartUtc(now: Date = new Date()): string {
+  const floored = new Date(now);
+  floored.setUTCSeconds(0, 0);
+  return floored.toISOString();
+}
+
+async function getCampaignMinuteGate(campaignId: string): Promise<{
+  blocked: boolean;
+  minuteWindowStart: string;
+  sentCountInWindow: number;
+}> {
+  const minuteWindowStart = currentMinuteWindowStartUtc();
+  const { count, error } = await supabase
+    .from('email_logs')
+    .select('id', { count: 'exact', head: true })
+    .eq('campaign_id', campaignId)
+    .eq('status', 'sent')
+    .gte('sent_at', minuteWindowStart);
+  if (error) throw error;
+  const sentCountInWindow = Number(count ?? 0);
+  return {
+    blocked: sentCountInWindow >= 1,
+    minuteWindowStart,
+    sentCountInWindow,
+  };
 }
 
 export async function getCampaignExecutionWakeState(lastSeenVersion?: string | null) {
@@ -273,6 +310,7 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
     ? String((claimHealth.error as any)?.message ?? 'unknown_error')
     : null;
   const allocator = await allocateCampaignSender({ campaignId });
+  const minuteGate = await getCampaignMinuteGate(campaignId);
   const next_actions: string[] = [];
   if (!scheduleGate.allowed) {
     next_actions.push(`Wait for sending window: ${scheduleGate.reason ?? 'outside_allowed_schedule'}`);
@@ -288,6 +326,9 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
   }
   if (!allocator.selected) {
     next_actions.push(`Allocator blocked sending: ${allocator.reason || 'no_eligible_sender'}.`);
+  }
+  if (minuteGate.blocked) {
+    next_actions.push('Campaign minute throttle active: one send already done in current UTC minute window.');
   }
   if (next_actions.length === 0) {
     next_actions.push('No immediate blockers detected; run batch execution and inspect per-lead outcomes.');
@@ -334,6 +375,10 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
       selected_inbox_id: allocator.selected?.inbox_id ?? null,
       selected_domain_id: allocator.selected?.sending_domain_id ?? null,
       last_allocator_reason: allocator.reason,
+      rotation_next_inbox_id: allocator.rotation_next_inbox_id,
+      rotation_used_inbox_id: allocator.rotation_used_inbox_id,
+      rotation_fallback_used: allocator.rotation_fallback_used,
+      rotation_block_reason: allocator.rotation_block_reason,
       schedule_allowed: allocator.schedule_allowed,
       schedule_reason: allocator.schedule_reason,
       candidate_capacities: allocator.candidates.map((candidate) => ({
@@ -344,6 +389,11 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
         rem_daily_domain: candidate.rem_daily_domain,
         rem_hour_domain: candidate.rem_hour_domain,
       })),
+    },
+    campaign_minute_gate: {
+      blocked: minuteGate.blocked,
+      current_minute_window_start: minuteGate.minuteWindowStart,
+      sent_count_in_window: minuteGate.sentCountInWindow,
     },
     next_actions,
   };
@@ -517,9 +567,10 @@ export async function getNextCampaignExecutions(
   campaignId: string,
   batchSize: number
 ): Promise<ClaimExecutionResult> {
-  const normalizedBatchSize = Number.isFinite(Number(batchSize))
+  const requestedBatchSize = Number.isFinite(Number(batchSize))
     ? Math.max(0, Math.floor(Number(batchSize)))
     : 10;
+  const normalizedBatchSize = Math.min(1, requestedBatchSize);
 
   const migratedPendingCount = await migratePendingLeadsToQueued(campaignId);
   if (migratedPendingCount > 0) {
@@ -531,6 +582,7 @@ export async function getNextCampaignExecutions(
 
   const config = await getSendingLimitsConfig();
   const scheduleGate = isNowWithinSendingSchedule(config);
+  const minuteGate = await getCampaignMinuteGate(campaignId);
   if (!scheduleGate.allowed) {
     console.log('[CLAIM EXECUTIONS SKIPPED: SCHEDULE]', {
       campaign_id: campaignId,
@@ -551,6 +603,15 @@ export async function getNextCampaignExecutions(
         reason: 'schedule_blocked',
         schedule_allowed: false,
         schedule_reason: scheduleGate.reason ?? 'schedule_not_allowed',
+        campaign_minute_gate: {
+          blocked: minuteGate.blocked,
+          current_minute_window_start: minuteGate.minuteWindowStart,
+          sent_count_in_window: minuteGate.sentCountInWindow,
+        },
+        rotation_next_inbox_id: null,
+        rotation_used_inbox_id: null,
+        rotation_fallback_used: false,
+        rotation_block_reason: null,
       },
     };
   }
@@ -566,6 +627,36 @@ export async function getNextCampaignExecutions(
     countCampaignLeadsByStatus(campaignId, 'paused'),
     countCampaignLeadsByStatus(campaignId, 'pending'),
   ]);
+  const allocatorPreview = await allocateCampaignSender({ campaignId });
+
+  if (minuteGate.blocked) {
+    return {
+      executions: [],
+      meta: {
+        campaign_id: campaignId,
+        batch_size: normalizedBatchSize,
+        queued_count: queuedCount,
+        processing_count: processingCount,
+        paused_count: pausedCount,
+        pending_count: pendingCount,
+        stale_requeued_count: staleRecovery.requeued,
+        claimed_count: 0,
+        reason: 'campaign_minute_throttled',
+        schedule_allowed: true,
+        schedule_reason: null,
+        claim_path: 'rpc',
+        campaign_minute_gate: {
+          blocked: true,
+          current_minute_window_start: minuteGate.minuteWindowStart,
+          sent_count_in_window: minuteGate.sentCountInWindow,
+        },
+        rotation_next_inbox_id: allocatorPreview.rotation_next_inbox_id,
+        rotation_used_inbox_id: allocatorPreview.rotation_used_inbox_id,
+        rotation_fallback_used: allocatorPreview.rotation_fallback_used,
+        rotation_block_reason: allocatorPreview.rotation_block_reason,
+      },
+    };
+  }
 
   const { data, error } = await supabase.rpc(
     'claim_campaign_executions',
@@ -631,6 +722,15 @@ export async function getNextCampaignExecutions(
             schedule_allowed: true,
             schedule_reason: null,
             claim_path: 'rpc',
+            campaign_minute_gate: {
+              blocked: false,
+              current_minute_window_start: minuteGate.minuteWindowStart,
+              sent_count_in_window: minuteGate.sentCountInWindow,
+            },
+            rotation_next_inbox_id: allocatorPreview.rotation_next_inbox_id,
+            rotation_used_inbox_id: allocatorPreview.rotation_used_inbox_id,
+            rotation_fallback_used: allocatorPreview.rotation_fallback_used,
+            rotation_block_reason: allocatorPreview.rotation_block_reason,
           },
         };
       }
@@ -689,6 +789,15 @@ export async function getNextCampaignExecutions(
       schedule_allowed: true,
       schedule_reason: null,
       claim_path: claimPath,
+      campaign_minute_gate: {
+        blocked: false,
+        current_minute_window_start: minuteGate.minuteWindowStart,
+        sent_count_in_window: minuteGate.sentCountInWindow,
+      },
+      rotation_next_inbox_id: allocatorPreview.rotation_next_inbox_id,
+      rotation_used_inbox_id: allocatorPreview.rotation_used_inbox_id,
+      rotation_fallback_used: allocatorPreview.rotation_fallback_used,
+      rotation_block_reason: allocatorPreview.rotation_block_reason,
     },
   };
 }
@@ -882,6 +991,10 @@ export async function sendCampaignEmail(campaignLeadId: string) {
         campaign_id: (campaignLead as any).campaign_id ?? null,
         blocked_by_reason: allocator.blocked_by_reason,
         allocator_reason: allocator.reason,
+        rotation_next_inbox_id: allocator.rotation_next_inbox_id,
+        rotation_used_inbox_id: allocator.rotation_used_inbox_id,
+        rotation_fallback_used: allocator.rotation_fallback_used,
+        rotation_block_reason: allocator.rotation_block_reason,
       },
     });
 
@@ -1033,6 +1146,10 @@ export async function sendCampaignEmail(campaignLeadId: string) {
       to: campaignLead.leads.email,
       sender_display_name: effectiveSenderDisplayName,
       personal_signoff_warning: personalSignoffWarning,
+      rotation_next_inbox_id: allocator.rotation_next_inbox_id,
+      rotation_used_inbox_id: allocator.rotation_used_inbox_id,
+      rotation_fallback_used: allocator.rotation_fallback_used,
+      rotation_block_reason: allocator.rotation_block_reason,
     },
   });
 
