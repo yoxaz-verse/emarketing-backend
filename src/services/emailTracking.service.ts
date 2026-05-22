@@ -251,6 +251,8 @@ export async function ingestProviderEmailEvent(input: Record<string, unknown>) {
       message_id: normalized.provider_message_id,
       received_at: normalized.event_at,
       leadId: correlation.lead_id ? String(correlation.lead_id) : undefined,
+      source: 'provider_webhook',
+      skipTrackingEvent: true,
     });
 
     return {

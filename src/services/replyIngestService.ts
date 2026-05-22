@@ -8,6 +8,8 @@ type InboundReplyPayload = {
   message_id?: string;
   received_at?: string;
   leadId?: string;
+  source?: 'imap_poll' | 'manual_api' | 'provider_webhook' | 'unknown';
+  skipTrackingEvent?: boolean;
 };
 
 function normalizeMessageId(value: unknown): string {
@@ -42,11 +44,12 @@ export async function ingestInboundReply(input: InboundReplyPayload) {
   let campaignLeadId: string | null = null;
   let campaignId: string | null = null;
   let resolvedInboxId: string | null = null;
+  let resolvedToEmail: string | null = null;
 
   if (messageId) {
     const { data: mailLog } = await supabase
       .from('email_logs')
-      .select('campaign_lead_id,campaign_id,inbox_id,lead_id')
+      .select('campaign_lead_id,campaign_id,inbox_id,lead_id,to_email')
       .eq('provider_message_id', messageId)
       .order('sent_at', { ascending: false })
       .limit(1)
@@ -55,6 +58,7 @@ export async function ingestInboundReply(input: InboundReplyPayload) {
     campaignLeadId = String((mailLog as any)?.campaign_lead_id ?? '') || null;
     campaignId = String((mailLog as any)?.campaign_id ?? '') || null;
     resolvedInboxId = String((mailLog as any)?.inbox_id ?? '') || null;
+    resolvedToEmail = String((mailLog as any)?.to_email ?? '').trim().toLowerCase() || null;
 
     if ((mailLog as any)?.lead_id) {
       const derivedLeadId = String((mailLog as any).lead_id);
@@ -154,6 +158,55 @@ export async function ingestInboundReply(input: InboundReplyPayload) {
       .update({ status: 'replied' })
       .eq('lead_id', finalLeadId)
       .in('status', ['queued', 'processing', 'paused', 'completed']);
+
+    // Try to resolve campaign context for tracking when message-id is missing.
+    const { data: latestCampaignLead } = await supabase
+      .from('campaign_leads')
+      .select('id,campaign_id,assigned_inbox_id')
+      .eq('lead_id', finalLeadId)
+      .in('status', ['replied', 'completed', 'processing', 'paused', 'queued'])
+      .order('processing_at', { ascending: false })
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (latestCampaignLead) {
+      campaignLeadId = String((latestCampaignLead as any)?.id ?? '') || campaignLeadId;
+      campaignId = String((latestCampaignLead as any)?.campaign_id ?? '') || campaignId;
+      resolvedInboxId = String((latestCampaignLead as any)?.assigned_inbox_id ?? '') || resolvedInboxId;
+    }
+  }
+
+  // Ensure strict reply-rate KPI can move even when reply is captured via IMAP/manual paths.
+  if (!input.skipTrackingEvent) {
+    const trackingDedupeKey = createHash('sha256')
+      .update(`reply_ingest_tracking|${dedupeKey}|${campaignLeadId ?? ''}|${campaignId ?? ''}`)
+      .digest('hex');
+    const { error: trackingError } = await supabase
+      .from('email_tracking_events')
+      .insert({
+        dedupe_key: trackingDedupeKey,
+        event_type: 'reply',
+        provider_name: 'imap',
+        provider_message_id: messageId || null,
+        campaign_id: campaignId,
+        campaign_lead_id: campaignLeadId,
+        lead_id: finalLeadId,
+        inbox_id: resolvedInboxId,
+        from_email: fromEmail || null,
+        to_email: resolvedToEmail,
+        event_at: receivedAtIso,
+        matched: Boolean(campaignLeadId || finalLeadId),
+        raw_payload: {
+          source: input.source ?? 'unknown',
+          ingested_via: 'reply_ingest_service',
+          dedupe_key: dedupeKey,
+          correlation_confidence: campaignLeadId ? 'high' : 'medium',
+        },
+      });
+    if (trackingError && String((trackingError as any)?.code ?? '') !== '23505') {
+      throw trackingError;
+    }
   }
 
   await supabase.from('system_events').insert({
@@ -179,5 +232,6 @@ export async function handleReply(params: { leadId?: string; inboxId?: string; m
   return ingestInboundReply({
     leadId: params.leadId,
     message: params.message,
+    source: 'manual_api',
   });
 }

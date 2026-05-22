@@ -3,6 +3,7 @@
 
 -- 1) email_logs columns used by correlation and analytics
 ALTER TABLE public.email_logs
+  ADD COLUMN IF NOT EXISTS provider_name text,
   ADD COLUMN IF NOT EXISTS provider_message_id text,
   ADD COLUMN IF NOT EXISTS campaign_id uuid,
   ADD COLUMN IF NOT EXISTS campaign_lead_id uuid,
@@ -105,4 +106,3 @@ CREATE INDEX IF NOT EXISTS idx_email_tracking_events_event_type ON public.email_
 UPDATE public.leads
 SET interest_status = 'unreviewed'
 WHERE interest_status IS NULL;
-

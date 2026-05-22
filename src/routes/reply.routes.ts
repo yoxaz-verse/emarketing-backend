@@ -15,6 +15,7 @@ router.post('/', async (req, res) => {
       message_id: req.body?.message_id,
       received_at: req.body?.received_at,
       leadId: req.body?.leadId,
+      source: 'manual_api',
     });
     res.json(result);
   });

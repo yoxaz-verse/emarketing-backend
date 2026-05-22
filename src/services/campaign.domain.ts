@@ -11,6 +11,29 @@ function createHttpError(message: string, statusCode: number) {
   return error;
 }
 
+function mapDetachConflictError(err: any): never {
+  const code = String(err?.code ?? '');
+  const message = String(err?.message ?? '');
+  const details = String(err?.details ?? '');
+  const hint = String(err?.hint ?? '');
+  const combined = `${message} ${details} ${hint}`.toLowerCase();
+  const isForeignKeyConflict =
+    code === '23503' ||
+    combined.includes('foreign key') ||
+    combined.includes('email_tracking_events_campaign_lead_id_fkey') ||
+    combined.includes('email_logs_campaign_lead_id_fkey');
+
+  if (isForeignKeyConflict) {
+    const conflict = createHttpError(
+      'Cannot remove campaign lead because related tracking records are still linked. Apply FK migration (ON DELETE SET NULL) and retry.',
+      409
+    ) as Error & { code?: string };
+    conflict.code = 'CAMPAIGN_LEAD_TRACKING_CONFLICT';
+    throw conflict;
+  }
+  throw err;
+}
+
 async function assertCampaignIsMutableForLeadMutation(campaignId: string) {
   const { data: campaign, error } = await supabase
     .from('campaigns')
@@ -228,7 +251,7 @@ export async function detachLeadsFromCampaign(
     .in('lead_id', toDetachIds);
 
   if (detachError) {
-    throw detachError;
+    mapDetachConflictError(detachError);
   }
 
   const { data: stillAttachedRows, error: stillAttachedError } = await supabase

@@ -338,6 +338,7 @@ router.post('/:id/leads/detach', async (req, res) => {
     console.error('[DETACH LEADS ERROR]', err);
     return res.status(resolveStatusCode(err)).json({
       error: err.message ?? 'Failed to detach leads',
+      code: String(err?.code ?? ''),
     });
   }
 });
@@ -380,6 +381,7 @@ router.post('/:id/leads/detach/', async (req, res) => {
     console.error('[DETACH LEADS ERROR]', err);
     return res.status(resolveStatusCode(err)).json({
       error: err.message ?? 'Failed to detach leads',
+      code: String(err?.code ?? ''),
     });
   }
 });

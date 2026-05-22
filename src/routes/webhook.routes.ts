@@ -38,6 +38,7 @@ router.post('/webhooks/reply', async (req, res) => {
       message_id: req.body?.message_id,
       received_at: req.body?.received_at,
       leadId: req.body?.leadId,
+      source: 'provider_webhook',
     });
     res.json(result);
   } catch (err: any) {

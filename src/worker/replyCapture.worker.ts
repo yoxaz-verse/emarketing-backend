@@ -211,6 +211,7 @@ async function pollInbox(target: InboxPollTarget) {
           message_id: messageId ?? undefined,
           message: text || undefined,
           received_at: msg.internalDate ? new Date(msg.internalDate).toISOString() : new Date().toISOString(),
+          source: 'imap_poll',
         });
         if (!result?.deduped) {
           state.ingested += 1;
