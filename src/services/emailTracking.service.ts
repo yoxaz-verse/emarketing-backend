@@ -352,24 +352,152 @@ export async function ingestPixelOpenEvent(token: string) {
 }
 
 export async function getCampaignReplyOpenAnalytics(campaignId: string) {
-  const [{ data: campaignLeads }, { data: emailLogRows }, { data: eventRows }] = await Promise.all([
+  const [{ data: campaignLeads }, { data: emailLogRows }] = await Promise.all([
     supabase
       .from('campaign_leads')
       .select('id,status,status_reason,lead_id,leads:lead_id(email)')
       .eq('campaign_id', campaignId),
     supabase
       .from('email_logs')
-      .select('campaign_lead_id,provider_message_id,sent_at')
+      .select('campaign_lead_id,campaign_id,lead_id,inbox_id,to_email,provider_message_id,sent_at')
       .eq('campaign_id', campaignId)
-      .eq('status', 'sent'),
-    supabase
-      .from('email_tracking_events')
-      .select('campaign_lead_id,event_type,event_at,provider_message_id,raw_payload,matched,campaign_id')
-      .eq('campaign_id', campaignId)
+      .eq('status', 'sent')
   ]);
 
+  const sentRows = (emailLogRows ?? []) as any[];
+  const campaignMessageIds = [...new Set(
+    sentRows
+      .map((row: any) => String(row?.provider_message_id ?? '').trim().toLowerCase())
+      .filter(Boolean)
+  )];
+  const campaignRecipientEmails = [...new Set(
+    sentRows
+      .map((row: any) => cleanEmail(row?.to_email))
+      .filter(Boolean)
+  )] as string[];
+
+  const [{ data: scopedEventRows }, { data: orphanEventRows }] = await Promise.all([
+    supabase
+      .from('email_tracking_events')
+      .select('id,campaign_lead_id,event_type,event_at,provider_message_id,raw_payload,matched,campaign_id,to_email,lead_id,inbox_id')
+      .eq('campaign_id', campaignId),
+    supabase
+      .from('email_tracking_events')
+      .select('id,campaign_lead_id,event_type,event_at,provider_message_id,raw_payload,matched,campaign_id,to_email,lead_id,inbox_id')
+      .is('campaign_id', null)
+      .order('event_at', { ascending: false })
+      .limit(2000)
+  ]);
+
+  const sentByMessageId = new Map<string, any>();
+  for (const row of sentRows) {
+    const messageId = String(row?.provider_message_id ?? '').trim().toLowerCase();
+    if (messageId) sentByMessageId.set(messageId, row);
+  }
+  const sentByRecipient = new Map<string, any[]>();
+  for (const row of sentRows) {
+    const toEmail = cleanEmail(row?.to_email);
+    if (!toEmail) continue;
+    const list = sentByRecipient.get(toEmail) ?? [];
+    list.push(row);
+    sentByRecipient.set(toEmail, list);
+  }
+  for (const list of sentByRecipient.values()) {
+    list.sort((a: any, b: any) => new Date(String(b?.sent_at ?? '')).getTime() - new Date(String(a?.sent_at ?? '')).getTime());
+  }
+
+  const mappedOrphanRows: any[] = [];
+  const orphanBackfillUpdates: Array<{ id: string; campaign_id: string; campaign_lead_id: string; lead_id: string | null; inbox_id: string | null; to_email: string | null; matched: boolean; raw_payload: any }> = [];
+
+  for (const rawRow of (orphanEventRows ?? []) as any[]) {
+    const row = { ...rawRow };
+    const messageId = String(row?.provider_message_id ?? '').trim().toLowerCase();
+    const eventToEmail = cleanEmail(row?.to_email);
+    const shouldConsiderByMessageId = Boolean(messageId) && campaignMessageIds.includes(messageId);
+    const shouldConsiderByRecipient = Boolean(eventToEmail) && campaignRecipientEmails.includes(eventToEmail as string);
+    if (!shouldConsiderByMessageId && !shouldConsiderByRecipient) continue;
+
+    let matchedSent: any | null = null;
+    let matchedBy: 'message_id' | 'recipient_window' | null = null;
+    let confidence: 'high' | 'medium' = 'medium';
+
+    if (shouldConsiderByMessageId && messageId) {
+      matchedSent = sentByMessageId.get(messageId) ?? null;
+      if (matchedSent) {
+        matchedBy = 'message_id';
+        confidence = 'high';
+      }
+    }
+
+    if (!matchedSent && shouldConsiderByRecipient && eventToEmail) {
+      const candidates = sentByRecipient.get(eventToEmail as string) ?? [];
+      const eventAtMs = new Date(String(row?.event_at ?? '')).getTime();
+      for (const candidate of candidates) {
+        const sentMs = new Date(String(candidate?.sent_at ?? '')).getTime();
+        if (!Number.isFinite(eventAtMs) || !Number.isFinite(sentMs)) continue;
+        const deltaMs = eventAtMs - sentMs;
+        if (deltaMs >= -(48 * 60 * 60 * 1000) && deltaMs <= (24 * 60 * 60 * 1000)) {
+          matchedSent = candidate;
+          matchedBy = 'recipient_window';
+          confidence = 'medium';
+          break;
+        }
+      }
+    }
+
+    if (!matchedSent) continue;
+
+    row.campaign_id = matchedSent.campaign_id ?? campaignId;
+    row.campaign_lead_id = matchedSent.campaign_lead_id ?? row.campaign_lead_id ?? null;
+    row.lead_id = matchedSent.lead_id ?? row.lead_id ?? null;
+    row.inbox_id = matchedSent.inbox_id ?? row.inbox_id ?? null;
+    row.to_email = cleanEmail(row.to_email) ?? cleanEmail(matchedSent.to_email);
+    row.matched = Boolean(row.campaign_lead_id || row.lead_id);
+    row.raw_payload = {
+      ...(row.raw_payload ?? {}),
+      analytics_backfill: true,
+      matched_by: matchedBy,
+      correlation_confidence: confidence,
+    };
+    mappedOrphanRows.push(row);
+
+    if (row.campaign_lead_id) {
+      orphanBackfillUpdates.push({
+        id: String(row.id),
+        campaign_id: String(row.campaign_id),
+        campaign_lead_id: String(row.campaign_lead_id),
+        lead_id: row.lead_id ? String(row.lead_id) : null,
+        inbox_id: row.inbox_id ? String(row.inbox_id) : null,
+        to_email: row.to_email ?? null,
+        matched: Boolean(row.matched),
+        raw_payload: row.raw_payload ?? {},
+      });
+    }
+  }
+
+  if (orphanBackfillUpdates.length > 0) {
+    await Promise.all(
+      orphanBackfillUpdates.map((update) =>
+        supabase
+          .from('email_tracking_events')
+          .update({
+            campaign_id: update.campaign_id,
+            campaign_lead_id: update.campaign_lead_id,
+            lead_id: update.lead_id,
+            inbox_id: update.inbox_id,
+            to_email: update.to_email,
+            matched: update.matched,
+            raw_payload: update.raw_payload,
+          })
+          .eq('id', update.id)
+      )
+    );
+  }
+
+  const eventRows = [...((scopedEventRows ?? []) as any[]), ...mappedOrphanRows];
+
   const total = (campaignLeads ?? []).length;
-  const sentSet = new Set((emailLogRows ?? []).map((r: any) => String(r.campaign_lead_id ?? '')).filter(Boolean));
+  const sentSet = new Set(sentRows.map((r: any) => String(r.campaign_lead_id ?? '')).filter(Boolean));
   const deliveredSet = new Set<string>();
   const openedSet = new Set<string>();
   const repliedSet = new Set<string>();
@@ -399,7 +527,6 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
       .map((row: any) => String(row?.id ?? ''))
       .filter(Boolean)
   );
-  const hybridRepliedSet = new Set<string>([...repliedSet, ...inferredRepliedSet]);
   const inferredOnlyRepliedSet = new Set<string>(
     [...inferredRepliedSet].filter((id) => !repliedSet.has(id))
   );
@@ -414,8 +541,8 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
   const deliveryFailedSet = new Set<string>([...hardBounceSet, ...failedDeliveryByStatusSet]);
   const sent = sentSet.size;
   const delivered = [...deliveredSet].filter((id) => sentSet.has(id)).length;
-  const opened = openedSet.size;
-  const replied = [...hybridRepliedSet].filter((id) => sentSet.has(id)).length;
+  const opened = [...openedSet].filter((id) => sentSet.has(id)).length;
+  const replied = [...repliedSet].filter((id) => sentSet.has(id)).length;
   const bounced_hard = hardBounceSet.size;
   const bounced_soft = softBounceSet.size;
   const bounced_total = bouncedSet.size;
@@ -429,7 +556,7 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
     return matched === false || !hasCampaignLead;
   });
   const unmatched_events_count = unmatchedEventRows.length;
-  const confirmedOpenEvents = (eventRows ?? []).filter((row: any) => {
+  const confirmedOpenEvents = eventRows.filter((row: any) => {
     const type = String(row?.event_type ?? '').toLowerCase();
     if (type !== 'open') return false;
     const source = String((row as any)?.raw_payload?.source ?? '');
@@ -504,7 +631,7 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
 
   const lowConfidenceCount = outcome_rows.filter((row: any) => row.confidence === 'low').length;
   const trackedOutcomeCount = outcome_rows.filter((row: any) => String(row.outcome ?? '') !== 'Not Sent').length;
-  const open_confidence: 'high' | 'medium' | 'low' = trackedOutcomeCount === 0
+  const open_confidence: 'high' | 'medium' | 'low' = trackedOutcomeCount === 0 || sent === 0
     ? 'low'
     : !open_rate_visible
     ? 'low'
@@ -535,8 +662,8 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
     reply_rate: sent > 0 ? Number(((replied / sent) * 100).toFixed(2)) : 0,
     inferred_replied_count: [...inferredOnlyRepliedSet].filter((id) => sentSet.has(id)).length,
     response_provenance: {
-      replied_source: inferredOnlyRepliedSet.size > 0 ? 'hybrid_fallback' : 'tracking_only',
-      fallback_enabled: true,
+      replied_source: 'tracking_only',
+      fallback_enabled: false,
     },
     diagnostics: {
       unmatched_events_count,
