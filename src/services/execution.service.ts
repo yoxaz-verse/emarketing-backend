@@ -5,6 +5,7 @@ import { updateRow } from './crudService';
 import { createSmtpTransport } from './email/smtpTransport';
 import { renderPlainTextAsHtml } from './email/emailBodyRender';
 import { makeClickToken, makePixelToken } from './emailTracking.service.js';
+import { ingestInboundReply } from './replyIngestService.js';
 import {
   getSendingLimitsConfig,
   isNowWithinSendingSchedule,
@@ -101,6 +102,33 @@ export type CampaignBatchRunSummary = {
   }>;
   fatal_error: string | null;
 };
+
+function assertClaimRowsConformance(
+  claimRows: any[],
+  maxRows: number,
+  context: { campaignId: string; claimPath: 'rpc' | 'fallback' }
+): void {
+  const rows = Array.isArray(claimRows) ? claimRows : [];
+  if (rows.length > maxRows) {
+    const migrationError: Error & { statusCode?: number } = new Error(
+      `Claim path "${context.claimPath}" returned ${rows.length} rows (expected <= ${maxRows}) for campaign ${context.campaignId}. Fail-closed to prevent burst sends.`
+    );
+    migrationError.statusCode = 503;
+    throw migrationError;
+  }
+
+  const ids = rows
+    .map((row: any) => String(row?.campaign_lead_id ?? row?.id ?? '').trim())
+    .filter(Boolean);
+  const uniqueIds = new Set(ids);
+  if (uniqueIds.size !== ids.length) {
+    const migrationError: Error & { statusCode?: number } = new Error(
+      `Claim path "${context.claimPath}" returned duplicate campaign lead ids for campaign ${context.campaignId}. Fail-closed to prevent duplicate send attempts.`
+    );
+    migrationError.statusCode = 503;
+    throw migrationError;
+  }
+}
 
 async function claimCampaignExecutionsViaFallback(
   campaignId: string,
@@ -402,6 +430,28 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
     : null;
   const allocator = await allocateCampaignSender({ campaignId });
   const minuteGate = await getCampaignMinuteGate(campaignId);
+  const burstWindowStartIso = new Date(Date.now() - (24 * 60 * 60 * 1000)).toISOString();
+  const { data: sentRowsLast24h, error: sentRowsLast24hError } = await supabase
+    .from('email_logs')
+    .select('sent_at')
+    .eq('campaign_id', campaignId)
+    .eq('status', 'sent')
+    .gte('sent_at', burstWindowStartIso);
+  if (sentRowsLast24hError) throw sentRowsLast24hError;
+  const minuteBuckets = new Map<string, number>();
+  for (const row of sentRowsLast24h ?? []) {
+    const sentAtRaw = String((row as any)?.sent_at ?? '').trim();
+    if (!sentAtRaw) continue;
+    const sentAt = new Date(sentAtRaw);
+    if (Number.isNaN(sentAt.getTime())) continue;
+    sentAt.setUTCSeconds(0, 0);
+    const bucket = sentAt.toISOString();
+    minuteBuckets.set(bucket, Number(minuteBuckets.get(bucket) ?? 0) + 1);
+  }
+  const burstViolations = Array.from(minuteBuckets.entries())
+    .filter(([, count]) => count > 1)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([minute_start_utc, sent_count]) => ({ minute_start_utc, sent_count }));
   const { count: minuteThrottleEventsCount, error: minuteThrottleEventsError } = await supabase
     .from('system_events')
     .select('id', { count: 'exact', head: true })
@@ -503,6 +553,12 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
       throttle_hit_count: Number(minuteThrottleEventsCount ?? 0),
       last_throttle_at: String((lastMinuteThrottleEvent as any)?.created_at ?? '') || null,
       active_runner_path: 'backend_run_batch_primary',
+    },
+    no_burst_proof: {
+      evaluated_window_start: burstWindowStartIso,
+      evaluated_window_end: new Date().toISOString(),
+      burst_violation_count_last_24h: burstViolations.length,
+      burst_violations_last_24h: burstViolations,
     },
     next_actions,
   };
@@ -777,6 +833,10 @@ export async function getNextCampaignExecutions(
 
   let claimPath: 'rpc' | 'fallback' = 'rpc';
   let executions = data ?? [];
+  assertClaimRowsConformance(executions, normalizedBatchSize, {
+    campaignId,
+    claimPath: 'rpc',
+  });
 
   if (error) {
     const errorCode = String((error as any)?.code ?? '');
@@ -793,6 +853,10 @@ export async function getNextCampaignExecutions(
     if (shouldTryFallback) {
       const fallback = await claimCampaignExecutionsViaFallback(campaignId, normalizedBatchSize);
       if (!fallback.error) {
+        assertClaimRowsConformance(fallback.data ?? [], normalizedBatchSize, {
+          campaignId,
+          claimPath: 'fallback',
+        });
         claimPath = 'fallback';
         executions = fallback.data ?? [];
         console.warn('[CLAIM EXECUTIONS FALLBACK USED]', {
@@ -811,6 +875,11 @@ export async function getNextCampaignExecutions(
           fallback_error_code: String((fallback.error as any)?.code ?? ''),
           fallback_error_message: String((fallback.error as any)?.message ?? ''),
         });
+        const migrationError: Error & { statusCode?: number } = new Error(
+          'Claim fallback path unavailable or non-conforming. Apply claim fallback migration and restart backend (fail-closed to enforce 1 email/minute).'
+        );
+        migrationError.statusCode = 503;
+        throw migrationError;
       }
     }
 
@@ -1733,13 +1802,15 @@ export async function maybeCompleteCampaign(campaignId: string) {
   }
   
   export async function handleReply(payload:any) {
-    const email = payload.from;
-  
-    await supabase
-      .from('campaign_leads')
-      .update({ status:'replied' })
-      .eq('lead_email',email)
-      .in('status',['queued','processing']);
+    await ingestInboundReply({
+      from_email: payload?.from ?? payload?.from_email,
+      message: payload?.message,
+      inbox_email: payload?.inbox_email,
+      message_id: payload?.message_id,
+      received_at: payload?.received_at,
+      leadId: payload?.leadId,
+      source: 'manual_api',
+    });
   }
   
 

@@ -19,41 +19,52 @@ export async function getOperatorReplies(
   const { data: trackingRows, error: trackingErr } = await trackingQuery;
   if (trackingErr) throw trackingErr;
 
-  const leadIds = Array.from(new Set(
-    (trackingRows ?? [])
-      .map((row: any) => String(row?.lead_id ?? '').trim())
-      .filter(Boolean)
-  ));
-  if (leadIds.length === 0) return [];
+  let campaignLeadQuery: any = supabase
+    .from('campaign_leads')
+    .select(`
+      id,
+      campaign_id,
+      lead_id,
+      assigned_inbox_id,
+      status,
+      leads:lead_id (
+        id,
+        email,
+        first_name,
+        company,
+        country,
+        reply_message,
+        replied_at,
+        interest_status,
+        interest_note,
+        interest_reviewed_at,
+        interest_reviewed_by,
+        operator_id
+      )
+    `)
+    .eq('status', 'replied')
+    .order('created_at', { ascending: false })
+    .limit(1000);
 
-  let leadsQuery: any = supabase
-    .from('leads')
-    .select('id,email,first_name,company,country,reply_message,interest_status,interest_note,interest_reviewed_at,interest_reviewed_by,operator_id')
-    .in('id', leadIds);
-
-  if (operatorId) {
-    leadsQuery = leadsQuery.eq('operator_id', operatorId);
+  if (options?.campaignId) {
+    campaignLeadQuery = campaignLeadQuery.eq('campaign_id', String(options.campaignId));
   }
-  if (options?.reviewStatus === 'unreviewed') {
-    leadsQuery = leadsQuery.eq('interest_status', 'unreviewed');
-  } else if (options?.reviewStatus === 'reviewed') {
-    leadsQuery = leadsQuery.in('interest_status', ['interested', 'not_interested']);
-  }
 
-  const { data: leadRows, error: leadErr } = await leadsQuery;
-  if (leadErr) throw leadErr;
-  const leadById = new Map(
-    (leadRows ?? []).map((row: any) => [String(row.id), row])
-  );
+  const { data: repliedCampaignLeads, error: repliedCampaignLeadsErr } = await campaignLeadQuery;
+  if (repliedCampaignLeadsErr) throw repliedCampaignLeadsErr;
 
   const campaignIds = Array.from(new Set(
-    (trackingRows ?? [])
-      .map((row: any) => String(row?.campaign_id ?? '').trim())
+    [
+      ...(trackingRows ?? []).map((row: any) => String(row?.campaign_id ?? '').trim()),
+      ...(repliedCampaignLeads ?? []).map((row: any) => String((row as any)?.campaign_id ?? '').trim()),
+    ]
       .filter(Boolean)
   ));
   const inboxIds = Array.from(new Set(
-    (trackingRows ?? [])
-      .map((row: any) => String(row?.inbox_id ?? '').trim())
+    [
+      ...(trackingRows ?? []).map((row: any) => String(row?.inbox_id ?? '').trim()),
+      ...(repliedCampaignLeads ?? []).map((row: any) => String((row as any)?.assigned_inbox_id ?? '').trim()),
+    ]
       .filter(Boolean)
   ));
 
@@ -85,10 +96,15 @@ export async function getOperatorReplies(
     }
   }
 
-  const rows = (trackingRows ?? [])
+  const strictRows = (trackingRows ?? [])
     .map((trackingRow: any) => {
-      const leadId = String(trackingRow?.lead_id ?? '').trim();
-      const lead = leadById.get(leadId);
+      const campaignLeadId = String(trackingRow?.campaign_lead_id ?? '').trim();
+      const trackingLeadId = String(trackingRow?.lead_id ?? '').trim();
+      const campaignLead = (repliedCampaignLeads ?? []).find((row: any) =>
+        String(row?.id ?? '') === campaignLeadId
+        || (trackingLeadId && String(row?.lead_id ?? '') === trackingLeadId)
+      );
+      const lead = campaignLead?.leads;
       if (!lead) return null;
 
       const campaignId = String(trackingRow?.campaign_id ?? '').trim();
@@ -127,11 +143,68 @@ export async function getOperatorReplies(
         },
         tracking_source: String((rawPayload as any)?.source ?? ''),
         tracking_confidence: String((rawPayload as any)?.correlation_confidence ?? ''),
+        tracking_mode: 'strict',
       };
     })
     .filter(Boolean);
 
-  return rows;
+  const fallbackRows = (repliedCampaignLeads ?? [])
+    .filter((row: any) => {
+      const lead = row?.leads;
+      if (!lead) return false;
+      if (operatorId && String((lead as any)?.operator_id ?? '') !== String(operatorId)) return false;
+      if (options?.reviewStatus === 'unreviewed' && String((lead as any)?.interest_status ?? '') !== 'unreviewed') return false;
+      if (
+        options?.reviewStatus === 'reviewed'
+        && !['interested', 'not_interested'].includes(String((lead as any)?.interest_status ?? ''))
+      ) return false;
+      return true;
+    })
+    .filter((row: any) => {
+      const campaignLeadId = String((row as any)?.id ?? '');
+      const hasStrict = (trackingRows ?? []).some((t: any) => String(t?.campaign_lead_id ?? '') === campaignLeadId);
+      return !hasStrict;
+    })
+    .map((row: any) => {
+      const lead = row?.leads;
+      const campaignId = String(row?.campaign_id ?? '').trim();
+      return {
+        id: String((lead as any)?.id ?? ''),
+        reply_event_id: null,
+        email: String((lead as any)?.email ?? ''),
+        first_name: String((lead as any)?.first_name ?? ''),
+        company: String((lead as any)?.company ?? ''),
+        country: String((lead as any)?.country ?? ''),
+        replied_at: String((lead as any)?.replied_at ?? ''),
+        reply_message: String((lead as any)?.reply_message ?? '') || null,
+        interest_status: (lead as any)?.interest_status ?? null,
+        interest_note: (lead as any)?.interest_note ?? null,
+        interest_reviewed_at: (lead as any)?.interest_reviewed_at ?? null,
+        interest_reviewed_by: (lead as any)?.interest_reviewed_by ?? null,
+        campaign_leads: campaignId
+          ? [
+              {
+                campaign_id: campaignId,
+                campaigns: {
+                  name: campaignNameById.get(campaignId) ?? '',
+                },
+              },
+            ]
+          : [],
+        inboxes: {
+          email_address: inboxEmailById.get(String(row?.assigned_inbox_id ?? '').trim()) ?? '',
+        },
+        tracking_source: 'campaign_status_fallback',
+        tracking_confidence: 'low',
+        tracking_mode: 'fallback',
+      };
+    });
+
+  return [...strictRows, ...fallbackRows].sort((a: any, b: any) => {
+    const aTs = new Date(String(a?.replied_at ?? '')).getTime();
+    const bTs = new Date(String(b?.replied_at ?? '')).getTime();
+    return bTs - aTs;
+  });
 }
 
 export async function reviewLeadInterest(params: {
@@ -336,7 +409,7 @@ export async function mapUnmatchedReplyToLead(params: {
   }
 
   const now = new Date().toISOString();
-  await supabase
+  const { error: leadUpdateError } = await supabase
     .from('leads')
     .update({
       status: 'replied',
@@ -345,19 +418,28 @@ export async function mapUnmatchedReplyToLead(params: {
       interest_status: 'unreviewed',
     })
     .eq('id', leadId);
+  if (leadUpdateError) {
+    throw new Error(`map_unmatched_reply_failed: lead_update_error: ${leadUpdateError.message}`);
+  }
 
   if (params.campaignLeadId) {
-    await supabase
+    const { error: campaignLeadUpdateError } = await supabase
       .from('campaign_leads')
       .update({ status: 'replied' })
       .eq('id', String(params.campaignLeadId))
       .in('status', ['queued', 'processing', 'paused', 'completed']);
+    if (campaignLeadUpdateError) {
+      throw new Error(`map_unmatched_reply_failed: campaign_lead_update_error: ${campaignLeadUpdateError.message}`);
+    }
   } else {
-    await supabase
+    const { error: campaignLeadUpdateError } = await supabase
       .from('campaign_leads')
       .update({ status: 'replied' })
       .eq('lead_id', leadId)
       .in('status', ['queued', 'processing', 'paused', 'completed']);
+    if (campaignLeadUpdateError) {
+      throw new Error(`map_unmatched_reply_failed: campaign_lead_update_error: ${campaignLeadUpdateError.message}`);
+    }
   }
 
   await supabase

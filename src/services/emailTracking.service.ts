@@ -72,6 +72,59 @@ export function buildEffectiveDeliveredSets(input: {
   };
 }
 
+export function buildEffectiveReplyCounts(input: {
+  sentLeadIds: string[];
+  strictReplyLeadIds: string[];
+  inferredReplyLeadIds: string[];
+}) {
+  const sentSet = new Set(input.sentLeadIds.filter(Boolean));
+  const strictSet = new Set(input.strictReplyLeadIds.filter((id) => Boolean(id) && sentSet.has(id)));
+  const inferredOnlySet = new Set(
+    input.inferredReplyLeadIds.filter((id) => Boolean(id) && sentSet.has(id) && !strictSet.has(id))
+  );
+  const effectiveSet = new Set<string>([...strictSet, ...inferredOnlySet]);
+  return {
+    strictSet,
+    inferredOnlySet,
+    effectiveSet,
+    strictCount: strictSet.size,
+    inferredOnlyCount: inferredOnlySet.size,
+    effectiveCount: effectiveSet.size,
+  };
+}
+
+export function applyDeliveredEvidenceInvariant(input: {
+  sentLeadIds: string[];
+  effectiveDeliveredLeadIds: string[];
+  openedLeadIds: string[];
+  repliedLeadIds: string[];
+  bouncedLeadIds: string[];
+}) {
+  const sentSet = new Set(input.sentLeadIds.filter(Boolean));
+  const bouncedSet = new Set(input.bouncedLeadIds.filter(Boolean));
+  const baseDeliveredSet = new Set(
+    input.effectiveDeliveredLeadIds.filter((id) => Boolean(id) && sentSet.has(id) && !bouncedSet.has(id))
+  );
+  const promotedByOpenOrReplySet = new Set<string>();
+  const openOrReplyEvidenceSet = new Set([
+    ...input.openedLeadIds.filter(Boolean),
+    ...input.repliedLeadIds.filter(Boolean),
+  ]);
+  for (const leadId of openOrReplyEvidenceSet) {
+    if (!sentSet.has(leadId) || bouncedSet.has(leadId)) continue;
+    if (!baseDeliveredSet.has(leadId)) {
+      promotedByOpenOrReplySet.add(leadId);
+      baseDeliveredSet.add(leadId);
+    }
+  }
+
+  return {
+    effectiveDeliveredSet: baseDeliveredSet,
+    promotedByOpenOrReplySet,
+    deliveryInvariantApplied: promotedByOpenOrReplySet.size > 0,
+  };
+}
+
 function readPath(input: Record<string, unknown>, path: string): unknown {
   const parts = path.split('.');
   let current: any = input;
@@ -697,13 +750,24 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
   const {
     confirmedDeliveredSet: confirmedDeliveredForSentSet,
     inferredDeliveredSet,
-    effectiveDeliveredSet,
+    effectiveDeliveredSet: baseEffectiveDeliveredSet,
     bouncedSet,
   } = buildEffectiveDeliveredSets({
     sentLeadIds: [...sentLeadSet],
     confirmedDeliveredLeadIds: [...confirmedDeliveredSet],
     hardBouncedLeadIds: [...hardBounceSet],
     softBouncedLeadIds: [...softBounceSet],
+  });
+  const {
+    effectiveDeliveredSet,
+    promotedByOpenOrReplySet,
+    deliveryInvariantApplied,
+  } = applyDeliveredEvidenceInvariant({
+    sentLeadIds: [...sentLeadSet],
+    effectiveDeliveredLeadIds: [...baseEffectiveDeliveredSet],
+    openedLeadIds: [...openedSet],
+    repliedLeadIds: [...repliedSet],
+    bouncedLeadIds: [...bouncedSet],
   });
   const failedDeliveryByStatusSet = new Set<string>(
     (campaignLeads ?? [])
@@ -715,13 +779,20 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
   const sent = sentLeadSet.size;
   const delivered = effectiveDeliveredSet.size;
   const opened = [...openedSet].filter((id) => sentLeadSet.has(id)).length;
-  const replied = [...repliedSet].filter((id) => sentLeadSet.has(id)).length;
+  const replyCounts = buildEffectiveReplyCounts({
+    sentLeadIds: [...sentLeadSet],
+    strictReplyLeadIds: [...repliedSet],
+    inferredReplyLeadIds: [...inferredOnlyRepliedSet],
+  });
+  const strict_replied = replyCounts.strictCount;
+  const inferred_replied_count = replyCounts.inferredOnlyCount;
+  const effective_replied = replyCounts.effectiveCount;
   const bounced_hard = hardBounceSet.size;
   const bounced_soft = softBounceSet.size;
   const bounced_total = bouncedSet.size;
   const delivery_failed = deliveryFailedSet.size;
   const not_opened = Math.max(sent - opened, 0);
-  const not_replied = Math.max(sent - replied, 0);
+  const not_replied = Math.max(sent - effective_replied, 0);
   const pending_outcome = Math.max(sent - delivered - bounced_total, 0);
   const unmatchedEventRows = (eventRows ?? []).filter((row: any) => {
     const matched = row?.matched;
@@ -819,7 +890,7 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
     delivered,
     opened,
     not_opened,
-    replied,
+    replied: effective_replied,
     not_replied,
     bounced_hard,
     bounced_soft,
@@ -834,11 +905,17 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
     open_rate_visibility_reason,
     open_confidence,
     metrics_data_freshness: new Date().toISOString(),
-    reply_rate: sent > 0 ? Number(((replied / sent) * 100).toFixed(2)) : 0,
-    inferred_replied_count: [...inferredOnlyRepliedSet].filter((id) => sentLeadSet.has(id)).length,
+    reply_rate: sent > 0 ? Number(((effective_replied / sent) * 100).toFixed(2)) : 0,
+    strict_replied_count: strict_replied,
+    effective_replied_count: effective_replied,
+    inferred_replied_count,
     response_provenance: {
-      replied_source: 'tracking_only',
-      fallback_enabled: false,
+      mode: 'hybrid',
+      replied_source: 'tracking_plus_campaign_status',
+      fallback_enabled: true,
+      strict_replied_count: strict_replied,
+      effective_replied_count: effective_replied,
+      inferred_replied_count,
     },
     source_breakdown: {
       webhook: eventRows.filter((row: any) =>
@@ -858,6 +935,10 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
       unmatched_events_count,
       confirmed_delivered_count: confirmedDeliveredForSentSet.size,
       inferred_delivered_count: inferredDeliveredSet.size,
+      delivered_confirmed: confirmedDeliveredForSentSet.size,
+      delivered_inferred: inferredDeliveredSet.size,
+      delivered_promoted_from_open_reply: promotedByOpenOrReplySet.size,
+      delivery_invariant_applied: deliveryInvariantApplied,
       delivery_mode: 'confirmed_plus_inferred',
       unmatched_sample: unmatchedEventRows.slice(0, 5).map((row: any) => ({
         event_type: String(row?.event_type ?? ''),
@@ -905,7 +986,29 @@ export async function getCampaignRepliesFeed(campaignId: string) {
     .eq('status', 'replied')
     .order('id', { ascending: false });
 
-  return (data ?? []).map((row: any) => ({
+  const campaignLeadIds = (data ?? []).map((row: any) => String(row?.id ?? '')).filter(Boolean);
+  const { data: trackingRows } = campaignLeadIds.length > 0
+    ? await supabase
+        .from('email_tracking_events')
+        .select('campaign_lead_id,event_at,raw_payload')
+        .eq('event_type', 'reply')
+        .in('campaign_lead_id', campaignLeadIds)
+        .order('event_at', { ascending: false })
+    : { data: [] as any[] };
+  const trackingByCampaignLead = new Map<string, any>();
+  for (const trackingRow of trackingRows ?? []) {
+    const key = String((trackingRow as any)?.campaign_lead_id ?? '');
+    if (!key || trackingByCampaignLead.has(key)) continue;
+    trackingByCampaignLead.set(key, trackingRow);
+  }
+
+  return (data ?? []).map((row: any) => {
+    const campaignLeadId = String(row.id ?? '');
+    const tracking = trackingByCampaignLead.get(campaignLeadId);
+    const trackingSource = String((tracking as any)?.raw_payload?.source ?? '').trim();
+    const trackingConfidence = String((tracking as any)?.raw_payload?.correlation_confidence ?? '').trim();
+    const hasStrictTracking = Boolean(tracking);
+    return {
     campaign_lead_id: row.id,
     campaign_id: row.campaign_id,
     campaign_name: row.campaigns?.name ?? null,
@@ -913,9 +1016,13 @@ export async function getCampaignRepliesFeed(campaignId: string) {
     email: row.leads?.email ?? null,
     first_name: row.leads?.first_name ?? null,
     company: row.leads?.company ?? null,
-    replied_at: row.leads?.replied_at ?? null,
+    replied_at: tracking?.event_at ?? row.leads?.replied_at ?? null,
     reply_message: row.leads?.reply_message ?? null,
     interest_status: row.leads?.interest_status ?? 'unreviewed',
     inbox_email: row.inboxes?.email_address ?? null,
-  }));
+    tracking_source: hasStrictTracking ? (trackingSource || 'reply_tracking') : 'campaign_status_fallback',
+    tracking_confidence: hasStrictTracking ? (trackingConfidence || 'high') : 'low',
+    tracking_mode: hasStrictTracking ? 'strict' : 'fallback',
+  };
+  });
 }

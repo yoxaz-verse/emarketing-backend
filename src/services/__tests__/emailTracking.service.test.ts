@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  applyDeliveredEvidenceInvariant,
   buildEffectiveDeliveredSets,
+  buildEffectiveReplyCounts,
   classifyTrackingEventType,
   normalizeProviderEmailEvent,
 } from '../emailTracking.service';
@@ -118,4 +120,104 @@ test('mixed scenario produces expected effective delivery totals', () => {
   assert.equal(computed.confirmedDeliveredSet.size, 1);
   assert.equal(computed.inferredDeliveredSet.size, 1);
   assert.equal(computed.effectiveDeliveredSet.size, 2);
+});
+
+test('delivery invariant promotes sent+open lead to delivered when webhook delivery is missing', () => {
+  const base = buildEffectiveDeliveredSets({
+    sentLeadIds: ['l1'],
+    confirmedDeliveredLeadIds: [],
+    hardBouncedLeadIds: [],
+    softBouncedLeadIds: [],
+  });
+  const resolved = applyDeliveredEvidenceInvariant({
+    sentLeadIds: ['l1'],
+    effectiveDeliveredLeadIds: [],
+    openedLeadIds: ['l1'],
+    repliedLeadIds: [],
+    bouncedLeadIds: [...base.bouncedSet],
+  });
+  assert.equal(resolved.effectiveDeliveredSet.has('l1'), true);
+  assert.equal(resolved.promotedByOpenOrReplySet.has('l1'), true);
+  assert.equal(resolved.deliveryInvariantApplied, true);
+});
+
+test('delivery invariant promotes sent+reply lead to delivered when webhook delivery is missing', () => {
+  const base = buildEffectiveDeliveredSets({
+    sentLeadIds: ['l1'],
+    confirmedDeliveredLeadIds: [],
+    hardBouncedLeadIds: [],
+    softBouncedLeadIds: [],
+  });
+  const resolved = applyDeliveredEvidenceInvariant({
+    sentLeadIds: ['l1'],
+    effectiveDeliveredLeadIds: [],
+    openedLeadIds: [],
+    repliedLeadIds: ['l1'],
+    bouncedLeadIds: [...base.bouncedSet],
+  });
+  assert.equal(resolved.effectiveDeliveredSet.has('l1'), true);
+  assert.equal(resolved.promotedByOpenOrReplySet.has('l1'), true);
+  assert.equal(resolved.deliveryInvariantApplied, true);
+});
+
+test('delivery invariant respects bounce precedence and never promotes bounced lead', () => {
+  const base = buildEffectiveDeliveredSets({
+    sentLeadIds: ['l1', 'l2'],
+    confirmedDeliveredLeadIds: [],
+    hardBouncedLeadIds: ['l1'],
+    softBouncedLeadIds: [],
+  });
+  const resolved = applyDeliveredEvidenceInvariant({
+    sentLeadIds: ['l1', 'l2'],
+    effectiveDeliveredLeadIds: ['l2'],
+    openedLeadIds: ['l1'],
+    repliedLeadIds: [],
+    bouncedLeadIds: [...base.bouncedSet],
+  });
+  assert.equal(resolved.effectiveDeliveredSet.has('l1'), false);
+  assert.equal(resolved.promotedByOpenOrReplySet.has('l1'), false);
+});
+
+test('pending outcome math remains consistent after delivery invariant', () => {
+  const sentLeadIds = ['l1', 'l2', 'l3'];
+  const base = buildEffectiveDeliveredSets({
+    sentLeadIds,
+    confirmedDeliveredLeadIds: [],
+    hardBouncedLeadIds: ['l3'],
+    softBouncedLeadIds: [],
+  });
+  const resolved = applyDeliveredEvidenceInvariant({
+    sentLeadIds,
+    effectiveDeliveredLeadIds: [...base.effectiveDeliveredSet],
+    openedLeadIds: ['l1'],
+    repliedLeadIds: [],
+    bouncedLeadIds: [...base.bouncedSet],
+  });
+  const sent = sentLeadIds.length;
+  const delivered = resolved.effectiveDeliveredSet.size;
+  const bouncedTotal = base.bouncedSet.size;
+  const pendingOutcome = Math.max(sent - delivered - bouncedTotal, 0);
+  assert.equal(pendingOutcome, 0);
+});
+
+test('hybrid reply counts combine strict and inferred without double count', () => {
+  const computed = buildEffectiveReplyCounts({
+    sentLeadIds: ['c1', 'c2', 'c3'],
+    strictReplyLeadIds: ['c1', 'c2'],
+    inferredReplyLeadIds: ['c2', 'c3'],
+  });
+  assert.equal(computed.strictCount, 2);
+  assert.equal(computed.inferredOnlyCount, 1);
+  assert.equal(computed.effectiveCount, 3);
+});
+
+test('hybrid reply counts ignore unsent leads', () => {
+  const computed = buildEffectiveReplyCounts({
+    sentLeadIds: ['c1'],
+    strictReplyLeadIds: ['c1', 'c2'],
+    inferredReplyLeadIds: ['c2', 'c3'],
+  });
+  assert.equal(computed.strictCount, 1);
+  assert.equal(computed.inferredOnlyCount, 0);
+  assert.equal(computed.effectiveCount, 1);
 });

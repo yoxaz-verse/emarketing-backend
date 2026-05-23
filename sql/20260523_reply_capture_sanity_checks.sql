@@ -48,3 +48,37 @@ GROUP BY 1, 2, 3
 HAVING count(*) > 1
 ORDER BY minute_bucket DESC
 LIMIT 200;
+
+-- 4) Campaign leads marked replied but still missing strict reply events (effective fallback candidates)
+SELECT
+  cl.id AS campaign_lead_id,
+  cl.campaign_id,
+  cl.lead_id,
+  cl.created_at
+FROM public.campaign_leads cl
+WHERE lower(coalesce(cl.status, '')) = 'replied'
+  AND NOT EXISTS (
+    SELECT 1
+    FROM public.email_tracking_events ete
+    WHERE ete.event_type = 'reply'
+      AND ete.campaign_lead_id = cl.id
+  )
+ORDER BY cl.created_at DESC
+LIMIT 200;
+
+-- 5) Strict reply events present but unresolved campaign linkage despite matching sent message-id
+SELECT
+  ete.id AS tracking_event_id,
+  ete.provider_message_id,
+  ete.lead_id,
+  ete.event_at
+FROM public.email_tracking_events ete
+WHERE ete.event_type = 'reply'
+  AND (ete.campaign_id IS NULL OR ete.campaign_lead_id IS NULL)
+  AND EXISTS (
+    SELECT 1
+    FROM public.email_logs el
+    WHERE lower(coalesce(el.provider_message_id, '')) = lower(coalesce(ete.provider_message_id, ''))
+  )
+ORDER BY ete.event_at DESC
+LIMIT 200;

@@ -29,6 +29,18 @@ function toDedupeKey(payload: {
   return createHash('sha256').update(base).digest('hex');
 }
 
+async function updateCampaignLeadsToReplied(filter: { id?: string; lead_id?: string }) {
+  let query: any = supabase
+    .from('campaign_leads')
+    .update({ status: 'replied' })
+    .in('status', ['queued', 'processing', 'paused', 'completed']);
+  if (filter.id) query = query.eq('id', filter.id);
+  if (filter.lead_id) query = query.eq('lead_id', filter.lead_id);
+  const { error, count } = await query.select('id', { count: 'exact', head: true });
+  if (error) throw error;
+  return Number(count ?? 0);
+}
+
 export async function ingestInboundReply(input: InboundReplyPayload) {
   const fromEmail = String(input.from_email ?? '').trim().toLowerCase();
   const message = String(input.message ?? '').trim();
@@ -136,7 +148,7 @@ export async function ingestInboundReply(input: InboundReplyPayload) {
 
   // Mark lead replied and keep manual review queue.
   const now = new Date().toISOString();
-  await supabase
+  const { error: leadUpdateError } = await supabase
     .from('leads')
     .update({
       status: 'replied',
@@ -145,19 +157,20 @@ export async function ingestInboundReply(input: InboundReplyPayload) {
       interest_status: 'unreviewed',
     })
     .eq('id', finalLeadId);
+  if (leadUpdateError) {
+    throw new Error(`reply_ingest_failed: lead_update_error: ${leadUpdateError.message}`);
+  }
 
   if (campaignLeadId) {
-    await supabase
-      .from('campaign_leads')
-      .update({ status: 'replied' })
-      .eq('id', campaignLeadId)
-      .in('status', ['queued', 'processing', 'paused', 'completed']);
+    const updated = await updateCampaignLeadsToReplied({ id: campaignLeadId });
+    if (updated === 0) {
+      console.warn('[REPLY_INGEST_CAMPAIGN_LEAD_STATUS_NOT_UPDATED]', { campaignLeadId, dedupeKey, finalLeadId });
+    }
   } else {
-    await supabase
-      .from('campaign_leads')
-      .update({ status: 'replied' })
-      .eq('lead_id', finalLeadId)
-      .in('status', ['queued', 'processing', 'paused', 'completed']);
+    const updated = await updateCampaignLeadsToReplied({ lead_id: finalLeadId });
+    if (updated === 0) {
+      console.warn('[REPLY_INGEST_CAMPAIGN_LEAD_STATUS_NOT_UPDATED]', { finalLeadId, dedupeKey });
+    }
 
     // Try to resolve campaign context for tracking when message-id is missing.
     const { data: latestCampaignLead } = await supabase
@@ -205,7 +218,7 @@ export async function ingestInboundReply(input: InboundReplyPayload) {
         },
       });
     if (trackingError && String((trackingError as any)?.code ?? '') !== '23505') {
-      throw trackingError;
+      throw new Error(`reply_ingest_failed: tracking_event_insert_error: ${trackingError.message}`);
     }
   }
 
