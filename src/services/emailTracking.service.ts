@@ -793,7 +793,7 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
   const bounced_total = bouncedSet.size;
   const delivery_failed = deliveryFailedSet.size;
   const not_opened = Math.max(sent - opened, 0);
-  const not_replied = Math.max(sent - effective_replied, 0);
+  const not_replied = Math.max(sent - strict_replied, 0);
   const pending_outcome = Math.max(sent - delivered - bounced_total, 0);
   const unmatchedEventRows = (eventRows ?? []).filter((row: any) => {
     const matched = row?.matched;
@@ -892,7 +892,7 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
     delivered,
     opened,
     not_opened,
-    replied: effective_replied,
+    replied: strict_replied,
     not_replied,
     bounced_hard,
     bounced_soft,
@@ -907,13 +907,13 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
     open_rate_visibility_reason,
     open_confidence,
     metrics_data_freshness: new Date().toISOString(),
-    reply_rate: sent > 0 ? Number(((effective_replied / sent) * 100).toFixed(2)) : 0,
+    reply_rate: sent > 0 ? Number(((strict_replied / sent) * 100).toFixed(2)) : 0,
     strict_replied_count: strict_replied,
     effective_replied_count: effective_replied,
     inferred_replied_count,
     response_provenance: {
       mode: 'hybrid',
-      replied_source: 'tracking_plus_campaign_status',
+      replied_source: 'tracking_only',
       fallback_enabled: true,
       strict_replied_count: strict_replied,
       effective_replied_count: effective_replied,
