@@ -112,7 +112,7 @@ export async function attachLeadsToCampaign(
     throw leadFetchError;
   }
 
-  const allowedStatuses = new Set(['eligible', 'risky']);
+  const allowedStatuses = new Set(['eligible', 'valid', 'validated']);
   const leadStateMap = new Map<string, { eligibility: string; isBlocked: boolean; isUsed: boolean }>(
     (leadRows ?? []).map((row: any) => [
       String(row.id),

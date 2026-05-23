@@ -19,6 +19,7 @@ const RUNNER_WINDOW_END_HOUR = 18;
 const DEFAULT_STALE_PROCESSING_TIMEOUT_MINUTES = 10;
 const FIXED_CAMPAIGN_SENDER_NAME = 'OBAOL Team';
 const FORBIDDEN_SIGNOFF_MARKERS = ['regards, jacob', 'regards, joshua', 'joshua', 'jacob alwin joy', 'jacob supreme'];
+const DELIVERABILITY_MINIMAL_TRACKING_ENABLED = String(process.env.DELIVERABILITY_MINIMAL_TRACKING_ENABLED ?? 'true').toLowerCase() === 'true';
 const CAMPAIGN_MINUTE_LOCK_PREFIX = 'campaign-minute-lock';
 const CAMPAIGN_MINUTE_LOCK_SAFETY_SECONDS = 2;
 const LOCAL_LOCK_SWEEP_MS = 30_000;
@@ -1358,6 +1359,8 @@ export async function sendCampaignEmail(campaignLeadId: string) {
   const allocator = await allocateCampaignSender({
     campaignId,
     leadEligibility: String((campaignLead as any)?.leads?.email_eligibility ?? ''),
+    recipientEmail: String((campaignLead as any)?.leads?.email ?? ''),
+    firstTouch: Number((campaignLead as any)?.current_step ?? 1) <= 1,
   });
 
   if (!allocator.selected) {
@@ -1481,25 +1484,36 @@ export async function sendCampaignEmail(campaignLeadId: string) {
   });
 
   const sentAtIso = new Date().toISOString();
-  const pixelToken = makePixelToken({
-    campaignLeadId: String(campaignLeadId),
-    campaignId: String((campaignLead as any).campaign_id ?? ''),
-    leadId: String((campaignLead as any)?.leads?.id ?? ''),
-    toEmail: String((campaignLead as any)?.leads?.email ?? ''),
-    sentAtIso,
-  });
+  const recipientEmail = String((campaignLead as any)?.leads?.email ?? '').trim().toLowerCase();
+  const recipientDomain = recipientEmail.includes('@') ? recipientEmail.split('@').pop() ?? '' : '';
+  const isMicrosoftRecipient = /(?:^|\.)(outlook\.com|hotmail\.com|live\.com|msn\.com)$/i.test(recipientDomain);
+  const isFirstTouch = Number((campaignLead as any)?.current_step ?? 1) <= 1;
+  const minimalTrackingMode = DELIVERABILITY_MINIMAL_TRACKING_ENABLED && isMicrosoftRecipient && isFirstTouch;
   const trackingBase = resolveTrackingBaseUrl();
-  const pixelHtml = `<img src="${trackingBase}/tracking/open/${pixelToken}" alt="" width="1" height="1" style="display:none;opacity:0;" />`;
   const renderedBody = renderPlainTextAsHtml(bodyRaw);
-  const trackedBody = withTrackedLinks(renderedBody, {
-    campaignLeadId: String(campaignLeadId),
-    campaignId: String((campaignLead as any).campaign_id ?? ''),
-    leadId: String((campaignLead as any)?.leads?.id ?? ''),
-    toEmail: String((campaignLead as any)?.leads?.email ?? ''),
-    sentAtIso,
-    trackingBase,
-  });
-  const htmlBody = wrapCampaignHtmlBody(`${trackedBody}\n${pixelHtml}`);
+  const trackedBody = minimalTrackingMode
+    ? renderedBody
+    : withTrackedLinks(renderedBody, {
+        campaignLeadId: String(campaignLeadId),
+        campaignId: String((campaignLead as any).campaign_id ?? ''),
+        leadId: String((campaignLead as any)?.leads?.id ?? ''),
+        toEmail: String((campaignLead as any)?.leads?.email ?? ''),
+        sentAtIso,
+        trackingBase,
+      });
+  const pixelHtml = minimalTrackingMode
+    ? ''
+    : (() => {
+        const pixelToken = makePixelToken({
+          campaignLeadId: String(campaignLeadId),
+          campaignId: String((campaignLead as any).campaign_id ?? ''),
+          leadId: String((campaignLead as any)?.leads?.id ?? ''),
+          toEmail: String((campaignLead as any)?.leads?.email ?? ''),
+          sentAtIso,
+        });
+        return `<img src="${trackingBase}/tracking/open/${pixelToken}" alt="" width="1" height="1" style="display:none;opacity:0;" />`;
+      })();
+  const htmlBody = wrapCampaignHtmlBody(pixelHtml ? `${trackedBody}\n${pixelHtml}` : trackedBody);
 
   const campaignSenderDisplayName = String((campaignLead as any)?.campaigns?.sender_display_name ?? '').trim();
   const effectiveSenderDisplayName = campaignSenderDisplayName || FIXED_CAMPAIGN_SENDER_NAME;
@@ -1540,6 +1554,7 @@ export async function sendCampaignEmail(campaignLeadId: string) {
       to: campaignLead.leads.email,
       sender_display_name: effectiveSenderDisplayName,
       personal_signoff_warning: personalSignoffWarning,
+      deliverability_mode: minimalTrackingMode ? 'minimal_tracking' : 'standard_tracking',
       rotation_next_inbox_id: allocator.rotation_next_inbox_id,
       rotation_used_inbox_id: allocator.rotation_used_inbox_id,
       rotation_fallback_used: allocator.rotation_fallback_used,

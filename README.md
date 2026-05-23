@@ -93,6 +93,27 @@ Expected guardrail checks:
 
 If any guardrail field is missing, treat deployment as stale or API base misconfigured and verify dashboard `NEXT_PUBLIC_API_BASE_URL` points to the intended backend runtime.
 
+## Outlook Junk Placement Runbook (Cold Outreach)
+
+If mail lands in Outlook Junk, use this playbook before scaling volume:
+
+1. Sender auth gates
+   - Ensure `spf_verified`, `dkim_verified`, and `dmarc_verified` are all true for sending domain records.
+   - Pause inboxes/domains that fail auth checks.
+
+2. Warmup and health gates
+   - Keep inbox warmup enabled and respect warmup limits.
+   - Do not ramp volume sharply; increase gradually across days.
+
+3. Microsoft-first touch controls
+   - Use conservative ramps for Outlook/Hotmail/Live/MSN cohorts.
+   - Prefer first-touch minimal tracking (no open pixel and no tracked-link rewriting).
+   - Aim for early positive engagement (replies, trusted sender interactions) before scaling.
+
+4. Audience hygiene
+   - Start with cleaner leads (avoid risky/unknown cohorts in wave 1).
+   - Remove repeat non-engagers and pause domains with repeated bounce/complaint signals.
+
 ### Remove Queue Integration Stack (archive then drop)
 
 If you want task-creator-only flow with no `agent_integrations` usage:

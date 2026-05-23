@@ -64,9 +64,18 @@ function minuteBucketUtc(now: Date): number {
 export async function allocateCampaignSender(input: {
   campaignId: string;
   leadEligibility?: string | null;
+  recipientEmail?: string | null;
+  firstTouch?: boolean;
 }): Promise<CampaignAllocatorResult> {
   const campaignId = String(input.campaignId ?? '').trim();
   const leadEligibility = String(input.leadEligibility ?? '').toLowerCase();
+  const recipientEmail = String(input.recipientEmail ?? '').trim().toLowerCase();
+  const firstTouch = Boolean(input.firstTouch);
+  const recipientDomain = recipientEmail.includes('@') ? recipientEmail.split('@').pop() ?? '' : '';
+  const isMicrosoftRecipient = /(?:^|\.)(outlook\.com|hotmail\.com|live\.com|msn\.com)$/i.test(recipientDomain);
+  const microsoftSoftLaunchEnabled = String(process.env.DELIVERABILITY_SOFT_LAUNCH_MSFT_ENABLED ?? 'true').toLowerCase() === 'true';
+  const microsoftSoftLaunchDailyCap = Math.max(1, Number(process.env.DELIVERABILITY_SOFT_LAUNCH_MSFT_DAILY_CAP ?? 20));
+  const microsoftSoftLaunchHourlyCap = Math.max(1, Number(process.env.DELIVERABILITY_SOFT_LAUNCH_MSFT_HOURLY_CAP ?? 4));
   const blockedByReason: Record<string, number> = {};
   const bump = (reason: string) => {
     blockedByReason[reason] = (blockedByReason[reason] ?? 0) + 1;
@@ -166,7 +175,7 @@ export async function allocateCampaignSender(input: {
 
   const { data: sentTodayRows, error: sentTodayError } = await supabase
     .from('email_logs')
-    .select('inbox_id, lead_id')
+    .select('inbox_id, lead_id, to_email')
     .eq('status', 'sent')
     .in('inbox_id', inboxIds)
     .gte('sent_at', dayStartIso);
@@ -174,7 +183,7 @@ export async function allocateCampaignSender(input: {
 
   const { data: sentHourRows, error: sentHourError } = await supabase
     .from('email_logs')
-    .select('inbox_id')
+    .select('inbox_id, to_email')
     .eq('status', 'sent')
     .in('inbox_id', inboxIds)
     .gte('sent_at', hourAgoIso);
@@ -217,6 +226,23 @@ export async function allocateCampaignSender(input: {
     const id = String((row as any)?.inbox_id ?? '');
     if (!id) continue;
     sentHourByInbox.set(id, (sentHourByInbox.get(id) ?? 0) + 1);
+  }
+
+  const microsoftSentTodayByInbox = new Map<string, number>();
+  const microsoftSentHourByInbox = new Map<string, number>();
+  for (const row of sentTodayRows ?? []) {
+    const inboxId = String((row as any)?.inbox_id ?? '');
+    const toEmail = String((row as any)?.to_email ?? '').trim().toLowerCase();
+    const domain = toEmail.includes('@') ? toEmail.split('@').pop() ?? '' : '';
+    if (!inboxId || !/(?:^|\.)(outlook\.com|hotmail\.com|live\.com|msn\.com)$/i.test(domain)) continue;
+    microsoftSentTodayByInbox.set(inboxId, (microsoftSentTodayByInbox.get(inboxId) ?? 0) + 1);
+  }
+  for (const row of sentHourRows ?? []) {
+    const inboxId = String((row as any)?.inbox_id ?? '');
+    const toEmail = String((row as any)?.to_email ?? '').trim().toLowerCase();
+    const domain = toEmail.includes('@') ? toEmail.split('@').pop() ?? '' : '';
+    if (!inboxId || !/(?:^|\.)(outlook\.com|hotmail\.com|live\.com|msn\.com)$/i.test(domain)) continue;
+    microsoftSentHourByInbox.set(inboxId, (microsoftSentHourByInbox.get(inboxId) ?? 0) + 1);
   }
 
   const sentTodayByDomain = new Map<string, number>();
@@ -310,6 +336,19 @@ export async function allocateCampaignSender(input: {
       const riskySentToday = riskySentTodayByInbox.get(inboxId) ?? 0;
       if (riskySentToday >= allowedRiskyPerDay) {
         bump('risky_daily_cap_reached');
+        continue;
+      }
+    }
+
+    if (microsoftSoftLaunchEnabled && isMicrosoftRecipient && firstTouch) {
+      const microsoftSentToday = microsoftSentTodayByInbox.get(inboxId) ?? 0;
+      const microsoftSentHour = microsoftSentHourByInbox.get(inboxId) ?? 0;
+      if (microsoftSentToday >= microsoftSoftLaunchDailyCap) {
+        bump('microsoft_soft_launch_daily_cap_reached');
+        continue;
+      }
+      if (microsoftSentHour >= microsoftSoftLaunchHourlyCap) {
+        bump('microsoft_soft_launch_hourly_cap_reached');
         continue;
       }
     }
