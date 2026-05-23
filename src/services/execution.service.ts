@@ -11,6 +11,7 @@ import {
   isNowWithinSendingSchedule,
 } from './sendingLimitsConfig.service';
 import { allocateCampaignSender } from './sending/sendAllocator.service';
+import { isCampaignMinuteBlocked, normalizeCampaignBatchSize } from './executionThrottle.utils.js';
 
 const RUNNER_WINDOW_TIMEZONE = 'Asia/Kolkata';
 const RUNNER_WINDOW_START_HOUR = 9;
@@ -38,6 +39,8 @@ type EmptyClaimReason =
 export type ClaimExecutionResult = {
   executions: any[];
   meta: {
+    requested_batch_size: number;
+    effective_batch_size: number;
     campaign_id: string;
     batch_size: number;
     queued_count: number;
@@ -70,6 +73,8 @@ type RunBatchSkipReason =
   | 'send_error';
 
 export type CampaignBatchRunSummary = {
+  requested_batch_size: number;
+  effective_batch_size: number;
   campaign_id: string;
   batch_size: number;
   claimed_count: number;
@@ -101,6 +106,21 @@ export type CampaignBatchRunSummary = {
     detail?: string | null;
   }>;
   fatal_error: string | null;
+};
+
+type MinuteThrottleSource = 'claim' | 'send';
+type MinuteThrottleBlockReason =
+  | 'campaign_minute_throttled'
+  | 'minute_lock_backend_unavailable'
+  | 'minute_lock_acquire_error';
+type MinuteThrottleGuardResult = {
+  allowed: boolean;
+  reason: MinuteThrottleBlockReason | null;
+  minute_window_start: string;
+  sent_count_in_window: number;
+  lock_key: string | null;
+  lock_backend: 'redis' | 'local_memory' | 'unavailable';
+  lock_ttl_seconds: number | null;
 };
 
 function assertClaimRowsConformance(
@@ -177,7 +197,7 @@ async function getCampaignMinuteGate(campaignId: string): Promise<{
   if (error) throw error;
   const sentCountInWindow = Number(count ?? 0);
   return {
-    blocked: sentCountInWindow >= 1,
+    blocked: isCampaignMinuteBlocked(sentCountInWindow),
     minuteWindowStart,
     sentCountInWindow,
   };
@@ -199,6 +219,10 @@ function resolveMinuteLockRedis(): IORedis | null {
     console.warn('[CAMPAIGN_MINUTE_LOCK_REDIS_ERROR]', err.message);
   });
   return minuteLockRedis;
+}
+
+function isMinuteLockBackendConfigured(): boolean {
+  return String(process.env.REDIS_URL ?? '').trim().length > 0;
 }
 
 function buildMinuteLockKey(campaignId: string, minuteWindowStartIso: string): string {
@@ -263,6 +287,162 @@ async function acquireCampaignMinuteLock(campaignId: string): Promise<{
     lock_backend: 'local_memory',
     lock_ttl_seconds: lockTtlSeconds,
   };
+}
+
+async function logCampaignMinuteThrottleEvent(input: {
+  campaign_id: string;
+  campaign_lead_id?: string | null;
+  source: MinuteThrottleSource;
+  reason: MinuteThrottleBlockReason;
+  message: string;
+  minute_window_start: string;
+  sent_count_in_window: number;
+  lock_key?: string | null;
+  lock_backend?: 'redis' | 'local_memory' | 'unavailable';
+  lock_ttl_seconds?: number | null;
+}) {
+  await supabase.from('system_events').insert({
+    type: 'CAMPAIGN_MINUTE_THROTTLED',
+    entity: 'campaigns',
+    entity_id: input.campaign_id,
+    message: input.message,
+    meta: {
+      campaign_id: input.campaign_id,
+      campaign_lead_id: input.campaign_lead_id ?? null,
+      source: input.source,
+      blocked_reason: input.reason,
+      minute_window_start: input.minute_window_start,
+      sent_count_in_window: input.sent_count_in_window,
+      lock_key: input.lock_key ?? null,
+      lock_backend: input.lock_backend ?? 'unavailable',
+      lock_ttl_seconds: input.lock_ttl_seconds ?? null,
+    },
+  });
+}
+
+async function enforceCampaignMinuteGuard(
+  campaignId: string,
+  source: MinuteThrottleSource,
+  opts?: { campaignLeadId?: string | null; acquireLock?: boolean }
+): Promise<MinuteThrottleGuardResult> {
+  const acquireLock = opts?.acquireLock === true;
+  const gate = await getCampaignMinuteGate(campaignId);
+
+  if (acquireLock && !isMinuteLockBackendConfigured()) {
+    await logCampaignMinuteThrottleEvent({
+      campaign_id: campaignId,
+      campaign_lead_id: opts?.campaignLeadId ?? null,
+      source,
+      reason: 'minute_lock_backend_unavailable',
+      message: 'Send blocked: minute lock backend unavailable (REDIS_URL missing).',
+      minute_window_start: gate.minuteWindowStart,
+      sent_count_in_window: gate.sentCountInWindow,
+      lock_backend: 'unavailable',
+    });
+    return {
+      allowed: false,
+      reason: 'minute_lock_backend_unavailable',
+      minute_window_start: gate.minuteWindowStart,
+      sent_count_in_window: gate.sentCountInWindow,
+      lock_key: null,
+      lock_backend: 'unavailable',
+      lock_ttl_seconds: null,
+    };
+  }
+
+  if (gate.blocked) {
+    await logCampaignMinuteThrottleEvent({
+      campaign_id: campaignId,
+      campaign_lead_id: opts?.campaignLeadId ?? null,
+      source,
+      reason: 'campaign_minute_throttled',
+      message: source === 'send'
+        ? 'Send blocked by campaign minute gate at send-time.'
+        : 'Claim blocked by campaign minute gate.',
+      minute_window_start: gate.minuteWindowStart,
+      sent_count_in_window: gate.sentCountInWindow,
+      lock_backend: isMinuteLockBackendConfigured() ? 'redis' : 'unavailable',
+    });
+    return {
+      allowed: false,
+      reason: 'campaign_minute_throttled',
+      minute_window_start: gate.minuteWindowStart,
+      sent_count_in_window: gate.sentCountInWindow,
+      lock_key: null,
+      lock_backend: isMinuteLockBackendConfigured() ? 'redis' : 'unavailable',
+      lock_ttl_seconds: null,
+    };
+  }
+
+  if (!acquireLock) {
+    return {
+      allowed: true,
+      reason: null,
+      minute_window_start: gate.minuteWindowStart,
+      sent_count_in_window: gate.sentCountInWindow,
+      lock_key: null,
+      lock_backend: isMinuteLockBackendConfigured() ? 'redis' : 'unavailable',
+      lock_ttl_seconds: null,
+    };
+  }
+
+  try {
+    const minuteLock = await acquireCampaignMinuteLock(campaignId);
+    if (!minuteLock.acquired) {
+      const postLockGate = await getCampaignMinuteGate(campaignId);
+      await logCampaignMinuteThrottleEvent({
+        campaign_id: campaignId,
+        campaign_lead_id: opts?.campaignLeadId ?? null,
+        source,
+        reason: 'campaign_minute_throttled',
+        message: 'Send blocked by campaign minute lock (send-time guard).',
+        minute_window_start: minuteLock.minuteWindowStart,
+        sent_count_in_window: postLockGate.sentCountInWindow,
+        lock_key: minuteLock.lock_key,
+        lock_backend: minuteLock.lock_backend,
+        lock_ttl_seconds: minuteLock.lock_ttl_seconds,
+      });
+      return {
+        allowed: false,
+        reason: 'campaign_minute_throttled',
+        minute_window_start: minuteLock.minuteWindowStart,
+        sent_count_in_window: postLockGate.sentCountInWindow,
+        lock_key: minuteLock.lock_key,
+        lock_backend: minuteLock.lock_backend,
+        lock_ttl_seconds: minuteLock.lock_ttl_seconds,
+      };
+    }
+
+    return {
+      allowed: true,
+      reason: null,
+      minute_window_start: minuteLock.minuteWindowStart,
+      sent_count_in_window: gate.sentCountInWindow,
+      lock_key: minuteLock.lock_key,
+      lock_backend: minuteLock.lock_backend,
+      lock_ttl_seconds: minuteLock.lock_ttl_seconds,
+    };
+  } catch (err: any) {
+    await logCampaignMinuteThrottleEvent({
+      campaign_id: campaignId,
+      campaign_lead_id: opts?.campaignLeadId ?? null,
+      source,
+      reason: 'minute_lock_acquire_error',
+      message: `Send blocked: minute lock acquisition error (${String(err?.message ?? 'unknown_error')}).`,
+      minute_window_start: gate.minuteWindowStart,
+      sent_count_in_window: gate.sentCountInWindow,
+      lock_backend: 'unavailable',
+    });
+    return {
+      allowed: false,
+      reason: 'minute_lock_acquire_error',
+      minute_window_start: gate.minuteWindowStart,
+      sent_count_in_window: gate.sentCountInWindow,
+      lock_key: null,
+      lock_backend: 'unavailable',
+      lock_ttl_seconds: null,
+    };
+  }
 }
 
 export async function getCampaignExecutionWakeState(lastSeenVersion?: string | null) {
@@ -486,6 +666,9 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
   if (minuteGate.blocked) {
     next_actions.push('Campaign minute throttle active: one send already done in current UTC minute window.');
   }
+  if (burstViolations.length > 0) {
+    next_actions.push('Burst invariant violated: found >1 sent email in a minute bucket for this campaign. Investigate immediately.');
+  }
   if (next_actions.length === 0) {
     next_actions.push('No immediate blockers detected; run batch execution and inspect per-lead outcomes.');
   }
@@ -560,6 +743,12 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
       burst_violation_count_last_24h: burstViolations.length,
       burst_violations_last_24h: burstViolations,
     },
+    diagnostics_assertions: {
+      one_email_per_minute_campaign_invariant: {
+        passed: burstViolations.length === 0,
+        violation_count: burstViolations.length,
+      },
+    },
     next_actions,
   };
 }
@@ -573,11 +762,13 @@ export async function runCampaignExecutionBatch(
   campaignId: string,
   batchSize: number
 ): Promise<CampaignBatchRunSummary> {
-  const normalizedBatchSize = Number.isFinite(Number(batchSize))
-    ? Math.max(0, Math.floor(Number(batchSize)))
-    : 10;
+  const batchShape = normalizeCampaignBatchSize(batchSize);
+  const requestedBatchSize = batchShape.requested_batch_size;
+  const normalizedBatchSize = batchShape.effective_batch_size;
 
   const summary: CampaignBatchRunSummary = {
+    requested_batch_size: requestedBatchSize,
+    effective_batch_size: normalizedBatchSize,
     campaign_id: campaignId,
     batch_size: normalizedBatchSize,
     claimed_count: 0,
@@ -732,10 +923,9 @@ export async function getNextCampaignExecutions(
   campaignId: string,
   batchSize: number
 ): Promise<ClaimExecutionResult> {
-  const requestedBatchSize = Number.isFinite(Number(batchSize))
-    ? Math.max(0, Math.floor(Number(batchSize)))
-    : 10;
-  const normalizedBatchSize = Math.min(1, requestedBatchSize);
+  const batchShape = normalizeCampaignBatchSize(batchSize);
+  const requestedBatchSize = batchShape.requested_batch_size;
+  const normalizedBatchSize = batchShape.effective_batch_size;
 
   const migratedPendingCount = await migratePendingLeadsToQueued(campaignId);
   if (migratedPendingCount > 0) {
@@ -757,6 +947,8 @@ export async function getNextCampaignExecutions(
     return {
       executions: [],
       meta: {
+        requested_batch_size: requestedBatchSize,
+        effective_batch_size: normalizedBatchSize,
         campaign_id: campaignId,
         batch_size: normalizedBatchSize,
         queued_count: 0,
@@ -794,10 +986,13 @@ export async function getNextCampaignExecutions(
   ]);
   const allocatorPreview = await allocateCampaignSender({ campaignId });
 
-  if (minuteGate.blocked) {
+  const minuteGuard = await enforceCampaignMinuteGuard(campaignId, 'claim', { acquireLock: false });
+  if (!minuteGuard.allowed) {
     return {
       executions: [],
       meta: {
+        requested_batch_size: requestedBatchSize,
+        effective_batch_size: normalizedBatchSize,
         campaign_id: campaignId,
         batch_size: normalizedBatchSize,
         queued_count: queuedCount,
@@ -812,8 +1007,8 @@ export async function getNextCampaignExecutions(
         claim_path: 'rpc',
         campaign_minute_gate: {
           blocked: true,
-          current_minute_window_start: minuteGate.minuteWindowStart,
-          sent_count_in_window: minuteGate.sentCountInWindow,
+          current_minute_window_start: minuteGuard.minute_window_start,
+          sent_count_in_window: minuteGuard.sent_count_in_window,
         },
         rotation_next_inbox_id: allocatorPreview.rotation_next_inbox_id,
         rotation_used_inbox_id: allocatorPreview.rotation_used_inbox_id,
@@ -888,6 +1083,8 @@ export async function getNextCampaignExecutions(
         return {
           executions: [],
           meta: {
+            requested_batch_size: requestedBatchSize,
+            effective_batch_size: normalizedBatchSize,
             campaign_id: campaignId,
             batch_size: normalizedBatchSize,
             queued_count: queuedCount,
@@ -941,7 +1138,8 @@ export async function getNextCampaignExecutions(
 
   console.log('[CLAIM EXECUTIONS DIAGNOSTICS]', {
     campaign_id: campaignId,
-    batch_size: normalizedBatchSize,
+    requested_batch_size: requestedBatchSize,
+    effective_batch_size: normalizedBatchSize,
     queued_count: queuedCount,
     processing_count: processingCount,
     paused_count: pausedCount,
@@ -955,6 +1153,8 @@ export async function getNextCampaignExecutions(
   return {
     executions,
     meta: {
+      requested_batch_size: requestedBatchSize,
+      effective_batch_size: normalizedBatchSize,
       campaign_id: campaignId,
       batch_size: normalizedBatchSize,
       queued_count: queuedCount,
@@ -1144,46 +1344,14 @@ export async function sendCampaignEmail(campaignLeadId: string) {
   }
 
   const campaignId = String((campaignLead as any).campaign_id ?? '');
-  const minuteLock = await acquireCampaignMinuteLock(campaignId);
-  if (!minuteLock.acquired) {
-    const minuteGate = await getCampaignMinuteGate(campaignId);
-    await supabase.from('system_events').insert({
-      type: 'CAMPAIGN_MINUTE_THROTTLED',
-      entity: 'campaigns',
-      entity_id: campaignId,
-      message: 'Send blocked by campaign minute lock (send-time guard).',
-      meta: {
-        campaign_lead_id: campaignLeadId,
-        lock_key: minuteLock.lock_key,
-        lock_backend: minuteLock.lock_backend,
-        minute_window_start: minuteLock.minuteWindowStart,
-        sent_count_in_window: minuteGate.sentCountInWindow,
-      },
-    });
+  const minuteGuard = await enforceCampaignMinuteGuard(campaignId, 'send', {
+    campaignLeadId,
+    acquireLock: true,
+  });
+  if (!minuteGuard.allowed) {
     return {
       skipped: true,
-      reason: 'campaign_minute_throttled',
-    };
-  }
-
-  const minuteGate = await getCampaignMinuteGate(campaignId);
-  if (minuteGate.blocked) {
-    await supabase.from('system_events').insert({
-      type: 'CAMPAIGN_MINUTE_THROTTLED',
-      entity: 'campaigns',
-      entity_id: campaignId,
-      message: 'Send blocked by campaign minute gate at send-time.',
-      meta: {
-        campaign_lead_id: campaignLeadId,
-        lock_key: minuteLock.lock_key,
-        lock_backend: minuteLock.lock_backend,
-        minute_window_start: minuteGate.minuteWindowStart,
-        sent_count_in_window: minuteGate.sentCountInWindow,
-      },
-    });
-    return {
-      skipped: true,
-      reason: 'campaign_minute_throttled',
+      reason: minuteGuard.reason ?? 'campaign_minute_throttled',
     };
   }
 

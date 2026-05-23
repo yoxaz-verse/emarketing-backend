@@ -557,6 +557,7 @@ export async function ingestClickProxyOpen(token: string) {
 }
 
 export async function getCampaignReplyOpenAnalytics(campaignId: string) {
+  const ANALYTICS_VERSION = 'delivery_invariant_v2';
   const [{ data: campaignLeads }, { data: emailLogRows }] = await Promise.all([
     supabase
       .from('campaign_leads')
@@ -884,6 +885,7 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
     : (lowConfidenceCount > 0 ? 'medium' : 'high');
 
   return {
+    analytics_version: ANALYTICS_VERSION,
     campaign_id: campaignId,
     total,
     sent,

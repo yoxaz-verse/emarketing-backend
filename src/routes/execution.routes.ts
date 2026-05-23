@@ -45,6 +45,8 @@ router.get('/campaigns/:id/next-executions', async (req, res) => {
       meta: claim.meta,
       runner: {
         should_send: shouldSend,
+        requested_batch_size: Number(claim?.meta?.requested_batch_size ?? batchSize),
+        effective_batch_size: Number(claim?.meta?.effective_batch_size ?? 1),
         claimed_count: claimedCount,
         reason: reason || null,
         queue_snapshot: {
@@ -69,7 +71,11 @@ router.post('/campaigns/:id/run-batch', async (req, res) => {
 
     const summary = await runCampaignExecutionBatch(campaignId, batchSize);
     const statusCode = summary.fatal_error ? 500 : 200;
-    res.status(statusCode).json(summary);
+    res.status(statusCode).json({
+      ...summary,
+      requested_batch_size: Number(summary?.requested_batch_size ?? batchSize),
+      effective_batch_size: Number(summary?.effective_batch_size ?? 1),
+    });
   } catch (err: any) {
     console.error('[RUN BATCH ERROR]', err);
     res.status(400).json({ error: err.message ?? 'Failed to run campaign batch' });

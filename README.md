@@ -76,6 +76,23 @@ Apply this migration in your cloud Supabase SQL editor:
 
 Then restart backend so runtime/schema caches refresh.
 
+## Delivered Metric Guardrail (No More False-Zero Loop)
+
+Use this one command against production API to verify the right backend/runtime is active and returning the delivery invariant payload:
+
+```bash
+curl -sS -H "Authorization: Bearer <auth_token>" \
+  "$NEXT_PUBLIC_API_BASE_URL/campaigns/<campaign_id>/reply-open-analytics" \
+  | jq '{analytics_version, sent, delivered, opened, bounced_total, pending_outcome, diagnostics: {delivery_invariant_applied, delivered_confirmed, delivered_inferred, delivered_promoted_from_open_reply, unmatched_events_count}}'
+```
+
+Expected guardrail checks:
+- `analytics_version` is `"delivery_invariant_v2"`
+- diagnostics include `delivery_invariant_applied`, `delivered_confirmed`, `delivered_inferred`, `delivered_promoted_from_open_reply`
+- if `sent > 0`, `opened > 0`, and `bounced_total = 0`, then `delivered` should not remain `0`
+
+If any guardrail field is missing, treat deployment as stale or API base misconfigured and verify dashboard `NEXT_PUBLIC_API_BASE_URL` points to the intended backend runtime.
+
 ### Remove Queue Integration Stack (archive then drop)
 
 If you want task-creator-only flow with no `agent_integrations` usage:
