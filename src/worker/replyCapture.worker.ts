@@ -110,7 +110,7 @@ async function getInboxTargets(): Promise<InboxPollTarget[]> {
       id,
       email_address,
       status,
-      smtp_accounts:smtp_account_id (
+      smtp_accounts:smtp_accounts!inboxes_smtp_account_id_fkey (
         host,
         port,
         username,
