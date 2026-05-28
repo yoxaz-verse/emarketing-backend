@@ -81,6 +81,24 @@ export function selectStrictRotationCandidate<T extends { inbox_id: string }>(
     : null;
 
   if (!selected) {
+    const candidateByInboxId = new Map(
+      input.candidates.map((candidate) => [candidate.inbox_id, candidate] as const)
+    );
+    for (let offset = 1; offset < ringSize; offset += 1) {
+      const idx = (targetRotationIndex + offset) % ringSize;
+      const fallbackInboxId = input.inboxIds[idx] ?? null;
+      if (!fallbackInboxId) continue;
+      const fallback = candidateByInboxId.get(fallbackInboxId) ?? null;
+      if (!fallback) continue;
+      return {
+        targetInboxId,
+        selected: fallback,
+        reason: 'eligible_sender_found',
+        rotation_block_reason: 'rotation_target_inbox_ineligible',
+        rotation_fallback_used: true,
+      };
+    }
+
     return {
       targetInboxId,
       selected: null,

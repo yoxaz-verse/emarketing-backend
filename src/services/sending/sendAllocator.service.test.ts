@@ -23,7 +23,7 @@ test('strict rotation selects exact minute-slot inbox when all inboxes are eligi
   }
 });
 
-test('strict rotation skips minute when target inbox is ineligible', () => {
+test('strict rotation falls forward to next eligible inbox when target is ineligible', () => {
   const inboxIds = ['inbox-1', 'inbox-2', 'inbox-3', 'inbox-4', 'inbox-5'];
   const candidates: Candidate[] = [
     { inbox_id: 'inbox-1' },
@@ -39,13 +39,13 @@ test('strict rotation skips minute when target inbox is ineligible', () => {
   });
 
   assert.equal(result.targetInboxId, 'inbox-3');
-  assert.equal(result.selected, null);
-  assert.equal(result.reason, 'rotation_target_inbox_ineligible');
-  assert.equal(result.rotation_fallback_used, false);
+  assert.equal(result.selected?.inbox_id ?? null, 'inbox-4');
+  assert.equal(result.reason, 'eligible_sender_found');
+  assert.equal(result.rotation_fallback_used, true);
   assert.equal(result.rotation_block_reason, 'rotation_target_inbox_ineligible');
 });
 
-test('strict rotation never falls back to other eligible inboxes across minutes', () => {
+test('strict rotation keeps continuity by using fallback when needed across minutes', () => {
   const inboxIds = ['inbox-1', 'inbox-2', 'inbox-3', 'inbox-4', 'inbox-5'];
 
   const minute0 = selectStrictRotationCandidate({
@@ -62,9 +62,10 @@ test('strict rotation never falls back to other eligible inboxes across minutes'
     minuteBucket: 1,
   });
   assert.equal(minute1.targetInboxId, 'inbox-2');
-  assert.equal(minute1.selected, null);
-  assert.equal(minute1.reason, 'rotation_target_inbox_ineligible');
-  assert.equal(minute1.rotation_fallback_used, false);
+  assert.equal(minute1.selected?.inbox_id ?? null, 'inbox-4');
+  assert.equal(minute1.reason, 'eligible_sender_found');
+  assert.equal(minute1.rotation_fallback_used, true);
+  assert.equal(minute1.rotation_block_reason, 'rotation_target_inbox_ineligible');
 
   const minute3 = selectStrictRotationCandidate({
     candidates: [{ inbox_id: 'inbox-1' }, { inbox_id: 'inbox-4' }],
@@ -73,6 +74,34 @@ test('strict rotation never falls back to other eligible inboxes across minutes'
   });
   assert.equal(minute3.selected?.inbox_id ?? null, 'inbox-4');
   assert.equal(minute3.reason, 'eligible_sender_found');
+});
+
+test('strict rotation fallback wraps around ring order', () => {
+  const inboxIds = ['inbox-1', 'inbox-2', 'inbox-3', 'inbox-4'];
+  const result = selectStrictRotationCandidate({
+    candidates: [{ inbox_id: 'inbox-2' }],
+    inboxIds,
+    minuteBucket: 3,
+  });
+  assert.equal(result.targetInboxId, 'inbox-4');
+  assert.equal(result.selected?.inbox_id ?? null, 'inbox-2');
+  assert.equal(result.reason, 'eligible_sender_found');
+  assert.equal(result.rotation_fallback_used, true);
+  assert.equal(result.rotation_block_reason, 'rotation_target_inbox_ineligible');
+});
+
+test('strict rotation returns null when no eligible candidates exist', () => {
+  const inboxIds = ['inbox-1', 'inbox-2', 'inbox-3'];
+  const result = selectStrictRotationCandidate({
+    candidates: [],
+    inboxIds,
+    minuteBucket: 1,
+  });
+  assert.equal(result.targetInboxId, 'inbox-2');
+  assert.equal(result.selected, null);
+  assert.equal(result.reason, 'rotation_target_inbox_ineligible');
+  assert.equal(result.rotation_fallback_used, false);
+  assert.equal(result.rotation_block_reason, 'rotation_target_inbox_ineligible');
 });
 
 test('temporary inbox cooldown blocks only when paused_until is in the future', () => {
