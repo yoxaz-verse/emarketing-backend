@@ -711,6 +711,39 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
 
   const total = (campaignLeads ?? []).length;
   const sentLeadSet = new Set(sentRows.map((r: any) => String(r.campaign_lead_id ?? '')).filter(Boolean));
+  const latestSentByLead = new Map<string, { sent_at: string | null; inbox_id: string | null }>();
+  for (const sentRow of sentRows ?? []) {
+    const campaignLeadId = String((sentRow as any)?.campaign_lead_id ?? '').trim();
+    if (!campaignLeadId) continue;
+    const sentAt = String((sentRow as any)?.sent_at ?? '').trim() || null;
+    const inboxId = String((sentRow as any)?.inbox_id ?? '').trim() || null;
+    const existing = latestSentByLead.get(campaignLeadId);
+    if (!existing || (sentAt && sentAt > String(existing.sent_at ?? ''))) {
+      latestSentByLead.set(campaignLeadId, {
+        sent_at: sentAt,
+        inbox_id: inboxId,
+      });
+    }
+  }
+  const latestInboxIds = Array.from(
+    new Set(
+      [...latestSentByLead.values()]
+        .map((row) => String(row?.inbox_id ?? '').trim())
+        .filter(Boolean)
+    )
+  );
+  const inboxEmailById = new Map<string, string>();
+  if (latestInboxIds.length > 0) {
+    const { data: inboxRows } = await supabase
+      .from('inboxes')
+      .select('id,email_address')
+      .in('id', latestInboxIds);
+    for (const inboxRow of inboxRows ?? []) {
+      const inboxId = String((inboxRow as any)?.id ?? '').trim();
+      if (!inboxId) continue;
+      inboxEmailById.set(inboxId, String((inboxRow as any)?.email_address ?? '').trim());
+    }
+  }
   const confirmedDeliveredSet = new Set<string>();
   const openedSet = new Set<string>();
   const repliedSet = new Set<string>();
@@ -822,6 +855,11 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
 
   const outcome_rows = (campaignLeads ?? []).map((lead: any) => {
     const clid = String(lead?.id ?? '');
+    const latestSent = latestSentByLead.get(clid);
+    const senderInboxId = String(latestSent?.inbox_id ?? '').trim() || null;
+    const senderInboxEmail = senderInboxId
+      ? (inboxEmailById.get(senderInboxId) ?? null)
+      : null;
     const lastEvent = lastEventByLead.get(clid);
     const eventType = String(lastEvent?.event_type ?? '').toLowerCase();
     let outcome = 'Not Sent';
@@ -854,6 +892,9 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
       bounce_reason: lastEvent?.raw_payload?.reason ?? null,
       source,
       confidence,
+      last_sent_at: latestSent?.sent_at ?? null,
+      sender_inbox_id: senderInboxId,
+      sender_inbox_email: senderInboxEmail,
     };
   });
 
