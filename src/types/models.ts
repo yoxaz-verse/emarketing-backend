@@ -5,6 +5,7 @@ export interface Inbox {
     daily_limit: number;
     sent_today: number;
     status: 'active' | 'paused';
+    paused_until?: string | null;
   }
   
   export interface Lead {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { selectStrictRotationCandidate } from './sendAllocator.service.js';
+import { isInboxTemporarilyPaused, selectStrictRotationCandidate } from './sendAllocator.service.js';
 
 type Candidate = { inbox_id: string };
 
@@ -73,4 +73,12 @@ test('strict rotation never falls back to other eligible inboxes across minutes'
   });
   assert.equal(minute3.selected?.inbox_id ?? null, 'inbox-4');
   assert.equal(minute3.reason, 'eligible_sender_found');
+});
+
+test('temporary inbox cooldown blocks only when paused_until is in the future', () => {
+  const now = new Date('2026-05-28T10:00:00.000Z');
+  assert.equal(isInboxTemporarilyPaused('2026-05-28T10:30:00.000Z', now), true);
+  assert.equal(isInboxTemporarilyPaused('2026-05-28T09:30:00.000Z', now), false);
+  assert.equal(isInboxTemporarilyPaused(null, now), false);
+  assert.equal(isInboxTemporarilyPaused('not-a-date', now), false);
 });

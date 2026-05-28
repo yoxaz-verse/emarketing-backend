@@ -34,6 +34,23 @@ function mapDetachConflictError(err: any): never {
   throw err;
 }
 
+export function isCampaignAttachableEligibility(value: unknown): boolean {
+  const eligibility = String(value ?? '').toLowerCase();
+  return eligibility === 'eligible' || eligibility === 'valid' || eligibility === 'validated' || eligibility === 'risky';
+}
+
+export function isCampaignLeadAttachableState(input: {
+  email_eligibility?: unknown;
+  permanently_failed?: unknown;
+  is_used?: unknown;
+}): boolean {
+  if (!isCampaignAttachableEligibility(input.email_eligibility)) return false;
+  if (String(input.email_eligibility ?? '').toLowerCase() === 'blocked') return false;
+  if (input.permanently_failed === true) return false;
+  if (input.is_used === true) return false;
+  return true;
+}
+
 async function assertCampaignIsMutableForLeadMutation(campaignId: string) {
   const { data: campaign, error } = await supabase
     .from('campaigns')
@@ -112,7 +129,6 @@ export async function attachLeadsToCampaign(
     throw leadFetchError;
   }
 
-  const allowedStatuses = new Set(['eligible', 'valid', 'validated']);
   const leadStateMap = new Map<string, { eligibility: string; isBlocked: boolean; isUsed: boolean }>(
     (leadRows ?? []).map((row: any) => [
       String(row.id),
@@ -135,10 +151,11 @@ export async function attachLeadsToCampaign(
   const eligibleLeadIds = newLeadIds.filter((id) => {
     const state = leadStateMap.get(String(id));
     if (!state) return false;
-    if (!allowedStatuses.has(state.eligibility)) return false;
-    if (state.isBlocked) return false;
-    if (state.isUsed) return false;
-    return true;
+    return isCampaignLeadAttachableState({
+      email_eligibility: state.eligibility,
+      permanently_failed: state.isBlocked,
+      is_used: state.isUsed,
+    });
   });
   const skippedExisting = requested - newLeadIds.length;
   const skippedIneligible = newLeadIds.length - eligibleLeadIds.length;

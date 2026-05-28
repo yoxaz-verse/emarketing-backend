@@ -13,6 +13,7 @@ export type Database = {
           consecutive_failures: number;
           status: string;
           paused_reason: string | null;
+          paused_until: string | null;
           last_sent_at: string | null;
           created_at: string;
         };
@@ -24,11 +25,13 @@ export type Database = {
           warmup_enabled?: boolean;
           warmup_day?: number;
           status?: string;
+          paused_until?: string | null;
           created_at?: string;
         };
         Update: {
           status?: string;
           paused_reason?: string | null;
+          paused_until?: string | null;
           warmup_day?: number;
           consecutive_failures?: number;
           last_sent_at?: string | null;

@@ -28,6 +28,7 @@ type AllocationCandidate = {
   domain_headroom: number;
   inbox_headroom: number;
   last_sent_at: string | null;
+  paused_until: string | null;
   rotation_index: number;
 };
 
@@ -112,6 +113,13 @@ function getIsoDayStart(now: Date): string {
 
 function minuteBucketUtc(now: Date): number {
   return Math.floor(now.getTime() / 60000);
+}
+
+export function isInboxTemporarilyPaused(pausedUntilRaw: unknown, now: Date = new Date()): boolean {
+  if (!pausedUntilRaw) return false;
+  const dt = new Date(String(pausedUntilRaw));
+  if (Number.isNaN(dt.getTime())) return false;
+  return dt.getTime() > now.getTime();
 }
 
 export async function allocateCampaignSender(input: {
@@ -203,6 +211,7 @@ export async function allocateCampaignSender(input: {
       health_score,
       is_paused,
       hard_paused,
+      paused_until,
       status,
       last_sent_at
     `)
@@ -328,6 +337,10 @@ export async function allocateCampaignSender(input: {
       bump('inbox_paused');
       continue;
     }
+    if (isInboxTemporarilyPaused((inbox as any).paused_until, now)) {
+      bump('inbox_temp_paused_until');
+      continue;
+    }
     if (!(inbox as any).smtp_account_id) {
       bump('missing_smtp');
       continue;
@@ -429,6 +442,7 @@ export async function allocateCampaignSender(input: {
       domain_headroom: Math.min(remDailyDomain, remHourDomain),
       inbox_headroom: Math.min(remDailyInbox, remHourInbox),
       last_sent_at: (inbox as any).last_sent_at ? String((inbox as any).last_sent_at) : null,
+      paused_until: (inbox as any).paused_until ? String((inbox as any).paused_until) : null,
       rotation_index: inboxIds.indexOf(inboxId),
     });
   }

@@ -23,6 +23,8 @@ const DELIVERABILITY_MINIMAL_TRACKING_ENABLED = String(process.env.DELIVERABILIT
 const CAMPAIGN_MINUTE_LOCK_PREFIX = 'campaign-minute-lock';
 const CAMPAIGN_MINUTE_LOCK_SAFETY_SECONDS = 2;
 const LOCAL_LOCK_SWEEP_MS = 30_000;
+const TEMP_UNDELIVERED_PAUSE_MS = 60 * 60 * 1000;
+const TEMP_UNDELIVERED_PAUSE_REASON = 'temporary_pause_undelivered_1h';
 
 let minuteLockRedis: IORedis | null | undefined;
 const localMinuteLocks = new Map<string, number>();
@@ -547,7 +549,8 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
         inbox_id,
         inboxes:inbox_id (
           id,
-          is_paused
+          is_paused,
+          paused_until
         )
       `)
       .eq('campaign_id', campaignId),
@@ -597,7 +600,12 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
 
   const inboxRows = inboxesResult.data ?? [];
   const totalInboxes = inboxRows.length;
+  const nowIso = new Date().toISOString();
   const pausedInboxes = inboxRows.filter((r: any) => Boolean(r?.inboxes?.is_paused)).length;
+  const tempPausedInboxes = inboxRows.filter((r: any) => {
+    const pausedUntilRaw = String(r?.inboxes?.paused_until ?? '').trim();
+    return pausedUntilRaw.length > 0 && pausedUntilRaw > nowIso;
+  }).length;
   const activeInboxes = Math.max(0, totalInboxes - pausedInboxes);
 
   const claimHealth = await supabase.rpc('claim_campaign_executions', {
@@ -661,6 +669,9 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
   if (pausedInboxes > 0 && activeInboxes === 0) {
     next_actions.push('All assigned inboxes are paused; unpause an inbox or assign a healthy inbox.');
   }
+  if ((allocator.blocked_by_reason?.inbox_temp_paused_until ?? 0) > 0) {
+    next_actions.push('One or more inboxes are in 1-hour temporary cooldown due to undelivered outcomes.');
+  }
   if (!allocator.selected) {
     next_actions.push(`Allocator blocked sending: ${allocator.reason || 'no_eligible_sender'}.`);
   }
@@ -695,6 +706,7 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
       total: totalInboxes,
       active: activeInboxes,
       paused: pausedInboxes,
+      temp_paused: tempPausedInboxes,
     },
     risky_cap_paused_count: Number(pausedRiskyResult.count ?? 0),
     processing_health: {
@@ -724,6 +736,7 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
       candidate_capacities: allocator.candidates.map((candidate) => ({
         inbox_id: candidate.inbox_id,
         domain_id: candidate.sending_domain_id,
+        paused_until: candidate.paused_until,
         rem_daily_inbox: candidate.rem_daily_inbox,
         rem_hour_inbox: candidate.rem_hour_inbox,
         rem_daily_domain: candidate.rem_daily_domain,
@@ -1700,6 +1713,7 @@ export async function markCampaignLeadFailed(
   }
 
   const inboxId = data.assigned_inbox_id;
+  const tempPauseUntilIso = new Date(Date.now() + TEMP_UNDELIVERED_PAUSE_MS).toISOString();
 
   // 1️⃣ Update campaign lead
   await supabase
@@ -1724,6 +1738,8 @@ export async function markCampaignLeadFailed(
   const inboxUpdate: any = {
     failed_count: supabase.raw('failed_count + 1'),
     consecutive_failures: newFailureCount,
+    paused_until: tempPauseUntilIso,
+    paused_reason: TEMP_UNDELIVERED_PAUSE_REASON,
   };
 
   if (newFailureCount >= 3) {
@@ -1953,7 +1969,7 @@ export async function maybeCompleteCampaign(campaignId: string) {
 
   type BounceType = 'hard' | 'soft' | 'reply';
   
-  export async function handleBounce(
+export async function handleBounce(
     email:string,
     type:'hard'|'soft',
     reason?:string
@@ -1964,10 +1980,13 @@ export async function maybeCompleteCampaign(campaignId: string) {
       .eq('email_address',email)
       .single();
   
-    if (!inbox) return;
+  if (!inbox) return;
+  const tempPauseUntilIso = new Date(Date.now() + TEMP_UNDELIVERED_PAUSE_MS).toISOString();
   
-    let updates:any = {
-      failed_count: supabase.raw('failed_count + 1')
+  let updates:any = {
+      failed_count: supabase.raw('failed_count + 1'),
+      paused_until: tempPauseUntilIso,
+      paused_reason: TEMP_UNDELIVERED_PAUSE_REASON,
     };
   
     if (type === 'hard') {
