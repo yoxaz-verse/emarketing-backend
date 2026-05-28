@@ -45,6 +45,59 @@ export type CampaignAllocatorResult = {
   rotation_block_reason: string | null;
 };
 
+export type RotationSelectionInput<T extends { inbox_id: string }> = {
+  candidates: T[];
+  inboxIds: string[];
+  minuteBucket: number;
+};
+
+export type RotationSelectionResult<T extends { inbox_id: string }> = {
+  targetInboxId: string | null;
+  selected: T | null;
+  reason: 'eligible_sender_found' | 'rotation_target_inbox_ineligible';
+  rotation_block_reason: string | null;
+  rotation_fallback_used: boolean;
+};
+
+export function selectStrictRotationCandidate<T extends { inbox_id: string }>(
+  input: RotationSelectionInput<T>
+): RotationSelectionResult<T> {
+  const ringSize = input.inboxIds.length;
+  if (ringSize <= 0) {
+    return {
+      targetInboxId: null,
+      selected: null,
+      reason: 'rotation_target_inbox_ineligible',
+      rotation_block_reason: 'no_campaign_inboxes',
+      rotation_fallback_used: false,
+    };
+  }
+
+  const targetRotationIndex = ((input.minuteBucket % ringSize) + ringSize) % ringSize;
+  const targetInboxId = input.inboxIds[targetRotationIndex] ?? null;
+  const selected = targetInboxId
+    ? (input.candidates.find((candidate) => candidate.inbox_id === targetInboxId) ?? null)
+    : null;
+
+  if (!selected) {
+    return {
+      targetInboxId,
+      selected: null,
+      reason: 'rotation_target_inbox_ineligible',
+      rotation_block_reason: 'rotation_target_inbox_ineligible',
+      rotation_fallback_used: false,
+    };
+  }
+
+  return {
+    targetInboxId,
+    selected,
+    reason: 'eligible_sender_found',
+    rotation_block_reason: null,
+    rotation_fallback_used: false,
+  };
+}
+
 function asNumber(value: unknown, fallback = 0): number {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
@@ -380,6 +433,13 @@ export async function allocateCampaignSender(input: {
     });
   }
 
+  const minuteBucket = minuteBucketUtc(now);
+  const rotationSelection = selectStrictRotationCandidate({
+    candidates,
+    inboxIds,
+    minuteBucket,
+  });
+
   if (candidates.length === 0) {
     return {
       eligible_count: 0,
@@ -389,45 +449,40 @@ export async function allocateCampaignSender(input: {
       candidates: [],
       schedule_allowed: true,
       schedule_reason: null,
-      rotation_next_inbox_id: orderedCampaignInboxIds[0] ?? null,
+      rotation_next_inbox_id: rotationSelection.targetInboxId,
       rotation_used_inbox_id: null,
       rotation_fallback_used: false,
       rotation_block_reason: Object.keys(blockedByReason)[0] ?? 'no_eligible_sender',
     };
   }
 
-  const minuteBucket = minuteBucketUtc(now);
-  const ringSize = inboxIds.length;
-  const targetRotationIndex = ringSize > 0 ? (minuteBucket % ringSize) : 0;
-  const targetInboxId: string | null = inboxIds[targetRotationIndex] ?? null;
-
-  candidates.sort((a, b) => {
-    const aDistance = ringSize > 0 ? ((a.rotation_index - targetRotationIndex + ringSize) % ringSize) : 0;
-    const bDistance = ringSize > 0 ? ((b.rotation_index - targetRotationIndex + ringSize) % ringSize) : 0;
-    if (aDistance !== bDistance) return aDistance - bDistance;
-    if (b.domain_headroom !== a.domain_headroom) return b.domain_headroom - a.domain_headroom;
-    if (b.inbox_headroom !== a.inbox_headroom) return b.inbox_headroom - a.inbox_headroom;
-    const aTs = a.last_sent_at ? new Date(a.last_sent_at).getTime() : 0;
-    const bTs = b.last_sent_at ? new Date(b.last_sent_at).getTime() : 0;
-    if (aTs !== bTs) return aTs - bTs;
-    return a.inbox_id.localeCompare(b.inbox_id);
-  });
-
-  const selected = candidates[0];
-  const rotationFallbackUsed = Boolean(targetInboxId && selected.inbox_id !== targetInboxId);
-  const rotationBlockReason = rotationFallbackUsed ? 'rotation_inbox_blocked_or_ineligible' : null;
+  if (!rotationSelection.selected) {
+    return {
+      eligible_count: candidates.length,
+      blocked_by_reason: blockedByReason,
+      selected: null,
+      reason: rotationSelection.reason,
+      candidates,
+      schedule_allowed: true,
+      schedule_reason: null,
+      rotation_next_inbox_id: rotationSelection.targetInboxId,
+      rotation_used_inbox_id: null,
+      rotation_fallback_used: false,
+      rotation_block_reason: rotationSelection.rotation_block_reason,
+    };
+  }
 
   return {
     eligible_count: candidates.length,
     blocked_by_reason: blockedByReason,
-    selected,
-    reason: 'eligible_sender_found',
+    selected: rotationSelection.selected,
+    reason: rotationSelection.reason,
     candidates,
     schedule_allowed: true,
     schedule_reason: null,
-    rotation_next_inbox_id: targetInboxId,
-    rotation_used_inbox_id: selected.inbox_id,
-    rotation_fallback_used: rotationFallbackUsed,
-    rotation_block_reason: rotationBlockReason,
+    rotation_next_inbox_id: rotationSelection.targetInboxId,
+    rotation_used_inbox_id: rotationSelection.selected.inbox_id,
+    rotation_fallback_used: rotationSelection.rotation_fallback_used,
+    rotation_block_reason: rotationSelection.rotation_block_reason,
   };
 }
