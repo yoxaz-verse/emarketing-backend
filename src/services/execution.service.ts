@@ -101,6 +101,8 @@ export type CampaignBatchRunSummary = {
   completed_step: boolean;
   stale_requeued_count: number;
   migrated_pending_count: number;
+  repaired_status_step_mismatch_count: number;
+  remaining_status_step_mismatch_count: number;
   claim_reason: string | null;
   claim_path: 'rpc' | 'fallback' | null;
   errors: Array<{
@@ -109,6 +111,13 @@ export type CampaignBatchRunSummary = {
     detail?: string | null;
   }>;
   fatal_error: string | null;
+};
+
+type StepProgressResolution = {
+  maxStep: number;
+  nextStep: number;
+  nextStatus: 'queued' | 'completed';
+  isSequenceFinished: boolean;
 };
 
 type MinuteThrottleSource = 'claim' | 'send';
@@ -517,6 +526,70 @@ async function migratePendingLeadsToQueued(campaignId: string): Promise<number> 
   return (updatedRows ?? []).length;
 }
 
+async function resolveCampaignMaxStep(campaignId: string): Promise<number> {
+  const { data: stepRows, error: stepError } = await supabase
+    .from('campaigns')
+    .select(`
+      sequences:sequence_id (
+        sequence_steps (
+          step_number
+        )
+      )
+    `)
+    .eq('id', campaignId)
+    .maybeSingle();
+
+  if (stepError) throw stepError;
+
+  const steps = ((stepRows as any)?.sequences?.sequence_steps ?? []) as Array<{ step_number?: number | null }>;
+  const maxStep = Math.max(0, ...steps.map((row) => Number(row?.step_number ?? 0)).filter((n) => Number.isFinite(n)));
+  if (maxStep <= 0) {
+    throw new Error('Campaign sequence has no executable steps');
+  }
+  return maxStep;
+}
+
+function resolveStepProgressionAfterSend(currentStepRaw: unknown, maxStep: number): StepProgressResolution {
+  const currentStep = Math.max(1, Number(currentStepRaw ?? 1) || 1);
+  const nextStep = currentStep + 1;
+  const isSequenceFinished = nextStep > maxStep;
+  return {
+    maxStep,
+    nextStep,
+    nextStatus: isSequenceFinished ? 'completed' : 'queued',
+    isSequenceFinished,
+  };
+}
+
+async function autoRepairCompletedStepMismatchLeads(campaignId: string, maxStep: number): Promise<number> {
+  const { data: repairedRows, error: repairError } = await supabase
+    .from('campaign_leads')
+    .update({
+      status: 'queued',
+      status_reason: 'auto_requeued_status_step_mismatch',
+      processing_at: null,
+      execution_id: null,
+    })
+    .eq('campaign_id', campaignId)
+    .eq('status', 'completed')
+    .lte('current_step', maxStep)
+    .select('id');
+
+  if (repairError) throw repairError;
+  return (repairedRows ?? []).length;
+}
+
+async function countRemainingCompletedStepMismatchLeads(campaignId: string, maxStep: number): Promise<number> {
+  const { count, error } = await supabase
+    .from('campaign_leads')
+    .select('id', { count: 'exact', head: true })
+    .eq('campaign_id', campaignId)
+    .eq('status', 'completed')
+    .lte('current_step', maxStep);
+  if (error) throw error;
+  return Number(count ?? 0);
+}
+
 export async function getCampaignExecutionDiagnostics(campaignId: string) {
   const config = await getSendingLimitsConfig();
   const scheduleGate = isNowWithinSendingSchedule(config);
@@ -532,7 +605,8 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
 
   if (campaignError) throw campaignError;
 
-  const [statusRowsResult, pausedRiskyResult, inboxesResult] = await Promise.all([
+  const maxStep = await resolveCampaignMaxStep(campaignId);
+  const [statusRowsResult, pausedRiskyResult, inboxesResult, remainingStatusStepMismatchCount] = await Promise.all([
     supabase
       .from('campaign_leads')
       .select('status,processing_at')
@@ -554,6 +628,7 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
         )
       `)
       .eq('campaign_id', campaignId),
+    countRemainingCompletedStepMismatchLeads(campaignId, maxStep),
   ]);
 
   if (statusRowsResult.error) throw statusRowsResult.error;
@@ -694,6 +769,10 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
       sequence_id: (campaign as any)?.sequence_id ?? null,
     },
     lead_counts: counts,
+    status_step_mismatch: {
+      remaining_count: remainingStatusStepMismatchCount,
+      max_step: maxStep,
+    },
     schedule_gate: {
       allowed: scheduleGate.allowed,
       reason: scheduleGate.reason ?? null,
@@ -806,6 +885,8 @@ export async function runCampaignExecutionBatch(
     completed_step: false,
     stale_requeued_count: 0,
     migrated_pending_count: 0,
+    repaired_status_step_mismatch_count: 0,
+    remaining_status_step_mismatch_count: 0,
     claim_reason: null,
     claim_path: null,
     errors: [],
@@ -826,8 +907,11 @@ export async function runCampaignExecutionBatch(
       pending_count: pendingBefore,
     };
 
+    const maxStep = await resolveCampaignMaxStep(campaignId);
     const migratedPendingCount = await migratePendingLeadsToQueued(campaignId);
     summary.migrated_pending_count = migratedPendingCount;
+    const repairedCount = await autoRepairCompletedStepMismatchLeads(campaignId, maxStep);
+    summary.repaired_status_step_mismatch_count = repairedCount;
 
     const staleRecovery = await requeueStaleProcessingLeads({
       campaignId,
@@ -899,6 +983,7 @@ export async function runCampaignExecutionBatch(
       countCampaignLeadsByStatus(campaignId, 'paused'),
       countCampaignLeadsByStatus(campaignId, 'pending'),
     ]);
+    summary.remaining_status_step_mismatch_count = await countRemainingCompletedStepMismatchLeads(campaignId, maxStep);
     summary.queue_snapshot_after = {
       queued_count: queuedAfter,
       processing_count: processingAfter,
@@ -1669,13 +1754,28 @@ export async function markCampaignLeadSent(
 
   const inboxId = data.assigned_inbox_id;
 
+  const { data: leadCampaign, error: leadCampaignError } = await supabase
+    .from('campaign_leads')
+    .select('campaign_id')
+    .eq('id', campaignLeadId)
+    .maybeSingle();
+
+  if (leadCampaignError || !leadCampaign) {
+    throw new Error('Campaign lead campaign context not found');
+  }
+
+  const maxStep = await resolveCampaignMaxStep(String((leadCampaign as any).campaign_id ?? ''));
+  const progression = resolveStepProgressionAfterSend(data.current_step, maxStep);
+
   await supabase
     .from('campaign_leads')
     .update({
-      status: 'completed',
+      status: progression.nextStatus,
       status_reason: reason,
       last_sent_at: new Date().toISOString(),
-      current_step: data.current_step + 1,
+      current_step: progression.nextStep,
+      processing_at: null,
+      execution_id: null,
     })
     .eq('id', campaignLeadId)
     .eq('status', 'processing');
