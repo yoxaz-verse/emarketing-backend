@@ -4,6 +4,14 @@ function normalizeEmail(value: unknown): string {
   return String(value ?? '').trim().toLowerCase();
 }
 
+function normalizePurpose(value: unknown): 'campaign' | 'newsletter' {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (normalized === 'campaign' || normalized === 'newsletter') {
+    return normalized;
+  }
+  throw new Error('Inbox purpose must be either campaign or newsletter');
+}
+
 export async function handleInboxBeforeWrite(
   payload: Record<string, any>,
   mode: 'create' | 'update',
@@ -16,6 +24,11 @@ export async function handleInboxBeforeWrite(
   }
 
   payload.email_address = normalizedEmail;
+  if (mode === 'create') {
+    payload.purpose = normalizePurpose(payload.purpose ?? 'campaign');
+  } else if (payload.purpose !== undefined) {
+    payload.purpose = normalizePurpose(payload.purpose);
+  }
 
   // Enforce uniqueness at service layer (DB unique index should still exist)
   const duplicateQuery = supabase

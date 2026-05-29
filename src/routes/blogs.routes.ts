@@ -6,7 +6,9 @@ import {
   createBlog,
   createBlogSource,
   distributeBlog,
+  fetchBlogsByContent,
   importBlog,
+  importFetchedBlogs,
   listBlogPlatformConnectors,
   listBlogPublishJobs,
   listBlogs,
@@ -155,6 +157,40 @@ router.post('/import', async (req, res) => {
     const status = statusForError(err, 400);
     console.error('[BLOG_IMPORT_FETCH_REJECT]', { status, code: err?.code, message: err?.message ?? err });
     res.status(status).json({ error: stableErrorMessage(err, 'Failed to import blog') });
+  }
+});
+
+router.post('/fetch', async (req, res) => {
+  try {
+    const data = await fetchBlogsByContent({
+      content_or_keywords: req.body?.content_or_keywords,
+      source_ids: req.body?.source_ids,
+      publisher: req.body?.publisher,
+      category: req.body?.category,
+      limit: req.body?.limit,
+    });
+    res.json(data);
+  } catch (err: any) {
+    const status = statusForError(err, 400);
+    console.error('[BLOG_FETCH_BY_CONTENT_REJECT]', { status, code: err?.code, message: err?.message ?? err });
+    res.status(status).json({ error: stableErrorMessage(err, 'Failed to fetch blogs by content') });
+  }
+});
+
+router.post('/fetch/import', async (req, res) => {
+  try {
+    const data = await importFetchedBlogs(
+      {
+        items: req.body?.items,
+        community_ids: req.body?.community_ids,
+      },
+      req.auth?.user_id
+    );
+    res.json(data);
+  } catch (err: any) {
+    const status = statusForError(err, 400);
+    console.error('[BLOG_FETCH_IMPORT_REJECT]', { status, code: err?.code, message: err?.message ?? err });
+    res.status(status).json({ error: stableErrorMessage(err, 'Failed to import fetched blogs') });
   }
 });
 

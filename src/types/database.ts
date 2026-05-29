@@ -6,6 +6,7 @@ export type Database = {
           id: string;
           email_address: string;
           provider: string;
+          purpose: 'campaign' | 'newsletter';
           daily_limit: number;
           hourly_limit: number;
           warmup_enabled: boolean;
@@ -20,6 +21,7 @@ export type Database = {
         Insert: {
           email_address: string;
           provider: string;
+          purpose?: 'campaign' | 'newsletter';
           daily_limit: number;
           hourly_limit: number;
           warmup_enabled?: boolean;
@@ -30,6 +32,7 @@ export type Database = {
         };
         Update: {
           status?: string;
+          purpose?: 'campaign' | 'newsletter';
           paused_reason?: string | null;
           paused_until?: string | null;
           warmup_day?: number;

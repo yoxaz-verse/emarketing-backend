@@ -437,6 +437,10 @@ export const TABLE_FIELD_MAP: Record<
       db: 'provider',
       behavior: 'plain', // mxroute | google
     },
+    purpose: {
+      db: 'purpose',
+      behavior: 'plain', // campaign | newsletter
+    },
     sending_domain_id: {
       db: 'sending_domain_id',
       behavior: 'plain',

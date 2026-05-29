@@ -507,11 +507,12 @@ async function getSenderInfra() {
     .from('inboxes')
     .select('id,email_address,smtp_account_id')
     .eq('is_paused', false)
+    .eq('purpose', 'newsletter')
     .order('created_at', { ascending: true })
     .limit(1)
     .maybeSingle();
 
-  if (inboxError || !inbox) throw new Error('No active inbox available for newsletter sending');
+  if (inboxError || !inbox) throw new Error('No active newsletter-purpose inbox available for newsletter sending');
 
   const { data: smtp, error: smtpError } = await supabase
     .from('smtp_accounts')

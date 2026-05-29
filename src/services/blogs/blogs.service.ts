@@ -19,6 +19,26 @@ type ImportBlogInput = {
   community_ids?: string[];
 };
 
+type FetchBlogsInput = {
+  content_or_keywords: string;
+  source_ids?: string[];
+  publisher?: string | null;
+  category?: string | null;
+  limit?: number;
+};
+
+type FetchResultItem = {
+  source_id: string;
+  external_id: string;
+  title: string;
+  excerpt: string;
+  body: string;
+  source_url: string;
+  publisher_name: string;
+  published_at: string | null;
+  match_score: number;
+};
+
 type DistributeBlogInput = {
   channels: SocialPlatformCode[];
   scheduled_at?: string | null;
@@ -153,6 +173,27 @@ function normalizeCommunityIds(ids?: string[]): string[] {
 
 function dedupeHashFor(url: string, title: string): string {
   return crypto.createHash('sha256').update(`${url}|${title.toLowerCase()}`).digest('hex');
+}
+
+function normalizeKeywordTokens(input: string): string[] {
+  return Array.from(new Set(
+    String(input || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .map((v) => v.trim())
+      .filter((v) => v.length >= 2)
+  ));
+}
+
+function computeFetchMatchScore(tokens: string[], title: string, body: string, categories: string[]): number {
+  if (tokens.length === 0) return 0;
+  const haystack = `${title} ${body} ${categories.join(' ')}`.toLowerCase();
+  let hits = 0;
+  for (const token of tokens) {
+    if (haystack.includes(token)) hits += 1;
+  }
+  return Number((hits / tokens.length).toFixed(4));
 }
 
 async function extractFromUrl(url: string): Promise<{ title: string; body: string }> {
@@ -325,6 +366,176 @@ export async function importBlog(input: ImportBlogInput, userId?: string | null)
     source_url: parsed.link ?? sourceUrl,
     community_ids: input.community_ids,
   }, userId);
+}
+
+export async function fetchBlogsByContent(input: FetchBlogsInput) {
+  const query = String(input.content_or_keywords ?? '').trim();
+  if (!query) throw new Error('content_or_keywords is required');
+
+  const tokens = normalizeKeywordTokens(query);
+  if (tokens.length === 0) throw new Error('content_or_keywords must include at least one searchable token');
+
+  const safeLimit = Math.max(1, Math.min(100, Number(input.limit ?? 25) || 25));
+  const sourceIds = Array.isArray(input.source_ids)
+    ? Array.from(new Set(input.source_ids.map((v) => String(v || '').trim()).filter(Boolean)))
+    : [];
+  const publisherFilter = String(input.publisher ?? '').trim().toLowerCase();
+  const categoryFilter = String(input.category ?? '').trim().toLowerCase();
+
+  let sourcesQuery = supabase
+    .from('blog_sources')
+    .select('*')
+    .eq('active', true)
+    .order('created_at', { ascending: false });
+
+  if (sourceIds.length > 0) sourcesQuery = sourcesQuery.in('id', sourceIds);
+  if (publisherFilter) sourcesQuery = sourcesQuery.ilike('publisher_name', `%${publisherFilter}%`);
+
+  const { data: sources, error: sourceError } = await sourcesQuery;
+  if (sourceError) throw sourceError;
+
+  const matched: FetchResultItem[] = [];
+
+  for (const source of sources ?? []) {
+    const sourceCategories = Array.isArray(source.categories)
+      ? source.categories.map((v: string) => String(v || '').toLowerCase().trim()).filter(Boolean)
+      : [];
+    if (categoryFilter && !sourceCategories.some((c) => c.includes(categoryFilter))) continue;
+
+    if (source.provider_type !== 'rss') continue;
+    try {
+      const res = await fetch(String(source.feed_url));
+      if (!res.ok) continue;
+      const xml = await res.text();
+      const items = parseRssItems(xml).slice(0, 12);
+      for (const item of items) {
+        const score = computeFetchMatchScore(tokens, item.title, item.body, sourceCategories);
+        if (score <= 0) continue;
+        matched.push({
+          source_id: source.id,
+          external_id: item.external_id ?? dedupeHashFor(item.link, item.title),
+          title: item.title,
+          excerpt: extractExcerpt(item.body, 260),
+          body: item.body.slice(0, 12000),
+          source_url: item.link,
+          publisher_name: String(source.publisher_name ?? 'Unknown Publisher'),
+          published_at: item.published_at ?? null,
+          match_score: score,
+        });
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  const uniqueByKey = new Map<string, FetchResultItem>();
+  for (const item of matched) {
+    const key = dedupeHashFor(item.source_url, item.title);
+    const existing = uniqueByKey.get(key);
+    if (!existing || item.match_score > existing.match_score) uniqueByKey.set(key, item);
+  }
+
+  const results = Array.from(uniqueByKey.values())
+    .sort((a, b) => b.match_score - a.match_score)
+    .slice(0, safeLimit);
+
+  return {
+    query,
+    total_candidates: results.length,
+    items: results,
+  };
+}
+
+export async function importFetchedBlogs(
+  input: { items: FetchResultItem[]; community_ids?: string[] },
+  userId?: string | null
+) {
+  const items = Array.isArray(input.items) ? input.items : [];
+  if (items.length === 0) throw new Error('items is required');
+  const communityIds = normalizeCommunityIds(input.community_ids);
+
+  const created_blog_ids: string[] = [];
+  const skipped: Array<{ external_id: string; reason: string }> = [];
+
+  for (const item of items) {
+    const title = String(item.title ?? '').trim();
+    const body = String(item.body ?? '').trim();
+    const sourceUrl = String(item.source_url ?? '').trim();
+    if (!title || !body || !sourceUrl) {
+      skipped.push({ external_id: String(item.external_id ?? 'unknown'), reason: 'missing_required_fields' });
+      continue;
+    }
+
+    const hash = dedupeHashFor(sourceUrl, title);
+    const { data: existing } = await supabase
+      .from('blog_ingestion_items')
+      .select('id')
+      .eq('dedupe_hash', hash)
+      .maybeSingle();
+    if (existing) {
+      skipped.push({ external_id: String(item.external_id ?? hash), reason: 'duplicate_source_item' });
+      continue;
+    }
+
+    const moderationFlags = computeModerationFlags(title, body);
+    const generatedContent = buildGeneratedContent(title, body, sourceUrl, String(item.publisher_name ?? ''));
+    const blog = await createBlog({
+      title,
+      body,
+      source_type: 'rss',
+      source_url: sourceUrl,
+      community_ids: communityIds,
+    }, userId);
+
+    const { error: patchError } = await supabase
+      .from('blogs')
+      .update({
+        status: 'pending_review',
+        source_snapshot: {
+          provider_type: 'rss',
+          publisher_name: item.publisher_name,
+          source_url: sourceUrl,
+          published_at: item.published_at ?? null,
+          fetch_match_score: item.match_score,
+        },
+        generated_content: generatedContent,
+        moderation_flags: moderationFlags,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', blog.id);
+    if (patchError) throw patchError;
+
+    const { error: ingestError } = await supabase
+      .from('blog_ingestion_items')
+      .insert({
+        source_id: item.source_id,
+        canonical_url: sourceUrl,
+        dedupe_hash: hash,
+        external_id: item.external_id ?? null,
+        title,
+        snippet: extractExcerpt(body, 280),
+        content_text: body,
+        published_at: item.published_at ?? null,
+        language: 'en',
+        source_snapshot: {
+          provider_type: 'rss',
+          publisher_name: item.publisher_name,
+          source_url: sourceUrl,
+        },
+        moderation_flags: moderationFlags,
+        ingestion_status: 'pending_review',
+      });
+    if (ingestError) throw ingestError;
+
+    created_blog_ids.push(blog.id);
+  }
+
+  return {
+    created_blog_ids,
+    created_count: created_blog_ids.length,
+    skipped_count: skipped.length,
+    skipped,
+  };
 }
 
 export async function runRssIngestion(userId?: string | null) {
