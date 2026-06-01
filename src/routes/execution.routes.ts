@@ -14,6 +14,7 @@ import {
   getCampaignExecutionWakeState,
   getCampaignExecutionDiagnostics,
   runCampaignExecutionBatch,
+  repairCampaignStateNow,
 } from '../services/execution.service';
 import { supabase } from '../supabase';
 import { ingestInboundReply } from '../services/replyIngestService.js';
@@ -90,6 +91,18 @@ router.get('/campaigns/:id/diagnostics', async (req, res) => {
   } catch (err: any) {
     console.error('[EXECUTION DIAGNOSTICS ERROR]', err);
     res.status(400).json({ error: err.message ?? 'Failed to read execution diagnostics' });
+  }
+});
+
+router.post('/campaigns/:id/repair-state', async (req, res) => {
+  try {
+    const { id: campaignId } = req.params;
+    const apply = String(req.query.apply ?? req.body?.apply ?? 'false').toLowerCase() === 'true';
+    const summary = await repairCampaignStateNow(campaignId, apply);
+    res.json(summary);
+  } catch (err: any) {
+    console.error('[REPAIR CAMPAIGN STATE ERROR]', err);
+    res.status(400).json({ error: err.message ?? 'Failed to repair campaign state' });
   }
 });
 

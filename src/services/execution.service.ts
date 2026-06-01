@@ -33,6 +33,7 @@ let lastLocalLockSweepAt = 0;
 type EmptyClaimReason =
   | 'schedule_blocked'
   | 'campaign_minute_throttled'
+  | 'sequence_delay_not_elapsed'
   | 'no_queued_leads'
   | 'all_processing'
   | 'all_paused'
@@ -65,12 +66,15 @@ export type ClaimExecutionResult = {
     rotation_used_inbox_id?: string | null;
     rotation_fallback_used?: boolean;
     rotation_block_reason?: string | null;
+    delay_blocked_count: number;
+    next_delay_eligible_at: string | null;
   };
 };
 
 type RunBatchSkipReason =
   | 'schedule_blocked'
   | 'campaign_minute_throttled'
+  | 'sequence_delay_not_elapsed'
   | 'send_skipped'
   | 'send_skipped_unknown'
   | 'send_error';
@@ -119,6 +123,8 @@ type StepProgressResolution = {
   nextStatus: 'queued' | 'completed';
   isSequenceFinished: boolean;
 };
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 type MinuteThrottleSource = 'claim' | 'send';
 type MinuteThrottleBlockReason =
@@ -527,6 +533,14 @@ async function migratePendingLeadsToQueued(campaignId: string): Promise<number> 
 }
 
 async function resolveCampaignMaxStep(campaignId: string): Promise<number> {
+  const { data: campaignRow, error: campaignError } = await supabase
+    .from('campaigns')
+    .select('sequence_id')
+    .eq('id', campaignId)
+    .maybeSingle();
+
+  if (campaignError) throw campaignError;
+
   const { data: stepRows, error: stepError } = await supabase
     .from('campaigns')
     .select(`
@@ -541,12 +555,209 @@ async function resolveCampaignMaxStep(campaignId: string): Promise<number> {
 
   if (stepError) throw stepError;
 
-  const steps = ((stepRows as any)?.sequences?.sequence_steps ?? []) as Array<{ step_number?: number | null }>;
-  const maxStep = Math.max(0, ...steps.map((row) => Number(row?.step_number ?? 0)).filter((n) => Number.isFinite(n)));
+  const nestedSteps = ((stepRows as any)?.sequences?.sequence_steps ?? []) as Array<{ step_number?: number | null }>;
+  let maxStep = Math.max(
+    0,
+    ...nestedSteps.map((row) => Number(row?.step_number ?? 0)).filter((n) => Number.isFinite(n))
+  );
+
+  // Fallback path: some deployments have relation metadata drift; direct table read is safer.
+  if (maxStep <= 0) {
+    const sequenceId = String((campaignRow as any)?.sequence_id ?? '').trim();
+    if (sequenceId) {
+      const { data: directSteps, error: directError } = await supabase
+        .from('sequence_steps')
+        .select('step_number')
+        .eq('sequence_id', sequenceId);
+      if (directError) throw directError;
+      maxStep = Math.max(
+        0,
+        ...((directSteps ?? []) as Array<{ step_number?: number | null }>)
+          .map((row) => Number(row?.step_number ?? 0))
+          .filter((n) => Number.isFinite(n))
+      );
+    }
+  }
+
   if (maxStep <= 0) {
     throw new Error('Campaign sequence has no executable steps');
   }
   return maxStep;
+}
+
+async function resolveCampaignStepDelayMap(campaignId: string): Promise<Map<number, number>> {
+  const { data: campaignRow, error: campaignError } = await supabase
+    .from('campaigns')
+    .select('sequence_id')
+    .eq('id', campaignId)
+    .maybeSingle();
+  if (campaignError) throw campaignError;
+
+  const sequenceId = String((campaignRow as any)?.sequence_id ?? '').trim();
+  if (!sequenceId) return new Map();
+
+  const { data: steps, error: stepsError } = await supabase
+    .from('sequence_steps')
+    .select('step_number,delay_days')
+    .eq('sequence_id', sequenceId);
+  if (stepsError) throw stepsError;
+
+  const delays = new Map<number, number>();
+  for (const row of steps ?? []) {
+    const stepNumber = Number((row as any)?.step_number ?? 0);
+    if (!Number.isFinite(stepNumber) || stepNumber <= 0) continue;
+    const delayDays = Math.max(0, Number((row as any)?.delay_days ?? 0) || 0);
+    delays.set(stepNumber, delayDays);
+  }
+  return delays;
+}
+
+export function evaluateLeadSequenceDelay(input: {
+  currentStepRaw: unknown;
+  lastSentAtRaw: unknown;
+  delayDaysRaw: unknown;
+  nowMs?: number;
+}): {
+  eligible: boolean;
+  blockedReason: 'sequence_delay_not_elapsed' | 'invalid_last_sent_at_for_step';
+  nextEligibleAt: string | null;
+} {
+  const currentStep = Math.max(1, Number(input.currentStepRaw ?? 1) || 1);
+  if (currentStep <= 1) {
+    return {
+      eligible: true,
+      blockedReason: 'sequence_delay_not_elapsed',
+      nextEligibleAt: null,
+    };
+  }
+
+  const delayDays = Math.max(0, Number(input.delayDaysRaw ?? 0) || 0);
+  const nowMs = Number(input.nowMs ?? Date.now());
+  const lastSentAt = new Date(String(input.lastSentAtRaw ?? ''));
+  if (Number.isNaN(lastSentAt.getTime())) {
+    return {
+      eligible: false,
+      blockedReason: 'invalid_last_sent_at_for_step',
+      nextEligibleAt: null,
+    };
+  }
+
+  const nextEligibleMs = lastSentAt.getTime() + (delayDays * DAY_MS);
+  if (nowMs < nextEligibleMs) {
+    return {
+      eligible: false,
+      blockedReason: 'sequence_delay_not_elapsed',
+      nextEligibleAt: new Date(nextEligibleMs).toISOString(),
+    };
+  }
+
+  return {
+    eligible: true,
+    blockedReason: 'sequence_delay_not_elapsed',
+    nextEligibleAt: null,
+  };
+}
+
+async function applyClaimDelayGate(input: {
+  campaignId: string;
+  executions: any[];
+}): Promise<{
+  eligibleExecutions: any[];
+  delayBlockedCount: number;
+  nextDelayEligibleAt: string | null;
+}> {
+  const claimedIds = (Array.isArray(input.executions) ? input.executions : [])
+    .map((row: any) => String(row?.campaign_lead_id ?? row?.id ?? '').trim())
+    .filter(Boolean);
+  if (claimedIds.length === 0) {
+    return {
+      eligibleExecutions: [],
+      delayBlockedCount: 0,
+      nextDelayEligibleAt: null,
+    };
+  }
+
+  const [delayMap, leadRowsResult] = await Promise.all([
+    resolveCampaignStepDelayMap(input.campaignId),
+    supabase
+      .from('campaign_leads')
+      .select('id,current_step,last_sent_at,status')
+      .in('id', claimedIds),
+  ]);
+  if (leadRowsResult.error) throw leadRowsResult.error;
+
+  const rowById = new Map<string, any>();
+  for (const row of leadRowsResult.data ?? []) {
+    rowById.set(String((row as any)?.id ?? ''), row);
+  }
+
+  const nowMs = Date.now();
+  const eligibleExecutions: any[] = [];
+  const blockedLeadIds: string[] = [];
+  let nextDelayEligibleAt: string | null = null;
+
+  for (const execution of input.executions ?? []) {
+    const campaignLeadId = String((execution as any)?.campaign_lead_id ?? (execution as any)?.id ?? '').trim();
+    if (!campaignLeadId) continue;
+    const leadRow = rowById.get(campaignLeadId);
+    if (!leadRow) {
+      blockedLeadIds.push(campaignLeadId);
+      continue;
+    }
+
+    const currentStep = Number((leadRow as any)?.current_step ?? 1);
+    const delayDays = delayMap.get(currentStep) ?? 0;
+    const delayEval = evaluateLeadSequenceDelay({
+      currentStepRaw: currentStep,
+      lastSentAtRaw: (leadRow as any)?.last_sent_at ?? null,
+      delayDaysRaw: delayDays,
+      nowMs,
+    });
+
+    if (delayEval.eligible) {
+      eligibleExecutions.push(execution);
+      continue;
+    }
+
+    blockedLeadIds.push(campaignLeadId);
+    if (delayEval.nextEligibleAt && (!nextDelayEligibleAt || delayEval.nextEligibleAt < nextDelayEligibleAt)) {
+      nextDelayEligibleAt = delayEval.nextEligibleAt;
+    }
+  }
+
+  if (blockedLeadIds.length > 0) {
+    const { error: requeueError } = await supabase
+      .from('campaign_leads')
+      .update({
+        status: 'queued',
+        status_reason: 'sequence_delay_not_elapsed',
+        processing_at: null,
+        execution_id: null,
+      })
+      .in('id', blockedLeadIds)
+      .eq('status', 'processing');
+    if (requeueError) throw requeueError;
+
+    await supabase.from('system_events').insert({
+      type: 'CAMPAIGN_SEQUENCE_DELAY_BLOCKED',
+      entity: 'campaigns',
+      entity_id: input.campaignId,
+      message: `Sequence delay blocked ${blockedLeadIds.length} claimed lead(s); requeued for future eligibility.`,
+      meta: {
+        campaign_id: input.campaignId,
+        blocked_count: blockedLeadIds.length,
+        blocked_campaign_lead_ids: blockedLeadIds,
+        next_delay_eligible_at: nextDelayEligibleAt,
+        reason: 'sequence_delay_not_elapsed',
+      },
+    });
+  }
+
+  return {
+    eligibleExecutions,
+    delayBlockedCount: blockedLeadIds.length,
+    nextDelayEligibleAt,
+  };
 }
 
 function resolveStepProgressionAfterSend(currentStepRaw: unknown, maxStep: number): StepProgressResolution {
@@ -579,6 +790,53 @@ async function autoRepairCompletedStepMismatchLeads(campaignId: string, maxStep:
   return (repairedRows ?? []).length;
 }
 
+async function repairCampaignState(campaignId: string, maxStep: number, apply: boolean) {
+  const { count: mismatchCount, error: mismatchError } = await supabase
+    .from('campaign_leads')
+    .select('id', { count: 'exact', head: true })
+    .eq('campaign_id', campaignId)
+    .eq('status', 'completed')
+    .lte('current_step', maxStep);
+  if (mismatchError) throw mismatchError;
+
+  const { count: staleProcessingCount, error: staleCountError } = await supabase
+    .from('campaign_leads')
+    .select('id', { count: 'exact', head: true })
+    .eq('campaign_id', campaignId)
+    .eq('status', 'processing')
+    .or(`processing_at.is.null,processing_at.lt.${new Date(Date.now() - (DEFAULT_STALE_PROCESSING_TIMEOUT_MINUTES * 60 * 1000)).toISOString()}`);
+  if (staleCountError) throw staleCountError;
+
+  const dryRun = {
+    campaign_id: campaignId,
+    max_step: maxStep,
+    mismatched_completed_count: Number(mismatchCount ?? 0),
+    stale_processing_count: Number(staleProcessingCount ?? 0),
+  };
+
+  if (!apply) {
+    return {
+      dry_run: true,
+      ...dryRun,
+      repaired_status_step_mismatch_count: 0,
+      requeued_stale_processing_count: 0,
+    };
+  }
+
+  const repaired = await autoRepairCompletedStepMismatchLeads(campaignId, maxStep);
+  const staleRecovery = await requeueStaleProcessingLeads({
+    campaignId,
+    olderThanMinutes: DEFAULT_STALE_PROCESSING_TIMEOUT_MINUTES,
+  });
+
+  return {
+    dry_run: false,
+    ...dryRun,
+    repaired_status_step_mismatch_count: repaired,
+    requeued_stale_processing_count: Number(staleRecovery.requeued ?? 0),
+  };
+}
+
 async function countRemainingCompletedStepMismatchLeads(campaignId: string, maxStep: number): Promise<number> {
   const { count, error } = await supabase
     .from('campaign_leads')
@@ -609,7 +867,7 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
   const [statusRowsResult, pausedRiskyResult, inboxesResult, remainingStatusStepMismatchCount] = await Promise.all([
     supabase
       .from('campaign_leads')
-      .select('status,processing_at')
+      .select('id,status,processing_at,current_step,last_sent_at')
       .eq('campaign_id', campaignId),
     supabase
       .from('campaign_leads')
@@ -635,6 +893,7 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
   if (pausedRiskyResult.error) throw pausedRiskyResult.error;
   if (inboxesResult.error) throw inboxesResult.error;
 
+  const stepDelayMap = await resolveCampaignStepDelayMap(campaignId);
   const counts: Record<string, number> = {
     queued: 0,
     processing: 0,
@@ -649,6 +908,8 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
   let nullProcessingCount = 0;
   let staleProcessingCount = 0;
   let oldestProcessingAt: string | null = null;
+  let delayBlockedCount = 0;
+  let nextDelayEligibleAt: string | null = null;
 
   for (const row of statusRowsResult.data ?? []) {
     const status = String((row as any)?.status ?? '').toLowerCase();
@@ -669,6 +930,22 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
       }
       if (processingAtIso < staleCutoffIso) {
         staleProcessingCount += 1;
+      }
+    }
+
+    if (status === 'queued') {
+      const currentStep = Number((row as any)?.current_step ?? 1);
+      const delayDays = stepDelayMap.get(currentStep) ?? 0;
+      const delayEval = evaluateLeadSequenceDelay({
+        currentStepRaw: currentStep,
+        lastSentAtRaw: (row as any)?.last_sent_at ?? null,
+        delayDaysRaw: delayDays,
+      });
+      if (!delayEval.eligible) {
+        delayBlockedCount += 1;
+        if (delayEval.nextEligibleAt && (!nextDelayEligibleAt || delayEval.nextEligibleAt < nextDelayEligibleAt)) {
+          nextDelayEligibleAt = delayEval.nextEligibleAt;
+        }
       }
     }
   }
@@ -772,6 +1049,10 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
     status_step_mismatch: {
       remaining_count: remainingStatusStepMismatchCount,
       max_step: maxStep,
+    },
+    delay_gate: {
+      delay_blocked_count: delayBlockedCount,
+      next_delay_eligible_at: nextDelayEligibleAt,
     },
     schedule_gate: {
       allowed: scheduleGate.allowed,
@@ -924,6 +1205,10 @@ export async function runCampaignExecutionBatch(
     summary.claimed_count = executions.length;
     summary.claim_reason = claim.meta.reason ?? null;
     summary.claim_path = claim.meta.claim_path ?? null;
+    if (Number(claim.meta.delay_blocked_count ?? 0) > 0) {
+      summary.skipped_count += Number(claim.meta.delay_blocked_count ?? 0);
+      bumpReason(summary.skip_reasons, 'sequence_delay_not_elapsed');
+    }
 
     if (!claim.meta.schedule_allowed) {
       summary.skipped_count = summary.claimed_count;
@@ -1068,9 +1353,14 @@ export async function getNextCampaignExecutions(
         rotation_used_inbox_id: null,
         rotation_fallback_used: false,
         rotation_block_reason: null,
+        delay_blocked_count: 0,
+        next_delay_eligible_at: null,
       },
     };
   }
+
+  const maxStep = await resolveCampaignMaxStep(campaignId);
+  await autoRepairCompletedStepMismatchLeads(campaignId, maxStep);
 
   const staleRecovery = await requeueStaleProcessingLeads({
     campaignId,
@@ -1113,6 +1403,8 @@ export async function getNextCampaignExecutions(
         rotation_used_inbox_id: allocatorPreview.rotation_used_inbox_id,
         rotation_fallback_used: allocatorPreview.rotation_fallback_used,
         rotation_block_reason: allocatorPreview.rotation_block_reason,
+        delay_blocked_count: 0,
+        next_delay_eligible_at: null,
       },
     };
   }
@@ -1205,6 +1497,8 @@ export async function getNextCampaignExecutions(
             rotation_used_inbox_id: allocatorPreview.rotation_used_inbox_id,
             rotation_fallback_used: allocatorPreview.rotation_fallback_used,
             rotation_block_reason: allocatorPreview.rotation_block_reason,
+            delay_blocked_count: 0,
+            next_delay_eligible_at: null,
           },
         };
       }
@@ -1226,10 +1520,17 @@ export async function getNextCampaignExecutions(
     }
   }
 
+  const delayGate = await applyClaimDelayGate({
+    campaignId,
+    executions: Array.isArray(executions) ? executions : [],
+  });
+  executions = delayGate.eligibleExecutions;
+
   const claimedCount = Array.isArray(executions) ? executions.length : 0;
   let reason: EmptyClaimReason | null = null;
   if (claimedCount === 0) {
-    if (queuedCount === 0 && pendingCount === 0 && processingCount > 0) reason = 'all_processing';
+    if (delayGate.delayBlockedCount > 0) reason = 'sequence_delay_not_elapsed';
+    else if (queuedCount === 0 && pendingCount === 0 && processingCount > 0) reason = 'all_processing';
     else if (queuedCount === 0 && pendingCount === 0 && pausedCount > 0) reason = 'all_paused';
     else if (queuedCount === 0 && pendingCount === 0) reason = 'no_queued_leads';
     else reason = 'no_claimable_rows';
@@ -1245,6 +1546,8 @@ export async function getNextCampaignExecutions(
     pending_count: pendingCount,
     stale_requeued_count: staleRecovery.requeued,
     claimed_count: claimedCount,
+    delay_blocked_count: delayGate.delayBlockedCount,
+    next_delay_eligible_at: delayGate.nextDelayEligibleAt,
     reason,
     claim_path: claimPath,
   });
@@ -1275,6 +1578,8 @@ export async function getNextCampaignExecutions(
       rotation_used_inbox_id: allocatorPreview.rotation_used_inbox_id,
       rotation_fallback_used: allocatorPreview.rotation_fallback_used,
       rotation_block_reason: allocatorPreview.rotation_block_reason,
+      delay_blocked_count: delayGate.delayBlockedCount,
+      next_delay_eligible_at: delayGate.nextDelayEligibleAt,
     },
   };
 }
@@ -1767,7 +2072,7 @@ export async function markCampaignLeadSent(
   const maxStep = await resolveCampaignMaxStep(String((leadCampaign as any).campaign_id ?? ''));
   const progression = resolveStepProgressionAfterSend(data.current_step, maxStep);
 
-  await supabase
+  const { data: updatedRows, error: updateError } = await supabase
     .from('campaign_leads')
     .update({
       status: progression.nextStatus,
@@ -1778,7 +2083,15 @@ export async function markCampaignLeadSent(
       execution_id: null,
     })
     .eq('id', campaignLeadId)
-    .eq('status', 'processing');
+    .eq('status', 'processing')
+    .select('id');
+
+  if (updateError) {
+    throw updateError;
+  }
+  if (!updatedRows || updatedRows.length === 0) {
+    throw new Error('Campaign lead transition failed (processing -> next step).');
+  }
 
   await supabase.from('system_events').insert({
     type: 'email_sent',
@@ -1894,6 +2207,10 @@ export async function completeCampaignIfDone(campaignId: string) {
 
   const steps = campaign.sequences.sequence_steps;
   const maxStep = Math.max(...steps.map((s: any) => s.step_number));
+  const repairedMismatchCount = await autoRepairCompletedStepMismatchLeads(campaignId, maxStep);
+  if (repairedMismatchCount > 0) {
+    return false;
+  }
 
   /**
    * 2. Check if any leads still need execution
@@ -1958,6 +2275,12 @@ export async function completeCampaignIfDone(campaignId: string) {
   });
 
   return true;
+}
+
+export async function repairCampaignStateNow(campaignId: string, apply: boolean) {
+  const maxStep = await resolveCampaignMaxStep(campaignId);
+  const summary = await repairCampaignState(campaignId, maxStep, apply);
+  return summary;
 }
 
 
