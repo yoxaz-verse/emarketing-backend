@@ -6,12 +6,25 @@ import { createSmtpTransport } from './email/smtpTransport';
 import { renderPlainTextAsHtml } from './email/emailBodyRender';
 import { makeClickToken, makePixelToken } from './emailTracking.service.js';
 import { ingestInboundReply } from './replyIngestService.js';
+import { inspectSendingDomain } from './validation/domain.validation';
 import {
   getSendingLimitsConfig,
   isNowWithinSendingSchedule,
 } from './sendingLimitsConfig.service';
 import { allocateCampaignSender } from './sending/sendAllocator.service';
 import { isCampaignMinuteBlocked, normalizeCampaignBatchSize } from './executionThrottle.utils.js';
+import {
+  buildCampaignMessageId,
+  buildCampaignUnsubscribeFooter,
+  buildCampaignUnsubscribeToken,
+  buildListUnsubscribeHeaders,
+  classifyRecipientProvider,
+  isProviderSafeAuthReady,
+  parseCampaignUnsubscribeToken,
+  resolveDeliverabilityPolicy,
+  type ProviderSafeAuthSnapshot,
+  type RecipientMailboxProvider,
+} from './deliverabilityPolicy.service';
 
 const RUNNER_WINDOW_TIMEZONE = 'Asia/Kolkata';
 const RUNNER_WINDOW_START_HOUR = 9;
@@ -75,6 +88,8 @@ type RunBatchSkipReason =
   | 'schedule_blocked'
   | 'campaign_minute_throttled'
   | 'sequence_delay_not_elapsed'
+  | 'deliverability_policy_blocked'
+  | 'user_unsubscribed_campaign'
   | 'send_skipped'
   | 'send_skipped_unknown'
   | 'send_error';
@@ -867,7 +882,7 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
   const [statusRowsResult, pausedRiskyResult, inboxesResult, remainingStatusStepMismatchCount] = await Promise.all([
     supabase
       .from('campaign_leads')
-      .select('id,status,processing_at,current_step,last_sent_at')
+      .select('id,lead_id,status,status_reason,processing_at,current_step,last_sent_at')
       .eq('campaign_id', campaignId),
     supabase
       .from('campaign_leads')
@@ -881,6 +896,7 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
         inbox_id,
         inboxes:inbox_id (
           id,
+          sending_domain_id,
           is_paused,
           paused_until
         )
@@ -972,23 +988,69 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
   const allocator = await allocateCampaignSender({ campaignId });
   const minuteGate = await getCampaignMinuteGate(campaignId);
   const burstWindowStartIso = new Date(Date.now() - (24 * 60 * 60 * 1000)).toISOString();
+  const leadIds = (statusRowsResult.data ?? [])
+    .map((row: any) => String(row?.lead_id ?? '').trim())
+    .filter(Boolean);
+  const uniqueLeadIds = Array.from(new Set(leadIds));
+  const providerDistribution: Record<RecipientMailboxProvider, number> = {
+    microsoft: 0,
+    google: 0,
+    yahoo_aol: 0,
+    generic: 0,
+  };
+  if (uniqueLeadIds.length > 0) {
+    const { data: leadRows, error: leadRowsError } = await supabase
+      .from('leads')
+      .select('id,email')
+      .in('id', uniqueLeadIds);
+    if (leadRowsError) throw leadRowsError;
+    for (const leadRow of leadRows ?? []) {
+      const provider = classifyRecipientProvider(String((leadRow as any)?.email ?? ''));
+      providerDistribution[provider] += 1;
+    }
+  }
+
+  const activeDomainIds: string[] = Array.from(new Set(
+    inboxRows
+      .map((row: any) => String(row?.inboxes?.sending_domain_id ?? '').trim())
+      .filter(Boolean)
+  ));
+  let providerSafeReadyCount = 0;
+  const providerSafeTotalCount = activeDomainIds.length;
+  for (const domainId of activeDomainIds) {
+    const snapshot = await resolveProviderSafeAuthSnapshot({
+      sendingDomainId: domainId,
+      recipientProvider: 'microsoft',
+    });
+    if (isProviderSafeAuthReady(snapshot)) providerSafeReadyCount += 1;
+  }
+
   const { data: sentRowsLast24h, error: sentRowsLast24hError } = await supabase
     .from('email_logs')
-    .select('sent_at')
+    .select('sent_at,to_email')
     .eq('campaign_id', campaignId)
     .eq('status', 'sent')
     .gte('sent_at', burstWindowStartIso);
   if (sentRowsLast24hError) throw sentRowsLast24hError;
   const minuteBuckets = new Map<string, number>();
+  let trackingDowngradeCount = 0;
   for (const row of sentRowsLast24h ?? []) {
     const sentAtRaw = String((row as any)?.sent_at ?? '').trim();
     if (!sentAtRaw) continue;
+    const provider = classifyRecipientProvider(String((row as any)?.to_email ?? ''));
+    if (provider !== 'generic') trackingDowngradeCount += 1;
     const sentAt = new Date(sentAtRaw);
     if (Number.isNaN(sentAt.getTime())) continue;
     sentAt.setUTCSeconds(0, 0);
     const bucket = sentAt.toISOString();
     minuteBuckets.set(bucket, Number(minuteBuckets.get(bucket) ?? 0) + 1);
   }
+  const unsubscribeReady = resolveCampaignUnsubscribeBaseUrl().length > 0;
+  const deliverabilityPolicyBlockedCount = Number(
+    (statusRowsResult.data ?? []).filter((row: any) =>
+      String(row?.status_reason ?? '').trim().toLowerCase() === 'auth_not_provider_safe'
+    ).length
+  );
   const burstViolations = Array.from(minuteBuckets.entries())
     .filter(([, count]) => count > 1)
     .sort(([a], [b]) => a.localeCompare(b))
@@ -1033,6 +1095,12 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
   if (burstViolations.length > 0) {
     next_actions.push('Burst invariant violated: found >1 sent email in a minute bucket for this campaign. Investigate immediately.');
   }
+  if (!unsubscribeReady) {
+    next_actions.push('Campaign unsubscribe link is not configured; set BACKEND_PUBLIC_URL or APP_BASE_URL before scaling sends.');
+  }
+  if (providerSafeReadyCount < providerSafeTotalCount) {
+    next_actions.push('One or more sending domains are not provider-safe (enforced DMARC missing). Sensitive-provider sends will be blocked.');
+  }
   if (next_actions.length === 0) {
     next_actions.push('No immediate blockers detected; run batch execution and inspect per-lead outcomes.');
   }
@@ -1053,6 +1121,16 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
     delay_gate: {
       delay_blocked_count: delayBlockedCount,
       next_delay_eligible_at: nextDelayEligibleAt,
+    },
+    deliverability: {
+      provider_distribution: providerDistribution,
+      provider_safe_auth_ready: {
+        ready_count: providerSafeReadyCount,
+        total_count: providerSafeTotalCount,
+      },
+      unsubscribe_ready: unsubscribeReady,
+      deliverability_policy_blocked_count: deliverabilityPolicyBlockedCount,
+      tracking_downgrade_count: trackingDowngradeCount,
     },
     schedule_gate: {
       allowed: scheduleGate.allowed,
@@ -1747,6 +1825,18 @@ export async function sendCampaignEmail(campaignLeadId: string) {
     throw new Error('Campaign lead is not in processing state');
   }
 
+  if (isLeadGloballySuppressed((campaignLead as any)?.leads?.email_eligibility)) {
+    await requeueCampaignLeadForSkip({
+      campaignLeadId,
+      nextStatus: 'paused',
+      statusReason: 'user_unsubscribed_campaign',
+    });
+    return {
+      skipped: true,
+      reason: 'user_unsubscribed_campaign',
+    };
+  }
+
   const campaignId = String((campaignLead as any).campaign_id ?? '');
   const minuteGuard = await enforceCampaignMinuteGuard(campaignId, 'send', {
     campaignLeadId,
@@ -1843,6 +1933,14 @@ export async function sendCampaignEmail(campaignLeadId: string) {
     throw new Error('SMTP account missing for inbox');
   }
 
+  const recipientEmail = String((campaignLead as any)?.leads?.email ?? '').trim().toLowerCase();
+  const recipientProvider = classifyRecipientProvider(recipientEmail);
+  const isFirstTouch = Number((campaignLead as any)?.current_step ?? 1) <= 1;
+  const authSnapshot = await resolveProviderSafeAuthSnapshot({
+    sendingDomainId: String((inbox as any)?.sending_domain_id ?? '') || null,
+    recipientProvider,
+  });
+
   const { data: stepRow, error: stepError } = await supabase
     .from('campaign_leads')
     .select(`
@@ -1887,13 +1985,71 @@ export async function sendCampaignEmail(campaignLeadId: string) {
   });
 
   const sentAtIso = new Date().toISOString();
-  const recipientEmail = String((campaignLead as any)?.leads?.email ?? '').trim().toLowerCase();
-  const recipientDomain = recipientEmail.includes('@') ? recipientEmail.split('@').pop() ?? '' : '';
-  const isMicrosoftRecipient = /(?:^|\.)(outlook\.com|hotmail\.com|live\.com|msn\.com)$/i.test(recipientDomain);
-  const isFirstTouch = Number((campaignLead as any)?.current_step ?? 1) <= 1;
-  const minimalTrackingMode = DELIVERABILITY_MINIMAL_TRACKING_ENABLED && isMicrosoftRecipient && isFirstTouch;
+  const campaignSenderDisplayName = String((campaignLead as any)?.campaigns?.sender_display_name ?? '').trim();
+  const policy = resolveDeliverabilityPolicy({
+    recipientEmail,
+    firstTouch: isFirstTouch,
+    senderDisplayName: campaignSenderDisplayName || FIXED_CAMPAIGN_SENDER_NAME,
+    subject: String(step.subject ?? ''),
+    body: bodyRaw,
+    providerSafeAuth: authSnapshot,
+  });
+  if (policy.blockReason) {
+    await requeueCampaignLeadForSkip({
+      campaignLeadId,
+      nextStatus: 'paused',
+      statusReason: policy.blockReason,
+    });
+    await supabase.from('system_events').insert({
+      type: 'deliverability_policy_blocked',
+      entity: 'campaign_leads',
+      entity_id: campaignLeadId,
+      message: `Deliverability policy blocked ${policy.provider} send for campaign lead ${campaignLeadId}.`,
+      meta: {
+        campaign_id: campaignId,
+        campaign_lead_id: campaignLeadId,
+        provider: policy.provider,
+        blocked_reason: policy.blockReason,
+        domain_id: authSnapshot.domain_id,
+        domain_name: authSnapshot.domain_name,
+        provider_safe_auth_ready: isProviderSafeAuthReady(authSnapshot),
+      },
+    });
+    await supabase.from('system_events').insert({
+      type: 'auth_not_provider_safe',
+      entity: 'campaign_leads',
+      entity_id: campaignLeadId,
+      message: `Provider-safe authentication is not ready for ${policy.provider}.`,
+      meta: {
+        campaign_id: campaignId,
+        campaign_lead_id: campaignLeadId,
+        provider: policy.provider,
+        domain_id: authSnapshot.domain_id,
+        domain_name: authSnapshot.domain_name,
+        dmarc_policy: authSnapshot.dmarcPolicy,
+        spf_verified: authSnapshot.spfVerified,
+        dkim_verified: authSnapshot.dkimVerified,
+        dmarc_verified: authSnapshot.dmarcVerified,
+      },
+    });
+    return {
+      skipped: true,
+      reason: 'deliverability_policy_blocked',
+    };
+  }
+
+  const minimalTrackingMode = DELIVERABILITY_MINIMAL_TRACKING_ENABLED && policy.minimalTracking;
   const trackingBase = resolveTrackingBaseUrl();
-  const renderedBody = renderPlainTextAsHtml(bodyRaw);
+  const unsubscribeToken = buildCampaignUnsubscribeToken({
+    campaign_id: String((campaignLead as any).campaign_id ?? ''),
+    campaign_lead_id: String(campaignLeadId),
+    lead_id: String((campaignLead as any)?.leads?.id ?? ''),
+    email: recipientEmail,
+    exp: Math.floor(Date.now() / 1000) + (365 * 24 * 60 * 60),
+  }, resolveCampaignUnsubscribeSecret());
+  const unsubscribeUrl = `${resolveCampaignUnsubscribeBaseUrl()}/execution/unsubscribe?token=${encodeURIComponent(unsubscribeToken)}`;
+  const unsubscribeFooter = buildCampaignUnsubscribeFooter(unsubscribeUrl);
+  const renderedBody = renderPlainTextAsHtml(policy.sanitizedBody);
   const trackedBody = minimalTrackingMode
     ? renderedBody
     : withTrackedLinks(renderedBody, {
@@ -1916,16 +2072,41 @@ export async function sendCampaignEmail(campaignLeadId: string) {
         });
         return `<img src="${trackingBase}/tracking/open/${pixelToken}" alt="" width="1" height="1" style="display:none;opacity:0;" />`;
       })();
-  const htmlBody = wrapCampaignHtmlBody(pixelHtml ? `${trackedBody}\n${pixelHtml}` : trackedBody);
+  const htmlBodyBase = `${trackedBody}\n${unsubscribeFooter.html}`;
+  const htmlBody = wrapCampaignHtmlBody(pixelHtml ? `${htmlBodyBase}\n${pixelHtml}` : htmlBodyBase);
+  const textBody = `${policy.sanitizedBody}${unsubscribeFooter.text}`;
+  const effectiveSenderDisplayName = policy.effectiveSenderDisplayName || FIXED_CAMPAIGN_SENDER_NAME;
+  const messageId = buildCampaignMessageId({
+    campaignLeadId: String(campaignLeadId),
+    inboxEmail: String((inbox as any)?.email_address ?? ''),
+    sentAtIso,
+  });
 
-  const campaignSenderDisplayName = String((campaignLead as any)?.campaigns?.sender_display_name ?? '').trim();
-  const effectiveSenderDisplayName = campaignSenderDisplayName || FIXED_CAMPAIGN_SENDER_NAME;
+  if (policy.trackingDowngraded) {
+    await supabase.from('system_events').insert({
+      type: 'tracking_downgraded_for_provider',
+      entity: 'campaign_leads',
+      entity_id: campaignLeadId,
+      message: `Tracking downgraded for ${policy.provider} inbox placement protection.`,
+      meta: {
+        campaign_id: campaignId,
+        campaign_lead_id: campaignLeadId,
+        provider: policy.provider,
+        minimal_tracking: minimalTrackingMode,
+        multipart_plaintext: policy.useMultipartPlainText,
+      },
+    });
+  }
 
   const info = await transporter.sendMail({
     from: `"${effectiveSenderDisplayName}" <${inbox.email_address}>`,
     to: campaignLead.leads.email,
-    subject: step.subject,
+    replyTo: String((inbox as any)?.email_address ?? ''),
+    subject: policy.sanitizedSubject,
     html: htmlBody,
+    text: textBody,
+    messageId,
+    headers: buildListUnsubscribeHeaders(unsubscribeUrl, String((inbox as any)?.email_address ?? '')),
   });
 
   await supabase.from('email_logs').insert({
@@ -1936,8 +2117,8 @@ export async function sendCampaignEmail(campaignLeadId: string) {
     to_email: campaignLead.leads.email,
     provider_name: String(smtp.provider ?? 'smtp'),
     provider_message_id: normalizeMessageId(info.messageId),
-    subject: step.subject,
-    body: bodyRaw,
+    subject: policy.sanitizedSubject,
+    body: policy.sanitizedBody,
     status: 'sent',
     sent_at: sentAtIso,
   });
@@ -1958,6 +2139,9 @@ export async function sendCampaignEmail(campaignLeadId: string) {
       sender_display_name: effectiveSenderDisplayName,
       personal_signoff_warning: personalSignoffWarning,
       deliverability_mode: minimalTrackingMode ? 'minimal_tracking' : 'standard_tracking',
+      provider: policy.provider,
+      unsubscribe_ready: true,
+      message_id_header: messageId,
       rotation_next_inbox_id: allocator.rotation_next_inbox_id,
       rotation_used_inbox_id: allocator.rotation_used_inbox_id,
       rotation_fallback_used: allocator.rotation_fallback_used,
@@ -1987,6 +2171,146 @@ function resolveTrackingBaseUrl(): string {
     return sanitized.replace(/^http:\/\//i, 'https://');
   }
   return sanitized;
+}
+
+function resolveCampaignUnsubscribeBaseUrl(): string {
+  const configured = String(
+    process.env.BACKEND_PUBLIC_URL ||
+    process.env.PUBLIC_BACKEND_URL ||
+    process.env.TRACKING_PIXEL_BASE_URL ||
+    process.env.APP_BASE_URL ||
+    'https://emarketing-backend.infra.obaol.com'
+  ).trim();
+  const sanitized = configured.replace(/\/$/, '');
+  if (/^http:\/\//i.test(sanitized) && !/localhost|127\.0\.0\.1/i.test(sanitized)) {
+    return sanitized.replace(/^http:\/\//i, 'https://');
+  }
+  return sanitized;
+}
+
+function resolveCampaignUnsubscribeSecret(): string {
+  return String(
+    process.env.CAMPAIGN_UNSUBSCRIBE_SECRET ||
+    process.env.NEWSLETTER_TOKEN_SECRET ||
+    process.env.JWT_SECRET ||
+    'campaign-unsubscribe-secret'
+  );
+}
+
+function isLeadGloballySuppressed(leadEligibilityRaw: unknown): boolean {
+  return String(leadEligibilityRaw ?? '').trim().toLowerCase() === 'blocked';
+}
+
+async function resolveProviderSafeAuthSnapshot(input: {
+  sendingDomainId: string | null;
+  recipientProvider: RecipientMailboxProvider;
+}): Promise<ProviderSafeAuthSnapshot & { domain_id: string | null; domain_name: string | null }> {
+  const empty: ProviderSafeAuthSnapshot & { domain_id: string | null; domain_name: string | null } = {
+    spfVerified: false,
+    dkimVerified: false,
+    dmarcVerified: false,
+    dmarcPolicy: null,
+    domain_id: input.sendingDomainId,
+    domain_name: null,
+  };
+  if (!input.sendingDomainId || input.recipientProvider === 'generic') return empty;
+
+  const { data: domainRow, error: domainError } = await supabase
+    .from('sending_domains')
+    .select('id,domain,dkim_selector,spf_verified,dkim_verified,dmarc_verified')
+    .eq('id', input.sendingDomainId)
+    .maybeSingle();
+  if (domainError) throw domainError;
+  if (!domainRow) return empty;
+
+  let dmarcPolicy: string | null = null;
+  try {
+    const inspection = await inspectSendingDomain(
+      String((domainRow as any)?.domain ?? ''),
+      String((domainRow as any)?.dkim_selector ?? '').trim() || null
+    );
+    const dmarcRecord = String((inspection as any)?.dmarcRecord ?? '').toLowerCase();
+    const policyMatch = dmarcRecord.match(/\bp=([a-z]+)/i);
+    dmarcPolicy = policyMatch?.[1]?.toLowerCase() ?? null;
+  } catch {
+    dmarcPolicy = null;
+  }
+
+  return {
+    spfVerified: Boolean((domainRow as any)?.spf_verified),
+    dkimVerified: Boolean((domainRow as any)?.dkim_verified),
+    dmarcVerified: Boolean((domainRow as any)?.dmarc_verified),
+    dmarcPolicy,
+    domain_id: String((domainRow as any)?.id ?? '') || null,
+    domain_name: String((domainRow as any)?.domain ?? '') || null,
+  };
+}
+
+async function requeueCampaignLeadForSkip(input: {
+  campaignLeadId: string;
+  nextStatus: 'queued' | 'paused';
+  statusReason: string;
+}) {
+  await supabase
+    .from('campaign_leads')
+    .update({
+      status: input.nextStatus,
+      status_reason: input.statusReason,
+      processing_at: null,
+      execution_id: null,
+    })
+    .eq('id', input.campaignLeadId)
+    .eq('status', 'processing');
+}
+
+export async function unsubscribeCampaignLead(token: string) {
+  const parsed = parseCampaignUnsubscribeToken(token, resolveCampaignUnsubscribeSecret());
+  const nowIso = new Date().toISOString();
+
+  const [{ error: leadUpdateError }, { error: campaignLeadError }] = await Promise.all([
+    supabase
+      .from('leads')
+      .update({
+        email_eligibility: 'blocked',
+        email_eligibility_reason: 'user_unsubscribed_campaign',
+      })
+      .eq('id', parsed.lead_id)
+      .eq('email', parsed.email),
+    supabase
+      .from('campaign_leads')
+      .update({
+        status: 'paused',
+        status_reason: 'user_unsubscribed_campaign',
+        processing_at: null,
+        execution_id: null,
+      })
+      .eq('lead_id', parsed.lead_id)
+      .in('status', ['queued', 'pending', 'processing', 'paused']),
+  ]);
+
+  if (leadUpdateError) throw leadUpdateError;
+  if (campaignLeadError) throw campaignLeadError;
+
+  await supabase.from('system_events').insert({
+    type: 'campaign_unsubscribed',
+    entity: 'campaign_leads',
+    entity_id: parsed.campaign_lead_id,
+    message: `Lead ${parsed.email} unsubscribed from campaign outreach.`,
+    meta: {
+      campaign_id: parsed.campaign_id,
+      campaign_lead_id: parsed.campaign_lead_id,
+      lead_id: parsed.lead_id,
+      email: parsed.email,
+      unsubscribed_at: nowIso,
+    },
+  });
+
+  return {
+    success: true,
+    lead_id: parsed.lead_id,
+    campaign_id: parsed.campaign_id,
+    email: parsed.email,
+  };
 }
 
 function withTrackedLinks(

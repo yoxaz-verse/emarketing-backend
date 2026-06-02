@@ -12,6 +12,7 @@ export type DomainValidationResult = {
   hasSpf: boolean;
   hasDkim: boolean;
   hasDmarc: boolean;
+  dmarcRecord?: string;
   dkimSelectorUsed?: string;
   dkimLookupHost?: string;
   dkimFailureReason?: string;
@@ -174,6 +175,7 @@ export async function inspectSendingDomain(
     hasSpf,
     hasDkim,
     hasDmarc,
+    dmarcRecord: dmarcResult.records,
     dkimSelectorUsed,
     dkimLookupHost,
     spfLookupHost: spfResult.sourceHost,

@@ -15,6 +15,7 @@ import {
   getCampaignExecutionDiagnostics,
   runCampaignExecutionBatch,
   repairCampaignStateNow,
+  unsubscribeCampaignLead,
 } from '../services/execution.service';
 import { supabase } from '../supabase';
 import { ingestInboundReply } from '../services/replyIngestService.js';
@@ -121,6 +122,34 @@ router.post('/send-email', async (req, res) => {
   } catch (err: any) {
     console.error('[SEND EMAIL ERROR]', err);
     res.status(400).json({ error: err.message });
+  }
+});
+
+router.get('/unsubscribe', async (req, res) => {
+  try {
+    const token = String(req.query.token ?? '').trim();
+    if (!token) return res.status(400).send('<h1>Invalid unsubscribe link</h1>');
+    await unsubscribeCampaignLead(token);
+    return res
+      .status(200)
+      .type('html')
+      .send('<!doctype html><html><body style="font-family:Arial,Helvetica,sans-serif;padding:24px"><h1>Unsubscribed</h1><p>You will not receive future campaign emails from OBAOL.</p></body></html>');
+  } catch (err: any) {
+    return res
+      .status(400)
+      .type('html')
+      .send(`<!doctype html><html><body style="font-family:Arial,Helvetica,sans-serif;padding:24px"><h1>Unsubscribe failed</h1><p>${String(err?.message ?? 'Invalid unsubscribe link')}</p></body></html>`);
+  }
+});
+
+router.post('/unsubscribe', async (req, res) => {
+  try {
+    const token = String(req.body?.token ?? '').trim();
+    if (!token) return res.status(400).json({ error: 'token is required' });
+    const result = await unsubscribeCampaignLead(token);
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(400).json({ error: err?.message ?? 'Unsubscribe failed' });
   }
 });
 
