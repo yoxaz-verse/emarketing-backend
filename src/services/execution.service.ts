@@ -12,6 +12,7 @@ import {
   isNowWithinSendingSchedule,
 } from './sendingLimitsConfig.service';
 import { allocateCampaignSender } from './sending/sendAllocator.service';
+import { insertSystemEvent } from './systemEvents.service';
 import { isCampaignMinuteBlocked, normalizeCampaignBatchSize } from './executionThrottle.utils.js';
 import {
   buildCampaignMessageId,
@@ -334,7 +335,7 @@ async function logCampaignMinuteThrottleEvent(input: {
   lock_backend?: 'redis' | 'local_memory' | 'unavailable';
   lock_ttl_seconds?: number | null;
 }) {
-  await supabase.from('system_events').insert({
+  await insertSystemEvent({
     type: 'CAMPAIGN_MINUTE_THROTTLED',
     entity: 'campaigns',
     entity_id: input.campaign_id,
@@ -753,7 +754,7 @@ async function applyClaimDelayGate(input: {
       .eq('status', 'processing');
     if (requeueError) throw requeueError;
 
-    await supabase.from('system_events').insert({
+    await insertSystemEvent({
       type: 'CAMPAIGN_SEQUENCE_DELAY_BLOCKED',
       entity: 'campaigns',
       entity_id: input.campaignId,
@@ -1313,6 +1314,13 @@ export async function runCampaignExecutionBatch(
           bumpReason(summary.skip_reasons, skipReason);
           continue;
         }
+        if (sendResult?.email_log_error) {
+          summary.errors.push({
+            campaign_lead_id: campaignLeadId,
+            reason: 'email_log_insert_failed',
+            detail: String(sendResult.email_log_error),
+          });
+        }
 
         await markCampaignLeadSent(campaignLeadId, 'batch_sent_successfully');
         summary.sent_count += 1;
@@ -1354,7 +1362,7 @@ export async function runCampaignExecutionBatch(
       pending_count: pendingAfter,
     };
 
-    await supabase.from('system_events').insert({
+    await insertSystemEvent({
       type: 'CAMPAIGN_BATCH_EXECUTED',
       entity: 'campaigns',
       entity_id: campaignId,
@@ -1363,7 +1371,7 @@ export async function runCampaignExecutionBatch(
     });
   } catch (err: any) {
     summary.fatal_error = String(err?.message ?? 'run_batch_failed');
-    await supabase.from('system_events').insert({
+    await insertSystemEvent({
       type: 'CAMPAIGN_BATCH_EXECUTION_FATAL',
       entity: 'campaigns',
       entity_id: campaignId,
@@ -1376,6 +1384,165 @@ export async function runCampaignExecutionBatch(
   }
 
   return summary;
+}
+
+export async function requeueProviderSafeAuthPausedLeads(
+  campaignId: string,
+  apply: boolean = true
+): Promise<{
+  campaign_id: string;
+  apply: boolean;
+  scanned_count: number;
+  ready_count: number;
+  requeued_count: number;
+  blocked_count: number;
+  rows: Array<{
+    campaign_lead_id: string;
+    lead_email: string;
+    assigned_inbox_id: string | null;
+    provider: RecipientMailboxProvider;
+    ready: boolean;
+    reason: string | null;
+    domain_id: string | null;
+    domain_name: string | null;
+    dmarc_policy: string | null;
+  }>;
+}> {
+  const { data: pausedRows, error: pausedError } = await supabase
+    .from('campaign_leads')
+    .select(`
+      id,
+      assigned_inbox_id,
+      leads:lead_id (
+        email
+      )
+    `)
+    .eq('campaign_id', campaignId)
+    .eq('status', 'paused')
+    .eq('status_reason', 'auth_not_provider_safe');
+  if (pausedError) throw pausedError;
+
+  const inboxIds = Array.from(
+    new Set(
+      (pausedRows ?? [])
+        .map((row: any) => String(row?.assigned_inbox_id ?? '').trim())
+        .filter(Boolean)
+    )
+  );
+  const inboxById = new Map<string, any>();
+  if (inboxIds.length > 0) {
+    const { data: inboxRows, error: inboxError } = await supabase
+      .from('inboxes')
+      .select('id,email_address,sending_domain_id')
+      .in('id', inboxIds);
+    if (inboxError) throw inboxError;
+    for (const inbox of inboxRows ?? []) {
+      inboxById.set(String((inbox as any)?.id ?? ''), inbox);
+    }
+  }
+
+  const rows: Array<{
+    campaign_lead_id: string;
+    lead_email: string;
+    assigned_inbox_id: string | null;
+    provider: RecipientMailboxProvider;
+    ready: boolean;
+    reason: string | null;
+    domain_id: string | null;
+    domain_name: string | null;
+    dmarc_policy: string | null;
+  }> = [];
+  const readyIds: string[] = [];
+
+  for (const row of pausedRows ?? []) {
+    const campaignLeadId = String((row as any)?.id ?? '');
+    const assignedInboxId = String((row as any)?.assigned_inbox_id ?? '').trim() || null;
+    const leadEmail = String((row as any)?.leads?.email ?? '').trim().toLowerCase();
+    const provider = classifyRecipientProvider(leadEmail);
+    const inbox = assignedInboxId ? inboxById.get(assignedInboxId) ?? null : null;
+    const sendingDomainId = inbox ? String((inbox as any)?.sending_domain_id ?? '').trim() || null : null;
+    let ready = false;
+    let reason: string | null = null;
+    let domainId: string | null = sendingDomainId;
+    let domainName: string | null = null;
+    let dmarcPolicy: string | null = null;
+
+    if (!campaignLeadId) {
+      reason = 'campaign_lead_missing';
+    } else if (!assignedInboxId || !inbox) {
+      reason = 'assigned_inbox_missing';
+    } else if (!sendingDomainId) {
+      reason = 'sending_domain_missing';
+    } else {
+      const snapshot = await resolveProviderSafeAuthSnapshot({
+        sendingDomainId,
+        recipientProvider: provider,
+      });
+      domainId = snapshot.domain_id;
+      domainName = snapshot.domain_name;
+      dmarcPolicy = snapshot.dmarcPolicy;
+      ready = provider === 'generic' || isProviderSafeAuthReady(snapshot);
+      reason = ready ? null : 'auth_not_provider_safe';
+    }
+
+    if (ready && campaignLeadId) readyIds.push(campaignLeadId);
+    rows.push({
+      campaign_lead_id: campaignLeadId,
+      lead_email: leadEmail,
+      assigned_inbox_id: assignedInboxId,
+      provider,
+      ready,
+      reason,
+      domain_id: domainId,
+      domain_name: domainName,
+      dmarc_policy: dmarcPolicy,
+    });
+  }
+
+  let requeuedCount = 0;
+  if (apply && readyIds.length > 0) {
+    const { data: updatedRows, error: updateError } = await supabase
+      .from('campaign_leads')
+      .update({
+        status: 'queued',
+        status_reason: 'auth_provider_safe_requeued',
+        processing_at: null,
+        execution_id: null,
+      })
+      .eq('campaign_id', campaignId)
+      .eq('status', 'paused')
+      .eq('status_reason', 'auth_not_provider_safe')
+      .in('id', readyIds)
+      .select('id');
+    if (updateError) throw updateError;
+    requeuedCount = (updatedRows ?? []).length;
+  }
+
+  await insertSystemEvent({
+    type: 'AUTH_PROVIDER_SAFE_REQUEUE_CHECKED',
+    entity: 'campaigns',
+    entity_id: campaignId,
+    message: `Provider-safe auth retry checked ${rows.length} paused lead(s); requeued=${requeuedCount}.`,
+    meta: {
+      campaign_id: campaignId,
+      apply,
+      scanned_count: rows.length,
+      ready_count: readyIds.length,
+      requeued_count: requeuedCount,
+      blocked_count: rows.length - readyIds.length,
+      rows,
+    },
+  });
+
+  return {
+    campaign_id: campaignId,
+    apply,
+    scanned_count: rows.length,
+    ready_count: readyIds.length,
+    requeued_count: requeuedCount,
+    blocked_count: rows.length - readyIds.length,
+    rows,
+  };
 }
 
 
@@ -1745,7 +1912,7 @@ export async function requeueStaleProcessingLeads(input: RequeueStaleProcessingI
 
   const requeued = (updatedRows ?? []).length;
 
-  await supabase.from('system_events').insert({
+  await insertSystemEvent({
     type: 'PROCESSING_REQUEUED_TIMEOUT',
     entity: 'campaign_leads',
     entity_id: campaignId ?? null,
@@ -1868,7 +2035,7 @@ export async function sendCampaignEmail(campaignLeadId: string) {
       .eq('id', campaignLeadId)
       .eq('status', 'processing');
 
-    await supabase.from('system_events').insert({
+    await insertSystemEvent({
       type: 'CAMPAIGN_SEND_DEFERRED',
       entity: 'campaign_leads',
       entity_id: campaignLeadId,
@@ -2000,7 +2167,7 @@ export async function sendCampaignEmail(campaignLeadId: string) {
       nextStatus: 'paused',
       statusReason: policy.blockReason,
     });
-    await supabase.from('system_events').insert({
+    await insertSystemEvent({
       type: 'deliverability_policy_blocked',
       entity: 'campaign_leads',
       entity_id: campaignLeadId,
@@ -2015,7 +2182,7 @@ export async function sendCampaignEmail(campaignLeadId: string) {
         provider_safe_auth_ready: isProviderSafeAuthReady(authSnapshot),
       },
     });
-    await supabase.from('system_events').insert({
+    await insertSystemEvent({
       type: 'auth_not_provider_safe',
       entity: 'campaign_leads',
       entity_id: campaignLeadId,
@@ -2083,7 +2250,7 @@ export async function sendCampaignEmail(campaignLeadId: string) {
   });
 
   if (policy.trackingDowngraded) {
-    await supabase.from('system_events').insert({
+    await insertSystemEvent({
       type: 'tracking_downgraded_for_provider',
       entity: 'campaign_leads',
       entity_id: campaignLeadId,
@@ -2109,7 +2276,8 @@ export async function sendCampaignEmail(campaignLeadId: string) {
     headers: buildListUnsubscribeHeaders(unsubscribeUrl, String((inbox as any)?.email_address ?? '')),
   });
 
-  await supabase.from('email_logs').insert({
+  let emailLogWarning: string | null = null;
+  const { error: emailLogError } = await supabase.from('email_logs').insert({
     lead_id: campaignLead.leads.id,
     inbox_id: inbox.id,
     campaign_id: campaignLead.campaign_id,
@@ -2122,13 +2290,30 @@ export async function sendCampaignEmail(campaignLeadId: string) {
     status: 'sent',
     sent_at: sentAtIso,
   });
+  if (emailLogError) {
+    emailLogWarning = emailLogError.message;
+    await insertSystemEvent({
+      type: 'EMAIL_LOG_INSERT_FAILED',
+      entity: 'campaign_leads',
+      entity_id: campaignLeadId,
+      message: `Email was accepted by SMTP but send log insert failed for campaign lead ${campaignLeadId}.`,
+      meta: {
+        campaign_id: campaignId,
+        campaign_lead_id: campaignLeadId,
+        inbox_id: inbox.id,
+        to: campaignLead.leads.email,
+        provider_message_id: normalizeMessageId(info.messageId),
+        error_message: emailLogError.message,
+      },
+    });
+  }
 
   await supabase
     .from('inboxes')
     .update({ last_sent_at: new Date().toISOString() })
     .eq('id', inbox.id);
 
-  await supabase.from('system_events').insert({
+  await insertSystemEvent({
     type: 'email_sent',
     entity_id: campaignLeadId,
     meta: {
@@ -2152,6 +2337,7 @@ export async function sendCampaignEmail(campaignLeadId: string) {
   return {
     message_id: normalizeMessageId(info.messageId),
     to: campaignLead.leads.email,
+    email_log_error: emailLogWarning,
   };
 }
 
@@ -2291,7 +2477,7 @@ export async function unsubscribeCampaignLead(token: string) {
   if (leadUpdateError) throw leadUpdateError;
   if (campaignLeadError) throw campaignLeadError;
 
-  await supabase.from('system_events').insert({
+  await insertSystemEvent({
     type: 'campaign_unsubscribed',
     entity: 'campaign_leads',
     entity_id: parsed.campaign_lead_id,
@@ -2417,7 +2603,7 @@ export async function markCampaignLeadSent(
     throw new Error('Campaign lead transition failed (processing -> next step).');
   }
 
-  await supabase.from('system_events').insert({
+  await insertSystemEvent({
     type: 'email_sent',
     entity_id: campaignLeadId,
     meta: { inbox_id: inboxId, reason },
@@ -2490,7 +2676,7 @@ export async function markCampaignLeadFailed(
     .eq('id', inboxId);
 
   // 3️⃣ Log system event
-  await supabase.from('system_events').insert({
+  await insertSystemEvent({
     type: 'email_failed',
     entity_id: campaignLeadId,
     meta: {
@@ -2593,7 +2779,7 @@ export async function completeCampaignIfDone(campaignId: string) {
   /**
    * 5. Log system event
    */
-  await supabase.from('system_events').insert({
+  await insertSystemEvent({
     type: 'campaign_completed',
     entity_id: campaignId,
   });
@@ -2668,7 +2854,7 @@ export async function requeueRiskyPausedLeads() {
     throw updateError;
   }
 
-  await supabase.from('system_events').insert({
+  await insertSystemEvent({
     type: 'RISKY_REQUEUE_DAILY',
     entity: 'campaign_leads',
     message: `Daily risky-cap recovery requeued ${leadIds.length} lead(s).`,
@@ -2700,7 +2886,7 @@ export async function maybeCompleteCampaign(campaignId: string) {
       completed_at: new Date().toISOString(),
     });
 
-    await supabase.from('system_events').insert({
+    await insertSystemEvent({
       type: 'campaign_completed',
       entity: 'campaign',
       entity_id: campaignId,

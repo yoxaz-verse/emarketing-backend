@@ -77,6 +77,44 @@ test('provider policy blocks sensitive sends when auth is not provider-safe', ()
   assert.equal(policy.blockReason, 'auth_not_provider_safe');
 });
 
+test('provider policy blocks Gmail and Outlook when DMARC is not enforced', () => {
+  for (const recipientEmail of ['lead@gmail.com', 'lead@outlook.com']) {
+    const policy = resolveDeliverabilityPolicy({
+      recipientEmail,
+      firstTouch: true,
+      senderDisplayName: 'OBAOL Team',
+      subject: 'Hello',
+      body: 'Body',
+      providerSafeAuth: {
+        spfVerified: true,
+        dkimVerified: true,
+        dmarcVerified: true,
+        dmarcPolicy: 'none',
+      },
+    });
+
+    assert.equal(policy.blockReason, 'auth_not_provider_safe');
+  }
+});
+
+test('provider policy allows sensitive sends when provider-safe auth is ready', () => {
+  const policy = resolveDeliverabilityPolicy({
+    recipientEmail: 'lead@gmail.com',
+    firstTouch: true,
+    senderDisplayName: 'OBAOL Team',
+    subject: 'Hello',
+    body: 'Body',
+    providerSafeAuth: {
+      spfVerified: true,
+      dkimVerified: true,
+      dmarcVerified: true,
+      dmarcPolicy: 'quarantine',
+    },
+  });
+
+  assert.equal(policy.blockReason, null);
+});
+
 test('unsubscribe helpers build stable token and headers', () => {
   const token = buildCampaignUnsubscribeToken({
     campaign_id: 'c1',

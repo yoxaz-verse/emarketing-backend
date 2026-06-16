@@ -14,6 +14,7 @@ import {
   getCampaignExecutionWakeState,
   getCampaignExecutionDiagnostics,
   runCampaignExecutionBatch,
+  requeueProviderSafeAuthPausedLeads,
   repairCampaignStateNow,
   unsubscribeCampaignLead,
 } from '../services/execution.service';
@@ -81,6 +82,19 @@ router.post('/campaigns/:id/run-batch', async (req, res) => {
   } catch (err: any) {
     console.error('[RUN BATCH ERROR]', err);
     res.status(400).json({ error: err.message ?? 'Failed to run campaign batch' });
+  }
+});
+
+router.post('/campaigns/:id/requeue-provider-safe-auth-paused', async (req, res) => {
+  try {
+    const { id: campaignId } = req.params;
+    const applyRaw = req.query.apply ?? req.body?.apply ?? 'true';
+    const apply = String(applyRaw).toLowerCase() !== 'false';
+    const summary = await requeueProviderSafeAuthPausedLeads(campaignId, apply);
+    res.json(summary);
+  } catch (err: any) {
+    console.error('[REQUEUE PROVIDER SAFE AUTH PAUSED ERROR]', err);
+    res.status(400).json({ error: err.message ?? 'Failed to requeue provider-safe auth paused leads' });
   }
 });
 
