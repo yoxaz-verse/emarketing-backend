@@ -233,70 +233,87 @@ async function checkOperatorsSchemaReadiness() {
 }
 
 async function checkSocialAppsSchemaReadiness() {
-  const { error } = await supabase
+  const logSocialSchemaCheck = (
+    label: string,
+    table: string,
+    columns: string[],
+    error: any,
+    extra: Record<string, unknown> = {}
+  ) => {
+    if (!error) {
+      console.info(`[${label}_OK]`, {
+        table,
+        requiredColumns: columns,
+        ...extra,
+      });
+      return;
+    }
+
+    const message = String(error?.message ?? '');
+    const code = String(error?.code ?? '');
+    if (
+      code === '42P01' ||
+      code === '42703' ||
+      message.toLowerCase().includes('does not exist') ||
+      message.toLowerCase().includes('schema cache')
+    ) {
+      console.error(`[${label}_FAILED]`, {
+        table,
+        code,
+        message,
+        fix: 'Apply social app OAuth schema migration 20260618_fix_social_app_oauth_schema.sql and restart backend.',
+      });
+      return;
+    }
+
+    console.warn(`[${label}_WARN]`, { table, code, message });
+  };
+
+  const operatorColumns = ['operator_id', 'platform_code', 'client_secret_encrypted', 'metadata'];
+  const operatorCheck = await supabase
     .from('social_operator_oauth_apps')
     .select('operator_id,platform_code,client_id,client_secret_encrypted,redirect_uri,scopes,metadata,active')
     .limit(1);
-
-  if (!error) {
-    console.info('[SOCIAL_APPS_SCHEMA_CHECK_OK]', {
-      table: 'social_operator_oauth_apps',
-      requiredColumns: ['operator_id', 'platform_code', 'client_secret_encrypted', 'metadata'],
-      endpoints: ['/admin/social-apps/:platform', '/admin/social-apps'],
-    });
-    return;
-  }
-
-  const message = String(error?.message ?? '');
-  const code = String(error?.code ?? '');
-  if (
-    code === '42P01' ||
-    code === '42703' ||
-    message.toLowerCase().includes('does not exist') ||
-    message.toLowerCase().includes('schema cache')
-  ) {
-    console.error('[SOCIAL_APPS_SCHEMA_CHECK_FAILED]', {
-      code,
-      message,
-      fix: 'Apply social_operator_oauth_apps migrations (including multi-platform expansion) and restart backend.',
-    });
-    return;
-  }
-
-  console.warn('[SOCIAL_APPS_SCHEMA_CHECK_WARN]', { code, message });
+  logSocialSchemaCheck(
+    'SOCIAL_APPS_SCHEMA_CHECK',
+    'social_operator_oauth_apps',
+    operatorColumns,
+    operatorCheck.error,
+    { endpoints: ['/admin/social-apps/:platform', '/admin/social-apps'] }
+  );
 
   const globalCheck = await supabase
     .from('social_global_oauth_apps')
     .select('platform_code,client_id,client_secret_encrypted,redirect_uri,scopes,metadata,active')
     .limit(1);
-  if (!globalCheck.error) {
-    console.info('[SOCIAL_GLOBAL_APPS_SCHEMA_CHECK_OK]', {
-      table: 'social_global_oauth_apps',
-      requiredColumns: ['platform_code', 'client_secret_encrypted', 'metadata'],
-    });
-  }
+  logSocialSchemaCheck(
+    'SOCIAL_GLOBAL_APPS_SCHEMA_CHECK',
+    'social_global_oauth_apps',
+    ['platform_code', 'client_secret_encrypted', 'metadata'],
+    globalCheck.error
+  );
 
   const stateCheck = await supabase
     .from('social_oauth_states')
     .select('state_hash,platform_code,user_id,operator_id,expires_at')
     .limit(1);
-  if (!stateCheck.error) {
-    console.info('[SOCIAL_OAUTH_STATES_SCHEMA_CHECK_OK]', {
-      table: 'social_oauth_states',
-      requiredColumns: ['state_hash', 'platform_code', 'user_id', 'operator_id', 'expires_at'],
-    });
-  }
+  logSocialSchemaCheck(
+    'SOCIAL_OAUTH_STATES_SCHEMA_CHECK',
+    'social_oauth_states',
+    ['state_hash', 'platform_code', 'user_id', 'operator_id', 'expires_at'],
+    stateCheck.error
+  );
 
   const connCheck = await supabase
     .from('social_oauth_connections')
     .select('platform_code,user_id,operator_id,access_token_encrypted,refresh_token_encrypted,expires_at,scopes,metadata,status,last_error')
     .limit(1);
-  if (!connCheck.error) {
-    console.info('[SOCIAL_OAUTH_CONNECTIONS_SCHEMA_CHECK_OK]', {
-      table: 'social_oauth_connections',
-      requiredColumns: ['platform_code', 'user_id', 'operator_id', 'access_token_encrypted', 'scopes', 'metadata'],
-    });
-  }
+  logSocialSchemaCheck(
+    'SOCIAL_OAUTH_CONNECTIONS_SCHEMA_CHECK',
+    'social_oauth_connections',
+    ['platform_code', 'user_id', 'operator_id', 'access_token_encrypted', 'scopes', 'metadata'],
+    connCheck.error
+  );
 }
 
 async function checkInquirySchemaReadiness() {

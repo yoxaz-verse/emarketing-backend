@@ -400,7 +400,7 @@ export async function fetchBlogsByContent(input: FetchBlogsInput) {
     const sourceCategories = Array.isArray(source.categories)
       ? source.categories.map((v: string) => String(v || '').toLowerCase().trim()).filter(Boolean)
       : [];
-    if (categoryFilter && !sourceCategories.some((c) => c.includes(categoryFilter))) continue;
+    if (categoryFilter && !sourceCategories.some((c: string) => c.includes(categoryFilter))) continue;
 
     if (source.provider_type !== 'rss') continue;
     try {

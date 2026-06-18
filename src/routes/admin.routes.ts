@@ -241,10 +241,14 @@ function isSocialAppSchemaMismatch(error: any): boolean {
     code === '42P01' ||
     code === '42703' ||
     message.includes('social_operator_oauth_apps') ||
+    message.includes('social_global_oauth_apps') ||
     message.includes('does not exist') ||
     message.includes('schema cache')
   );
 }
+
+const SOCIAL_APP_SCHEMA_ERROR =
+  'Social app OAuth schema is not ready. Apply Backend/sql/20260618_fix_social_app_oauth_schema.sql and restart backend.';
 
 async function handleGetSocialApp(req: any, res: any, platformRaw: string, operatorIdRaw: string, scopeRaw?: string) {
   try {
@@ -312,7 +316,7 @@ async function handleGetSocialApp(req: any, res: any, platformRaw: string, opera
   } catch (err: any) {
     if (isSocialAppSchemaMismatch(err)) {
       return res.status(500).json({
-        error: 'social_operator_oauth_apps schema is not ready. Apply social app migrations and restart backend.',
+        error: SOCIAL_APP_SCHEMA_ERROR,
       });
     }
     console.error('[ADMIN_SOCIAL_APP_READ_ERROR]', {
@@ -396,7 +400,7 @@ async function handlePutSocialApp(req: any, res: any, platformRaw: string, body:
   } catch (err: any) {
     if (isSocialAppSchemaMismatch(err)) {
       return res.status(500).json({
-        error: 'social_operator_oauth_apps schema is not ready. Apply social app migrations and restart backend.',
+        error: SOCIAL_APP_SCHEMA_ERROR,
       });
     }
     console.error('[ADMIN_SOCIAL_APP_UPSERT_ERROR]', {
