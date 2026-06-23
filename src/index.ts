@@ -122,8 +122,8 @@ app.use('/stats', statsRoutes);
 app.use('/admin', adminRoutes);
 app.use('/newsletter', newsletterRoutes);
 app.use('/marketplaces', marketplacesRoutes);
-app.use('/social', socialRoutes);
 app.use('/social', socialAuthRoutes);
+app.use('/social', socialRoutes);
 app.get('/oauth2-credential/callback', (req, res) => {
   const query = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
   res.redirect(`/social/oauth2-credential/callback${query}`);
