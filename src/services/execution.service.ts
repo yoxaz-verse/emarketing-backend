@@ -26,6 +26,10 @@ import {
   type ProviderSafeAuthSnapshot,
   type RecipientMailboxProvider,
 } from './deliverabilityPolicy.service';
+import {
+  isStartupRequeueableCampaignLead,
+  requeueStartupCampaignLeads,
+} from './campaign.domain';
 
 const RUNNER_WINDOW_TIMEZONE = 'Asia/Kolkata';
 const RUNNER_WINDOW_START_HOUR = 9;
@@ -823,11 +827,27 @@ async function repairCampaignState(campaignId: string, maxStep: number, apply: b
     .or(`processing_at.is.null,processing_at.lt.${new Date(Date.now() - (DEFAULT_STALE_PROCESSING_TIMEOUT_MINUTES * 60 * 1000)).toISOString()}`);
   if (staleCountError) throw staleCountError;
 
+  const { data: pausedRows, error: pausedRowsError } = await supabase
+    .from('campaign_leads')
+    .select('id,status,status_reason,last_sent_at,current_step')
+    .eq('campaign_id', campaignId)
+    .eq('status', 'paused');
+  if (pausedRowsError) throw pausedRowsError;
+
+  const pausedReasonCounts: Record<string, number> = {};
+  const startupRequeueablePausedCount = (pausedRows ?? []).filter((row: any) => {
+    const reason = String(row?.status_reason ?? '').trim() || 'none';
+    pausedReasonCounts[reason] = Number(pausedReasonCounts[reason] ?? 0) + 1;
+    return isStartupRequeueableCampaignLead(row);
+  }).length;
+
   const dryRun = {
     campaign_id: campaignId,
     max_step: maxStep,
     mismatched_completed_count: Number(mismatchCount ?? 0),
     stale_processing_count: Number(staleProcessingCount ?? 0),
+    paused_reason_counts: pausedReasonCounts,
+    startup_requeueable_paused_count: startupRequeueablePausedCount,
   };
 
   if (!apply) {
@@ -836,6 +856,7 @@ async function repairCampaignState(campaignId: string, maxStep: number, apply: b
       ...dryRun,
       repaired_status_step_mismatch_count: 0,
       requeued_stale_processing_count: 0,
+      requeued_startup_paused_count: 0,
     };
   }
 
@@ -844,12 +865,14 @@ async function repairCampaignState(campaignId: string, maxStep: number, apply: b
     campaignId,
     olderThanMinutes: DEFAULT_STALE_PROCESSING_TIMEOUT_MINUTES,
   });
+  const startupRequeued = await requeueStartupCampaignLeads(campaignId);
 
   return {
     dry_run: false,
     ...dryRun,
     repaired_status_step_mismatch_count: repaired,
     requeued_stale_processing_count: Number(staleRecovery.requeued ?? 0),
+    requeued_startup_paused_count: startupRequeued,
   };
 }
 
@@ -927,11 +950,21 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
   let oldestProcessingAt: string | null = null;
   let delayBlockedCount = 0;
   let nextDelayEligibleAt: string | null = null;
+  let startupRequeueablePausedCount = 0;
+  const pausedReasonCounts: Record<string, number> = {};
 
   for (const row of statusRowsResult.data ?? []) {
     const status = String((row as any)?.status ?? '').toLowerCase();
     if (status in counts) counts[status] += 1;
     else counts.other += 1;
+
+    if (status === 'paused') {
+      const reason = String((row as any)?.status_reason ?? '').trim() || 'none';
+      pausedReasonCounts[reason] = Number(pausedReasonCounts[reason] ?? 0) + 1;
+      if (isStartupRequeueableCampaignLead(row)) {
+        startupRequeueablePausedCount += 1;
+      }
+    }
 
     if (status === 'processing') {
       const processingAtRaw = (row as any)?.processing_at ?? null;
@@ -1078,6 +1111,9 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
   if (counts.queued === 0 && counts.pending > 0) {
     next_actions.push('No queued leads yet; verify pending->queued migration conditions and campaign status.');
   }
+  if (counts.queued === 0 && counts.pending === 0 && counts.paused > 0 && startupRequeueablePausedCount > 0) {
+    next_actions.push('Restart campaign or run repair-state apply=true to requeue safe startup-paused leads.');
+  }
   if (staleProcessingCount > 0) {
     next_actions.push('Run stale processing recovery; leads appear stuck in processing.');
   }
@@ -1148,6 +1184,10 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
       temp_paused: tempPausedInboxes,
     },
     risky_cap_paused_count: Number(pausedRiskyResult.count ?? 0),
+    paused_leads: {
+      reason_counts: pausedReasonCounts,
+      startup_requeueable_count: startupRequeueablePausedCount,
+    },
     processing_health: {
       timeout_minutes: DEFAULT_STALE_PROCESSING_TIMEOUT_MINUTES,
       cutoff_iso: staleCutoffIso,

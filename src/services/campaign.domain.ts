@@ -51,6 +51,39 @@ export function isCampaignLeadAttachableState(input: {
   return true;
 }
 
+const PROTECTED_STARTUP_REQUEUE_REASONS = new Set([
+  'auth_not_provider_safe',
+  'deliverability_policy_blocked',
+  'user_unsubscribed_campaign',
+  'risky_daily_cap_reached',
+  'sequence_delay_not_elapsed',
+  'temporary_pause_undelivered_1h',
+]);
+
+export function isStartupRequeueableCampaignLead(input: {
+  status?: unknown;
+  status_reason?: unknown;
+  last_sent_at?: unknown;
+  current_step?: unknown;
+}): boolean {
+  const status = String(input.status ?? '').trim().toLowerCase();
+  if (status === 'pending') return true;
+  if (status !== 'paused') return false;
+
+  const lastSentAt = String(input.last_sent_at ?? '').trim();
+  if (lastSentAt.length > 0) return false;
+
+  const currentStepRaw = input.current_step;
+  const currentStep = currentStepRaw === null || currentStepRaw === undefined || String(currentStepRaw).trim() === ''
+    ? 1
+    : Number(currentStepRaw);
+  if (!Number.isFinite(currentStep) || currentStep > 1) return false;
+
+  const reason = String(input.status_reason ?? '').trim().toLowerCase();
+  if (reason.length === 0) return true;
+  return !PROTECTED_STARTUP_REQUEUE_REASONS.has(reason);
+}
+
 async function assertCampaignIsMutableForLeadMutation(campaignId: string) {
   const { data: campaign, error } = await supabase
     .from('campaigns')
@@ -492,6 +525,7 @@ export async function startCampaign(campaignId: string, _auth?: AuthContext) {
 
   // 2️⃣ Idempotency guard
   if (campaign.status === 'running') {
+    await requeueStartupCampaignLeads(campaignId);
     return;
   }
 
@@ -541,25 +575,64 @@ export async function startCampaign(campaignId: string, _auth?: AuthContext) {
   });
 
   // 4️⃣ Initialize campaign leads (if you already do this)
-  await initializeCampaignLeads(campaignId);
+  await requeueStartupCampaignLeads(campaignId);
 }
 
 
 /**
  * Initialize campaign leads for execution
  */
-async function initializeCampaignLeads(campaignId: string) {
-  await supabase
+export async function requeueStartupCampaignLeads(campaignId: string): Promise<number> {
+  const { data: candidateRows, error: candidateError } = await supabase
+    .from("campaign_leads")
+    .select("id,status,status_reason,last_sent_at,current_step")
+    .eq("campaign_id", campaignId)
+    .or("status.eq.pending,status.eq.paused,status.is.null");
+
+  if (candidateError) {
+    throw candidateError;
+  }
+
+  const requeueableIds = (candidateRows ?? [])
+    .filter((row: any) => isStartupRequeueableCampaignLead(row))
+    .map((row: any) => String(row.id))
+    .filter(Boolean);
+
+  if (requeueableIds.length === 0) {
+    return 0;
+  }
+
+  const { error: updateError } = await supabase
     .from("campaign_leads")
     .update({
       status: "queued",
+      status_reason: "startup_requeued",
       current_step: 1,
       retry_count: 0,
       next_retry_at: null,
-      last_sent_at: null,
+      processing_at: null,
+      execution_id: null,
     })
     .eq("campaign_id", campaignId)
-    .in("status", ["pending", "paused", null]);
+    .in("id", requeueableIds);
+
+  if (updateError) {
+    throw updateError;
+  }
+
+  await supabase.from('system_events').insert({
+    type: 'campaign_startup_leads_requeued',
+    entity: 'campaign',
+    entity_id: campaignId,
+    message: `Startup repair requeued ${requeueableIds.length} campaign lead(s).`,
+    meta: {
+      campaign_id: campaignId,
+      requeued_count: requeueableIds.length,
+      campaign_lead_ids: requeueableIds,
+    },
+  });
+
+  return requeueableIds.length;
 }
 
 /**
