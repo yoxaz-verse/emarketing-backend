@@ -21,6 +21,7 @@ import newsletterRoutes from './routes/newsletter.routes';
 import marketplacesRoutes from './routes/marketplaces.routes';
 import socialRoutes from './routes/social.routes';
 import socialAuthRoutes from './routes/social.auth.routes';
+import { handlePlatformCallback } from './services/social/socialAuth.service';
 import blogsRoutes from './routes/blogs.routes';
 import communitiesRoutes from './routes/communities.routes';
 import inquiriesRoutes from './routes/inquiries.routes';
@@ -105,6 +106,37 @@ app.get('/ping', (_req, res) => {
   });
 });
 
+function socialRedirectBase() {
+  return process.env.SOCIAL_OAUTH_SUCCESS_REDIRECT || 'http://localhost:3000/dashboard/social-connectors';
+}
+
+async function handlePublicSocialOAuthCallback(req: any, res: any, platformInput?: string) {
+  const frontend = socialRedirectBase();
+  const platform = String(platformInput ?? req.params?.platform ?? req.query?.platform ?? 'linkedin');
+  const providerError =
+    String(req.query?.error_message ?? '').trim() ||
+    String(req.query?.error_description ?? '').trim() ||
+    String(req.query?.error ?? '').trim();
+
+  try {
+    if (providerError) {
+      throw new Error(providerError);
+    }
+
+    await handlePlatformCallback({
+      platform,
+      code: String(req.query?.code ?? ''),
+      state: String(req.query?.state ?? ''),
+    });
+
+    res.redirect(`${frontend}?social_connected=${encodeURIComponent(platform)}`);
+  } catch (err: any) {
+    console.error('[SOCIAL CONNECT PUBLIC CALLBACK ERROR]', err?.message ?? err);
+    const message = encodeURIComponent(err?.message ?? 'connect_failed');
+    res.redirect(`${frontend}?social_connect_error=${message}`);
+  }
+}
+
 app.use(express.json());
 app.use('/validate', validationRoutes);
 app.use('/auth', authRoutes);
@@ -122,16 +154,23 @@ app.use('/stats', statsRoutes);
 app.use('/admin', adminRoutes);
 app.use('/newsletter', newsletterRoutes);
 app.use('/marketplaces', marketplacesRoutes);
-app.use('/social', socialAuthRoutes);
-app.use('/social', socialRoutes);
+app.get('/social/oauth2-credential/callback', (req, res) => {
+  return handlePublicSocialOAuthCallback(req, res, String(req.query?.platform ?? 'linkedin'));
+});
 app.get('/oauth2-credential/callback', (req, res) => {
-  const query = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
-  res.redirect(`/social/oauth2-credential/callback${query}`);
+  return handlePublicSocialOAuthCallback(req, res, String(req.query?.platform ?? 'linkedin'));
 });
 app.get('/rest/oauth2-credential/callback', (req, res) => {
-  const query = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
-  res.redirect(`/social/oauth2-credential/callback${query}`);
+  return handlePublicSocialOAuthCallback(req, res, String(req.query?.platform ?? 'linkedin'));
 });
+app.get('/social/callback/:platform', (req, res) => {
+  return handlePublicSocialOAuthCallback(req, res, String(req.params.platform ?? ''));
+});
+app.get('/api/auth/:platform/callback', (req, res) => {
+  return handlePublicSocialOAuthCallback(req, res, String(req.params.platform ?? ''));
+});
+app.use('/social', socialAuthRoutes);
+app.use('/social', socialRoutes);
 app.use('/blogs', blogsRoutes);
 app.use('/communities', communitiesRoutes);
 app.use('/inquiries', inquiriesRoutes);
