@@ -215,6 +215,52 @@ function isOperatorScopedRequest(req: any): boolean {
   return !isAdmin && hasOperatorId;
 }
 
+async function getCampaignOperatorId(campaignId: string): Promise<string> {
+  const { data: campaign, error } = await supabase
+    .from('campaigns')
+    .select('id, operator_id')
+    .eq('id', campaignId)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!campaign) throw createHttpError('Campaign not found', 404);
+
+  const operatorId = String(campaign.operator_id ?? '').trim();
+  if (!operatorId) {
+    throw createHttpError('Campaign is missing an assigned operator', 409);
+  }
+  return operatorId;
+}
+
+async function scopeLeadIdsToCampaignOperator(campaignId: string, leadIds: any[]) {
+  const campaignOperatorId = await getCampaignOperatorId(campaignId);
+  const requestedLeadIds = Array.from(new Set(leadIds.map((id: any) => String(id)).filter(Boolean)));
+  if (requestedLeadIds.length === 0) {
+    return {
+      leadIds: [] as string[],
+      skippedOutOfScope: 0,
+      requestedLeadIds,
+      campaignOperatorId,
+    };
+  }
+
+  const { data: ownedLeads, error: ownedLeadsError } = await supabase
+    .from('leads')
+    .select('id')
+    .eq('operator_id', campaignOperatorId)
+    .in('id', requestedLeadIds);
+  if (ownedLeadsError) throw ownedLeadsError;
+
+  const allowedIds = new Set((ownedLeads ?? []).map((row: any) => String(row.id)));
+  const scopedLeadIds = requestedLeadIds.filter((id) => allowedIds.has(String(id)));
+  return {
+    leadIds: scopedLeadIds,
+    skippedOutOfScope: requestedLeadIds.length - scopedLeadIds.length,
+    requestedLeadIds,
+    campaignOperatorId,
+  };
+}
+
 router.post('/:id/leads/attach', async (req, res) => {
   try {
     const campaignId = req.params.id;
@@ -227,20 +273,8 @@ router.post('/:id/leads/attach', async (req, res) => {
       });
     }
 
-    let scopedLeadIds = lead_ids;
-    let skippedOutOfScope = 0;
-    if (isOperatorScopedRequest(req)) {
-      const operatorId = String(req?.auth?.operator_id ?? '').trim();
-      const { data: ownedLeads, error: ownedLeadsError } = await supabase
-        .from('leads')
-        .select('id')
-        .eq('operator_id', operatorId)
-        .in('id', lead_ids);
-      if (ownedLeadsError) throw ownedLeadsError;
-      const allowedIds = new Set((ownedLeads ?? []).map((row: any) => String(row.id)));
-      scopedLeadIds = lead_ids.filter((id: any) => allowedIds.has(String(id)));
-      skippedOutOfScope = lead_ids.length - scopedLeadIds.length;
-    }
+    const { leadIds: scopedLeadIds, skippedOutOfScope } =
+      await scopeLeadIdsToCampaignOperator(campaignId, lead_ids);
 
     const result = await attachLeadsToCampaign(campaignId, scopedLeadIds);
 
@@ -266,16 +300,21 @@ router.post('/:id/leads/attach-folder', async (req, res) => {
       return res.status(400).json({ error: 'folder_ids must be a non-empty array' });
     }
 
-    let memberQuery: any = supabase
+    const campaignOperatorId = await getCampaignOperatorId(campaignId);
+    const memberQuery: any = supabase
       .from('leads')
-      .select('id')
+      .select('id, operator_id')
       .in('folder_id', folderIds);
-    if (isOperatorScopedRequest(req)) {
-      memberQuery = memberQuery.eq('operator_id', String(req?.auth?.operator_id ?? ''));
-    }
     const { data: members, error: memberError } = await memberQuery;
     if (memberError) throw memberError;
-    const leadIds: string[] = Array.from(new Set((members ?? []).map((m: any) => String(m.id))));
+    const requestedLeadIds: string[] = Array.from(new Set((members ?? []).map((m: any) => String(m.id)).filter(Boolean)));
+    const leadIds: string[] = Array.from(new Set(
+      (members ?? [])
+        .filter((m: any) => String(m.operator_id ?? '').trim() === campaignOperatorId)
+        .map((m: any) => String(m.id))
+        .filter(Boolean)
+    ));
+    const skippedOutOfScope = requestedLeadIds.length - leadIds.length;
     if (leadIds.length === 0) {
       return res.json({
         success: true,
@@ -285,6 +324,7 @@ router.post('/:id/leads/attach-folder', async (req, res) => {
         skipped_existing: 0,
         skipped_ineligible: 0,
         skipped_missing: 0,
+        skipped_out_of_scope: skippedOutOfScope,
       });
     }
 
@@ -294,6 +334,7 @@ router.post('/:id/leads/attach-folder', async (req, res) => {
       ...result,
       source: 'folder_snapshot',
       folder_ids: folderIds,
+      skipped_out_of_scope: skippedOutOfScope,
     });
   } catch (err: any) {
     console.error('[ATTACH FOLDER LEADS ERROR]', err);
