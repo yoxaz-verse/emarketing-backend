@@ -59,7 +59,7 @@ test('provider policy downgrades tracking and enforces team sender on sensitive 
   assert.equal(policy.sanitizedBody.includes('Jacob'), false);
 });
 
-test('provider policy blocks sensitive sends when auth is not provider-safe', () => {
+test('provider policy keeps hygiene without blocking when auth is not provider-safe', () => {
   const policy = resolveDeliverabilityPolicy({
     recipientEmail: 'lead@yahoo.com',
     firstTouch: true,
@@ -74,10 +74,12 @@ test('provider policy blocks sensitive sends when auth is not provider-safe', ()
     },
   });
 
-  assert.equal(policy.blockReason, 'auth_not_provider_safe');
+  assert.equal(policy.blockReason, null);
+  assert.equal(policy.minimalTracking, true);
+  assert.equal(policy.useMultipartPlainText, true);
 });
 
-test('provider policy blocks Gmail and Outlook when DMARC is not enforced', () => {
+test('provider policy allows Gmail and Outlook when DMARC is not enforced', () => {
   for (const recipientEmail of ['lead@gmail.com', 'lead@outlook.com']) {
     const policy = resolveDeliverabilityPolicy({
       recipientEmail,
@@ -93,7 +95,9 @@ test('provider policy blocks Gmail and Outlook when DMARC is not enforced', () =
       },
     });
 
-    assert.equal(policy.blockReason, 'auth_not_provider_safe');
+    assert.equal(policy.blockReason, null);
+    assert.equal(policy.minimalTracking, true);
+    assert.equal(policy.useMultipartPlainText, true);
   }
 });
 

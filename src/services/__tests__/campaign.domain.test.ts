@@ -69,7 +69,7 @@ test('startup requeue allows unsent paused first-step leads without a protected 
   );
 });
 
-test('startup requeue blocks protected paused reasons', () => {
+test('startup requeue restores retired deliverability pauses but protects unsubscribes', () => {
   assert.equal(
     isStartupRequeueableCampaignLead({
       status: 'paused',
@@ -77,7 +77,7 @@ test('startup requeue blocks protected paused reasons', () => {
       last_sent_at: null,
       current_step: 1,
     }),
-    false
+    true
   );
   assert.equal(
     isStartupRequeueableCampaignLead({

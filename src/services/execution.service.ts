@@ -1136,7 +1136,7 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
     next_actions.push('Campaign unsubscribe link is not configured; set BACKEND_PUBLIC_URL or APP_BASE_URL before scaling sends.');
   }
   if (providerSafeReadyCount < providerSafeTotalCount) {
-    next_actions.push('One or more sending domains are not provider-safe (enforced DMARC missing). Sensitive-provider sends will be blocked.');
+    next_actions.push('One or more sending domains are missing enforced DMARC. Sends continue, but completing authentication is recommended for inbox placement.');
   }
   if (next_actions.length === 0) {
     next_actions.push('No immediate blockers detected; run batch execution and inspect per-lead outcomes.');
@@ -1452,6 +1452,7 @@ export async function requeueProviderSafeAuthPausedLeads(
     .from('campaign_leads')
     .select(`
       id,
+      status_reason,
       assigned_inbox_id,
       leads:lead_id (
         email
@@ -1459,85 +1460,28 @@ export async function requeueProviderSafeAuthPausedLeads(
     `)
     .eq('campaign_id', campaignId)
     .eq('status', 'paused')
-    .eq('status_reason', 'auth_not_provider_safe');
+    .in('status_reason', [
+      'auth_not_provider_safe',
+      'deliverability_policy_blocked',
+      'risky_daily_cap_reached',
+    ]);
   if (pausedError) throw pausedError;
 
-  const inboxIds = Array.from(
-    new Set(
-      (pausedRows ?? [])
-        .map((row: any) => String(row?.assigned_inbox_id ?? '').trim())
-        .filter(Boolean)
-    )
-  );
-  const inboxById = new Map<string, any>();
-  if (inboxIds.length > 0) {
-    const { data: inboxRows, error: inboxError } = await supabase
-      .from('inboxes')
-      .select('id,email_address,sending_domain_id')
-      .in('id', inboxIds);
-    if (inboxError) throw inboxError;
-    for (const inbox of inboxRows ?? []) {
-      inboxById.set(String((inbox as any)?.id ?? ''), inbox);
-    }
-  }
-
-  const rows: Array<{
-    campaign_lead_id: string;
-    lead_email: string;
-    assigned_inbox_id: string | null;
-    provider: RecipientMailboxProvider;
-    ready: boolean;
-    reason: string | null;
-    domain_id: string | null;
-    domain_name: string | null;
-    dmarc_policy: string | null;
-  }> = [];
-  const readyIds: string[] = [];
-
-  for (const row of pausedRows ?? []) {
-    const campaignLeadId = String((row as any)?.id ?? '');
-    const assignedInboxId = String((row as any)?.assigned_inbox_id ?? '').trim() || null;
-    const leadEmail = String((row as any)?.leads?.email ?? '').trim().toLowerCase();
-    const provider = classifyRecipientProvider(leadEmail);
-    const inbox = assignedInboxId ? inboxById.get(assignedInboxId) ?? null : null;
-    const sendingDomainId = inbox ? String((inbox as any)?.sending_domain_id ?? '').trim() || null : null;
-    let ready = false;
-    let reason: string | null = null;
-    let domainId: string | null = sendingDomainId;
-    let domainName: string | null = null;
-    let dmarcPolicy: string | null = null;
-
-    if (!campaignLeadId) {
-      reason = 'campaign_lead_missing';
-    } else if (!assignedInboxId || !inbox) {
-      reason = 'assigned_inbox_missing';
-    } else if (!sendingDomainId) {
-      reason = 'sending_domain_missing';
-    } else {
-      const snapshot = await resolveProviderSafeAuthSnapshot({
-        sendingDomainId,
-        recipientProvider: provider,
-      });
-      domainId = snapshot.domain_id;
-      domainName = snapshot.domain_name;
-      dmarcPolicy = snapshot.dmarcPolicy;
-      ready = provider === 'generic' || isProviderSafeAuthReady(snapshot);
-      reason = ready ? null : 'auth_not_provider_safe';
-    }
-
-    if (ready && campaignLeadId) readyIds.push(campaignLeadId);
-    rows.push({
-      campaign_lead_id: campaignLeadId,
+  const rows = (pausedRows ?? []).map((row: any) => {
+    const leadEmail = String(row?.leads?.email ?? '').trim().toLowerCase();
+    return {
+      campaign_lead_id: String(row?.id ?? ''),
       lead_email: leadEmail,
-      assigned_inbox_id: assignedInboxId,
-      provider,
-      ready,
-      reason,
-      domain_id: domainId,
-      domain_name: domainName,
-      dmarc_policy: dmarcPolicy,
-    });
-  }
+      assigned_inbox_id: String(row?.assigned_inbox_id ?? '').trim() || null,
+      provider: classifyRecipientProvider(leadEmail),
+      ready: true,
+      reason: null,
+      domain_id: null,
+      domain_name: null,
+      dmarc_policy: null,
+    };
+  });
+  const readyIds = rows.map((row: { campaign_lead_id: string }) => row.campaign_lead_id).filter(Boolean);
 
   let requeuedCount = 0;
   if (apply && readyIds.length > 0) {
@@ -1545,34 +1489,40 @@ export async function requeueProviderSafeAuthPausedLeads(
       .from('campaign_leads')
       .update({
         status: 'queued',
-        status_reason: 'auth_provider_safe_requeued',
+        status_reason: null,
         processing_at: null,
         execution_id: null,
       })
       .eq('campaign_id', campaignId)
       .eq('status', 'paused')
-      .eq('status_reason', 'auth_not_provider_safe')
+      .in('status_reason', [
+        'auth_not_provider_safe',
+        'deliverability_policy_blocked',
+        'risky_daily_cap_reached',
+      ])
       .in('id', readyIds)
       .select('id');
     if (updateError) throw updateError;
     requeuedCount = (updatedRows ?? []).length;
   }
 
-  await insertSystemEvent({
-    type: 'AUTH_PROVIDER_SAFE_REQUEUE_CHECKED',
-    entity: 'campaigns',
-    entity_id: campaignId,
-    message: `Provider-safe auth retry checked ${rows.length} paused lead(s); requeued=${requeuedCount}.`,
-    meta: {
-      campaign_id: campaignId,
-      apply,
-      scanned_count: rows.length,
-      ready_count: readyIds.length,
-      requeued_count: requeuedCount,
-      blocked_count: rows.length - readyIds.length,
-      rows,
-    },
-  });
+  if (rows.length > 0) {
+    await insertSystemEvent({
+      type: 'LEGACY_DELIVERABILITY_PAUSE_RECOVERY',
+      entity: 'campaigns',
+      entity_id: campaignId,
+      message: `Legacy deliverability recovery checked ${rows.length} paused lead(s); requeued=${requeuedCount}.`,
+      meta: {
+        campaign_id: campaignId,
+        apply,
+        scanned_count: rows.length,
+        ready_count: readyIds.length,
+        requeued_count: requeuedCount,
+        blocked_count: rows.length - readyIds.length,
+        rows,
+      },
+    });
+  }
 
   return {
     campaign_id: campaignId,
@@ -1595,6 +1545,10 @@ export async function getNextCampaignExecutions(
   const batchShape = normalizeCampaignBatchSize(batchSize);
   const requestedBatchSize = batchShape.requested_batch_size;
   const normalizedBatchSize = batchShape.effective_batch_size;
+
+  // These pauses came from retired provider/risky gates. Recover them before
+  // every claim so already-running campaigns resume without manual repair.
+  await requeueProviderSafeAuthPausedLeads(campaignId, true);
 
   const migratedPendingCount = await migratePendingLeadsToQueued(campaignId);
   if (migratedPendingCount > 0) {
@@ -2141,12 +2095,15 @@ export async function sendCampaignEmail(campaignLeadId: string) {
   }
 
   const recipientEmail = String((campaignLead as any)?.leads?.email ?? '').trim().toLowerCase();
-  const recipientProvider = classifyRecipientProvider(recipientEmail);
   const isFirstTouch = Number((campaignLead as any)?.current_step ?? 1) <= 1;
-  const authSnapshot = await resolveProviderSafeAuthSnapshot({
-    sendingDomainId: String((inbox as any)?.sending_domain_id ?? '') || null,
-    recipientProvider,
-  });
+  // Authentication readiness is monitored elsewhere, but it is no longer a
+  // prerequisite for sending to a particular mailbox provider.
+  const authSnapshot: ProviderSafeAuthSnapshot = {
+    spfVerified: false,
+    dkimVerified: false,
+    dmarcVerified: false,
+    dmarcPolicy: null,
+  };
 
   const { data: stepRow, error: stepError } = await supabase
     .from('campaign_leads')
@@ -2201,50 +2158,6 @@ export async function sendCampaignEmail(campaignLeadId: string) {
     body: bodyRaw,
     providerSafeAuth: authSnapshot,
   });
-  if (policy.blockReason) {
-    await requeueCampaignLeadForSkip({
-      campaignLeadId,
-      nextStatus: 'paused',
-      statusReason: policy.blockReason,
-    });
-    await insertSystemEvent({
-      type: 'deliverability_policy_blocked',
-      entity: 'campaign_leads',
-      entity_id: campaignLeadId,
-      message: `Deliverability policy blocked ${policy.provider} send for campaign lead ${campaignLeadId}.`,
-      meta: {
-        campaign_id: campaignId,
-        campaign_lead_id: campaignLeadId,
-        provider: policy.provider,
-        blocked_reason: policy.blockReason,
-        domain_id: authSnapshot.domain_id,
-        domain_name: authSnapshot.domain_name,
-        provider_safe_auth_ready: isProviderSafeAuthReady(authSnapshot),
-      },
-    });
-    await insertSystemEvent({
-      type: 'auth_not_provider_safe',
-      entity: 'campaign_leads',
-      entity_id: campaignLeadId,
-      message: `Provider-safe authentication is not ready for ${policy.provider}.`,
-      meta: {
-        campaign_id: campaignId,
-        campaign_lead_id: campaignLeadId,
-        provider: policy.provider,
-        domain_id: authSnapshot.domain_id,
-        domain_name: authSnapshot.domain_name,
-        dmarc_policy: authSnapshot.dmarcPolicy,
-        spf_verified: authSnapshot.spfVerified,
-        dkim_verified: authSnapshot.dkimVerified,
-        dmarc_verified: authSnapshot.dmarcVerified,
-      },
-    });
-    return {
-      skipped: true,
-      reason: 'deliverability_policy_blocked',
-    };
-  }
-
   const minimalTrackingMode = DELIVERABILITY_MINIMAL_TRACKING_ENABLED && policy.minimalTracking;
   const trackingBase = resolveTrackingBaseUrl();
   const unsubscribeToken = buildCampaignUnsubscribeToken({
@@ -2871,7 +2784,11 @@ export async function requeueRiskyPausedLeads() {
     .select('id')
     .in('campaign_id', campaignIds)
     .eq('status', 'paused')
-    .eq('status_reason', 'risky_daily_cap_reached');
+    .in('status_reason', [
+      'auth_not_provider_safe',
+      'deliverability_policy_blocked',
+      'risky_daily_cap_reached',
+    ]);
 
   if (pausedLeadsError) {
     throw pausedLeadsError;
@@ -2895,9 +2812,9 @@ export async function requeueRiskyPausedLeads() {
   }
 
   await insertSystemEvent({
-    type: 'RISKY_REQUEUE_DAILY',
+    type: 'LEGACY_DELIVERABILITY_PAUSE_RECOVERY',
     entity: 'campaign_leads',
-    message: `Daily risky-cap recovery requeued ${leadIds.length} lead(s).`,
+    message: `Legacy deliverability recovery requeued ${leadIds.length} lead(s).`,
     meta: {
       updated: leadIds.length,
       campaign_count: campaignIds.length,

@@ -164,7 +164,6 @@ export function buildCampaignUnsubscribeFooter(unsubscribeUrl: string): { html: 
 export function resolveDeliverabilityPolicy(input: DeliverabilityPolicyInput): DeliverabilityPolicy {
   const provider = classifyRecipientProvider(input.recipientEmail);
   const providerSensitive = provider !== 'generic';
-  const providerSafeAuthReady = isProviderSafeAuthReady(input.providerSafeAuth);
   const strictPlainMode = input.firstTouch && (provider === 'microsoft' || provider === 'yahoo_aol');
   const minimalTracking = providerSensitive;
   const senderDisplayNameRaw = String(input.senderDisplayName ?? '').trim();
@@ -181,6 +180,8 @@ export function resolveDeliverabilityPolicy(input: DeliverabilityPolicyInput): D
     sanitizedSubject: toneDownSubject(input.subject),
     sanitizedBody: toneDownBody(input.body),
     trackingDowngraded: minimalTracking,
-    blockReason: providerSensitive && !providerSafeAuthReady ? 'auth_not_provider_safe' : null,
+    // Authentication health is diagnostic only. Provider-specific hygiene must
+    // never prevent an otherwise eligible recipient from reaching SMTP.
+    blockReason: null,
   };
 }

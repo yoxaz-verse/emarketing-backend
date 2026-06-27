@@ -52,10 +52,7 @@ export function isCampaignLeadAttachableState(input: {
 }
 
 const PROTECTED_STARTUP_REQUEUE_REASONS = new Set([
-  'auth_not_provider_safe',
-  'deliverability_policy_blocked',
   'user_unsubscribed_campaign',
-  'risky_daily_cap_reached',
   'sequence_delay_not_elapsed',
   'temporary_pause_undelivered_1h',
 ]);

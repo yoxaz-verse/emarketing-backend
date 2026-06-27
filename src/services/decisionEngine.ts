@@ -159,54 +159,6 @@ const { data: step } = await supabase
 
 if (!step) return null;
 
-const leadEligibility = String(lead?.email_eligibility ?? '').toLowerCase();
-if (leadEligibility === 'risky') {
-  const riskyPercent = Math.max(0, Math.min(100, Number(sendingLimits.risky_daily_percent_limit ?? 20)));
-  const allowedRiskyPerDay = Math.max(0, Math.floor((dailyLimit * riskyPercent) / 100));
-
-  const { data: sentTodayLogs, error: sentTodayLogsError } = await supabase
-    .from('email_logs')
-    .select('lead_id')
-    .eq('inbox_id', inbox.id)
-    .eq('status', 'sent')
-    .gte('sent_at', today);
-
-  if (sentTodayLogsError) {
-    return null;
-  }
-
-  const sentLeadIds = Array.from(
-    new Set((sentTodayLogs ?? []).map((row: any) => String(row?.lead_id ?? '')).filter(Boolean))
-  );
-
-  let riskySentToday = 0;
-  if (sentLeadIds.length > 0) {
-    const { data: riskySentLeads } = await supabase
-      .from('leads')
-      .select('id')
-      .in('id', sentLeadIds)
-      .eq('email_eligibility', 'risky');
-    riskySentToday = (riskySentLeads ?? []).length;
-  }
-
-  if (riskySentToday >= allowedRiskyPerDay) {
-    await supabase.from('system_events').insert({
-      type: 'RISKY_CAP_REACHED',
-      entity: 'inbox',
-      entity_id: inbox.id,
-      message: `Risky send cap reached for inbox ${inbox.email_address}`,
-      meta: {
-        inbox_id: inbox.id,
-        risky_percent_limit: riskyPercent,
-        daily_limit: dailyLimit,
-        allowed_risky_per_day: allowedRiskyPerDay,
-        risky_sent_today: riskySentToday,
-      },
-    });
-    return null;
-  }
-}
-
 // If not first step, check delay
 if (leadSequence.last_sent_at) {
   const nextAllowed = new Date(leadSequence.last_sent_at);
