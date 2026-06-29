@@ -49,6 +49,5 @@ export function buildSelect(table: string, options?: { includeRelations?: boolea
   }
 
   const select = [...base, ...relations].join(',');
-  console.log(`[DEBUG] Building SELECT for table "${table}": ${select}`);
   return select;
 }

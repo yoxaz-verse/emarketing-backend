@@ -9,6 +9,8 @@ import {
   pauseCampaign
 } from '../services/campaign.domain';
 import { getCampaignRepliesFeed, getCampaignReplyOpenAnalytics } from '../services/emailTracking.service.js';
+import { getSendingLimitsConfig } from '../services/sendingLimitsConfig.service';
+import { normalizePagination } from '../utils/pagination';
 
 const router = Router();
 router.use(requireAuth('viewer'));
@@ -84,6 +86,204 @@ function senderWarningForName(name: string | null): string | null {
   }
   return null;
 }
+
+router.get('/:id/workspace', async (req, res) => {
+  const startedAt = performance.now();
+  try {
+    const campaignId = String(req.params.id ?? '');
+    await assertCampaignAccess(req, campaignId);
+    const { data: campaign, error: campaignError } = await supabase
+      .from('campaigns')
+      .select('*')
+      .eq('id', campaignId)
+      .maybeSingle();
+    if (campaignError) throw campaignError;
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+
+    const operatorId = String((campaign as any).operator_id ?? '').trim();
+    const sequenceId = String((campaign as any).sequence_id ?? '').trim();
+    const inboxFilter = operatorId
+      ? `operator_id.is.null,operator_id.eq.${operatorId}`
+      : 'operator_id.is.null';
+    const [operatorResult, inboxResult, campaignInboxesResult, sequenceResult, stepsResult, foldersResult, sendingLimits] = await Promise.all([
+      operatorId
+        ? supabase.from('operators').select('id,name').eq('id', operatorId).maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
+      supabase
+        .from('inboxes')
+        .select('id,email_address,operator_id,sending_domain_id,daily_limit,hourly_limit,warmup_enabled,warmup_day')
+        .or(inboxFilter)
+        .order('email_address', { ascending: true }),
+      supabase.from('campaign_inboxes').select('id,campaign_id,inbox_id,created_at').eq('campaign_id', campaignId),
+      sequenceId
+        ? supabase.from('sequences').select('*').eq('id', sequenceId).maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
+      sequenceId
+        ? supabase.from('sequence_steps').select('*').eq('sequence_id', sequenceId).order('step_number', { ascending: true })
+        : Promise.resolve({ data: [], error: null }),
+      operatorId
+        ? supabase.from('lead_folders').select('id,name,operator_id').eq('operator_id', operatorId).order('name', { ascending: true })
+        : Promise.resolve({ data: [], error: null }),
+      getSendingLimitsConfig().catch(() => null),
+    ]);
+    const firstError = [operatorResult, inboxResult, campaignInboxesResult, sequenceResult, stepsResult, foldersResult]
+      .find((result: any) => result?.error)?.error;
+    if (firstError) throw firstError;
+
+    const inboxes = inboxResult.data ?? [];
+    const inboxIds = inboxes.map((row: any) => String(row.id)).filter(Boolean);
+    const domainIds = Array.from(new Set(inboxes.map((row: any) => String(row.sending_domain_id ?? '')).filter(Boolean)));
+    const [conflicts, domainResult] = await Promise.all([
+      getInboxLockConflicts(campaignId, inboxIds),
+      domainIds.length > 0
+        ? supabase.from('sending_domains').select('id,spf_verified,dkim_verified,dmarc_verified').in('id', domainIds)
+        : Promise.resolve({ data: [], error: null }),
+    ]);
+    if (domainResult.error) throw domainResult.error;
+
+    const role = String(req?.auth?.role ?? '').toLowerCase();
+    const locks = conflicts.map((row) => ({
+      inbox_id: row.inbox_id,
+      blocking_campaign_id: row.blocking_campaign_id,
+      blocking_status: row.blocking_status,
+      blocking_campaign_name: role === 'admin' || role === 'superadmin' || String(row.blocking_operator_id ?? '') === operatorId
+        ? row.blocking_campaign_name
+        : 'Another active campaign',
+    }));
+    const senderDisplayName = String((campaign as any).sender_display_name ?? '').trim() || null;
+    const durationMs = Math.round(performance.now() - startedAt);
+    res.setHeader('Server-Timing', `campaign-workspace;dur=${durationMs}`);
+    return res.json({
+      campaign,
+      assigned_operator_name: String((operatorResult.data as any)?.name ?? '').trim() || null,
+      inboxes,
+      campaign_inboxes: campaignInboxesResult.data ?? [],
+      locked_inboxes: locks,
+      sending_domains: domainResult.data ?? [],
+      sequence: sequenceResult.data ?? null,
+      sequence_steps: stepsResult.data ?? [],
+      lead_folders: foldersResult.data ?? [],
+      sending_limits: sendingLimits,
+      sender_settings: {
+        sender_display_name: senderDisplayName,
+        effective_sender_display_name: senderDisplayName || DEFAULT_SENDER_DISPLAY_NAME,
+        warning: senderWarningForName(senderDisplayName),
+        schema_ready: true,
+      },
+      mutation_health: { ok: true, routeContractVersion: 'campaign-mutations-v1' },
+    });
+  } catch (err: any) {
+    return res.status(resolveStatusCode(err)).json({ error: err?.message ?? 'Failed to load campaign workspace' });
+  }
+});
+
+router.get('/:id/health-summary', async (req, res) => {
+  try {
+    const campaignId = String(req.params.id ?? '');
+    await assertCampaignAccess(req, campaignId);
+    const [campaignResult, runnerResult, sendResult] = await Promise.all([
+      supabase.from('campaigns').select('id,status').eq('id', campaignId).maybeSingle(),
+      supabase.from('system_events')
+        .select('type,created_at,message,meta')
+        .eq('entity_id', campaignId)
+        .in('type', ['CAMPAIGN_BATCH_EXECUTED', 'CAMPAIGN_BATCH_EXECUTION_FATAL'])
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+      supabase.from('email_logs').select('sent_at').eq('campaign_id', campaignId).eq('status', 'sent')
+        .order('sent_at', { ascending: false }).limit(1).maybeSingle(),
+    ]);
+    const firstError = [campaignResult, runnerResult, sendResult].find((result) => result.error)?.error;
+    if (firstError) throw firstError;
+    const eventAt = String((runnerResult.data as any)?.created_at ?? '').trim() || null;
+    const age = eventAt ? Math.max(0, Math.floor((Date.now() - new Date(eventAt).getTime()) / 1000)) : null;
+    const isRunning = String((campaignResult.data as any)?.status ?? '').toLowerCase() === 'running';
+    const state = !isRunning ? 'idle'
+      : String((runnerResult.data as any)?.type ?? '') === 'CAMPAIGN_BATCH_EXECUTION_FATAL' ? 'failed'
+        : age !== null && age <= 150 ? 'healthy' : 'stale';
+    const meta = ((runnerResult.data as any)?.meta ?? {}) as Record<string, any>;
+    return res.json({
+      runner_health: {
+        state,
+        last_heartbeat_at: eventAt,
+        heartbeat_age_seconds: age,
+        last_successful_send_at: (sendResult.data as any)?.sent_at ?? null,
+        claimed_count: Number(meta.claimed_count ?? 0),
+        sent_count: Number(meta.sent_count ?? 0),
+        failed_count: Number(meta.failed_count ?? 0),
+        skipped_count: Number(meta.skipped_count ?? 0),
+        claim_reason: meta.claim_reason ?? null,
+        skip_reasons: meta.skip_reasons ?? {},
+        fatal_error: meta.fatal_error ?? null,
+        queue_snapshot_after: meta.queue_snapshot_after ?? null,
+      },
+    });
+  } catch (err: any) {
+    return res.status(resolveStatusCode(err)).json({ error: err?.message ?? 'Failed to load campaign health summary' });
+  }
+});
+
+router.get('/:id/leads/page', async (req, res) => {
+  try {
+    const campaignId = String(req.params.id ?? '');
+    await assertCampaignAccess(req, campaignId);
+    const { page, pageSize } = normalizePagination(req.query.page, req.query.page_size, 50);
+    const scope = String(req.query.scope ?? 'available') === 'attached' ? 'attached' : 'available';
+    const query = String(req.query.q ?? '').trim() || null;
+    const folderId = String(req.query.folder_id ?? '').trim() || null;
+    const { data, error } = await supabase.rpc('dashboard_campaign_lead_page', {
+      p_campaign_id: campaignId,
+      p_scope: scope,
+      p_query: query,
+      p_folder_id: folderId,
+      p_offset: (page - 1) * pageSize,
+      p_limit: pageSize,
+    });
+    if (error) throw error;
+    const payload = (data ?? {}) as { rows?: unknown[]; total?: number };
+    return res.json({
+      rows: Array.isArray(payload.rows) ? payload.rows : [],
+      total: Number(payload.total ?? 0),
+      page,
+      page_size: pageSize,
+      scope,
+    });
+  } catch (err: any) {
+    return res.status(resolveStatusCode(err)).json({ error: err?.message ?? 'Failed to load campaign leads' });
+  }
+});
+
+router.get('/:id/progress/page', async (req, res) => {
+  try {
+    const campaignId = String(req.params.id ?? '');
+    await assertCampaignAccess(req, campaignId);
+    const { page, pageSize } = normalizePagination(req.query.page, req.query.page_size, 50);
+    const { data, error, count } = await supabase
+      .from('campaign_leads')
+      .select('id,campaign_id,lead_id,status,status_reason,current_step,last_sent_at,assigned_inbox_id,leads:lead_id(id,email,email_eligibility,is_suppressed)', { count: 'exact' })
+      .eq('campaign_id', campaignId)
+      .order('created_at', { ascending: false })
+      .range((page - 1) * pageSize, page * pageSize - 1);
+    if (error) throw error;
+    return res.json({ rows: data ?? [], total: Number(count ?? 0), page, page_size: pageSize });
+  } catch (err: any) {
+    return res.status(resolveStatusCode(err)).json({ error: err?.message ?? 'Failed to load campaign progress' });
+  }
+});
+
+router.get('/:id/progress-summary', async (req, res) => {
+  try {
+    const campaignId = String(req.params.id ?? '');
+    await assertCampaignAccess(req, campaignId);
+    const { data, error } = await supabase.rpc('dashboard_campaign_progress_summary', {
+      p_campaign_id: campaignId,
+    });
+    if (error) throw error;
+    return res.json(data ?? { total: 0, groups: [], lead_mix: { eligible: 0, risky: 0, suppressed: 0 } });
+  } catch (err: any) {
+    return res.status(resolveStatusCode(err)).json({ error: err?.message ?? 'Failed to load campaign progress summary' });
+  }
+});
 
 router.get('/:id/sender-settings', async (req, res) => {
   try {

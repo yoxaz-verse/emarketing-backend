@@ -236,18 +236,21 @@ async function addReviewEvent(blogId: string, action: 'approve' | 'reject' | 'ed
   if (error) throw error;
 }
 
-export async function listBlogs() {
-  const { data, error } = await supabase
+export async function listBlogs(page = 1, pageSize = 100) {
+  const safePage = Math.max(1, Math.trunc(Number(page) || 1));
+  const safePageSize = Math.max(1, Math.min(100, Math.trunc(Number(pageSize) || 100)));
+  const { data, error, count } = await supabase
     .from('blogs')
-    .select('*')
-    .order('created_at', { ascending: false });
+    .select('*', { count: 'exact' })
+    .order('created_at', { ascending: false })
+    .range((safePage - 1) * safePageSize, safePage * safePageSize - 1);
 
   if (error) {
-    if (error.code === 'PGRST205') return [];
+    if (error.code === 'PGRST205') return { rows: [], total: 0, page: safePage, page_size: safePageSize };
     throw error;
   }
 
-  return data ?? [];
+  return { rows: data ?? [], total: Number(count ?? 0), page: safePage, page_size: safePageSize };
 }
 
 export async function listBlogSources() {

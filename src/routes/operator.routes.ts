@@ -140,9 +140,14 @@ router.get('/replies', async (req, res) => {
     const reviewStatus =
       reviewStatusRaw === 'unreviewed' || reviewStatusRaw === 'reviewed' ? reviewStatusRaw : 'all';
     const includeUnmatched = String(req.query.include_unmatched ?? '').toLowerCase() === 'true';
-    const replies = await getOperatorReplies(operatorId, { campaignId, reviewStatus });
+    const repliesPage = await getOperatorReplies(operatorId, {
+      campaignId,
+      reviewStatus,
+      page: Number(req.query.page ?? 1),
+      pageSize: Number(req.query.page_size ?? 50),
+    });
     if (!includeUnmatched) {
-      return res.json(replies);
+      return res.json(repliesPage.rows);
     }
 
     const unmatched = await getUnmatchedReplyEvents(operatorId, { campaignId });
@@ -163,9 +168,11 @@ router.get('/replies', async (req, res) => {
 
     const workerHealth = getReplyCaptureHealth();
     return res.json({
-      replies,
+      replies: repliesPage.rows,
       unmatched,
-      matched_count: Array.isArray(replies) ? replies.length : 0,
+      matched_count: repliesPage.total,
+      page: repliesPage.page,
+      page_size: repliesPage.page_size,
       unmatched_count: Array.isArray(unmatched) ? unmatched.length : 0,
       mapping_confidence_breakdown: mappingConfidenceBreakdown,
       worker_health_snapshot: {

@@ -13,12 +13,15 @@ export async function getOverviewStats() {
   return { inboxes, daily };
 }
 
-export async function getInboxAnalytics() {
-  const { data } = await supabase
+export async function getInboxAnalytics(page = 1, pageSize = 50) {
+  const safePage = Math.max(1, Math.trunc(Number(page) || 1));
+  const safePageSize = Math.max(1, Math.min(100, Math.trunc(Number(pageSize) || 50)));
+  const { data, count } = await supabase
     .from('inbox_analytics')
-    .select('*');
+    .select('*', { count: 'exact' })
+    .range((safePage - 1) * safePageSize, safePage * safePageSize - 1);
 
-  return data;
+  return { rows: data ?? [], total: Number(count ?? 0), page: safePage, page_size: safePageSize };
 }
 
 export async function getSequenceAnalytics() {

@@ -46,8 +46,8 @@ router.get('/operations-summary', async (req, res) => {
   }
 });
 
-router.get('/inboxes', async (_req, res) => {
-  const data = await getInboxAnalytics();
+router.get('/inboxes', async (req, res) => {
+  const data = await getInboxAnalytics(Number(req.query.page ?? 1), Number(req.query.page_size ?? 50));
   res.json(data);
 });
 

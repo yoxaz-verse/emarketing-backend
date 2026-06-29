@@ -229,7 +229,12 @@ function validateConfig(payload: SendingLimitsConfig) {
   }
 }
 
+let sendingLimitsCache: { value: SendingLimitsConfig; expiresAt: number } | null = null;
+
 export async function getSendingLimitsConfig(): Promise<SendingLimitsConfig> {
+  if (sendingLimitsCache && sendingLimitsCache.expiresAt > Date.now()) {
+    return sendingLimitsCache.value;
+  }
   const { data, error } = await supabase
     .from('sending_limits_config')
     .select('*')
@@ -241,6 +246,7 @@ export async function getSendingLimitsConfig(): Promise<SendingLimitsConfig> {
   }
 
   if (!data) {
+    sendingLimitsCache = { value: DEFAULT_CONFIG, expiresAt: Date.now() + 30_000 };
     return DEFAULT_CONFIG;
   }
 
@@ -250,6 +256,7 @@ export async function getSendingLimitsConfig(): Promise<SendingLimitsConfig> {
   if (normalized.warmup_steps.length === 0) {
     normalized.warmup_steps = DEFAULT_CONFIG.warmup_steps;
   }
+  sendingLimitsCache = { value: normalized, expiresAt: Date.now() + 30_000 };
   return normalized;
 }
 
@@ -285,6 +292,7 @@ export async function updateSendingLimitsConfig(
 
   if (error) throw error;
 
+  sendingLimitsCache = null;
   const persisted = await getSendingLimitsConfig();
 
   const normalizedWeekdays = sanitizeWeekdays(normalized.allowed_weekdays);

@@ -95,6 +95,23 @@ app.use(cors({
   credentials: true,
 }));
 
+app.use((req, res, next) => {
+  const startedAt = performance.now();
+  res.on('finish', () => {
+    const durationMs = Math.round(performance.now() - startedAt);
+    if (durationMs >= 750) {
+      console.warn('[HTTP_SLOW]', {
+        method: req.method,
+        path: req.originalUrl.split('?')[0],
+        status: res.statusCode,
+        durationMs,
+        payloadBytes: Number(res.getHeader('content-length') ?? 0),
+      });
+    }
+  });
+  next();
+});
+
 app.get('/ping', (_req, res) => {
   res.json({
     ok: true,

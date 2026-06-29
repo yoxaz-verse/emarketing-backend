@@ -2,6 +2,7 @@
 import { Router } from 'express';
 import { ALLOWED_TABLES } from '../config/allowedTables';
 import { deleteRow, deleteRowsBulk, insertRow, listRows, updateRow } from '../services/crudService';
+import { listRowsPage } from '../services/paginatedCrud.service';
 import { requireAuth } from '../middleware/requireAuth';
 
 const router = Router();
@@ -38,11 +39,55 @@ function resolveStatusCode(err: any, fallback: number) {
   return fallback;
 }
 
+router.get('/:table/page', async (req, res) => {
+  const startedAt = performance.now();
+  try {
+    const table = validateTable(req.params.table);
+    assertTablePermission(req, table);
+    const result = await listRowsPage(table, req.query, req.auth);
+    const durationMs = Math.round(performance.now() - startedAt);
+    res.setHeader('Server-Timing', `crud-page;dur=${durationMs}`);
+    if (durationMs >= 500) {
+      console.warn('[CRUD_PAGE_SLOW]', { table, durationMs, page: result.page, pageSize: result.page_size });
+    }
+    res.json(result);
+  } catch (err: any) {
+    res.status(resolveStatusCode(err, 500)).json({ error: err.message ?? 'Failed to fetch page' });
+  }
+});
+
+router.get('/:table/export', async (req, res) => {
+  try {
+    const table = validateTable(req.params.table);
+    assertTablePermission(req, table);
+    const filters = { ...req.query, page: 1, page_size: 1000 };
+    const firstPage = await listRowsPage(table, filters, req.auth, { maxPageSize: 1000 });
+    const headers = firstPage.rows[0] ? Object.keys(firstPage.rows[0]) : ['id'];
+    const escapeCsv = (value: unknown) => {
+      const raw = value && typeof value === 'object' ? JSON.stringify(value) : String(value ?? '');
+      return `"${raw.replace(/"/g, '""')}"`;
+    };
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${table}-export.csv"`);
+    res.write(`\uFEFF${headers.map(escapeCsv).join(',')}\n`);
+    const writeRows = (rows: Record<string, unknown>[]) => {
+      for (const row of rows) res.write(`${headers.map((header) => escapeCsv(row[header])).join(',')}\n`);
+    };
+    writeRows(firstPage.rows);
+    const totalPages = Math.ceil(firstPage.total / 1000);
+    for (let page = 2; page <= totalPages; page += 1) {
+      const next = await listRowsPage(table, { ...filters, page }, req.auth, { maxPageSize: 1000, includeCount: false });
+      writeRows(next.rows);
+    }
+    return res.end();
+  } catch (err: any) {
+    if (res.headersSent) return res.end();
+    return res.status(resolveStatusCode(err, 500)).json({ error: err.message ?? 'Failed to export rows' });
+  }
+});
+
 router.get('/:table', async (req, res) => {
   try {
-    console.log("CRUD CALLED of", req.params.table);
-    console.log("Query is ", req.query);
-
     const table = validateTable(req.params.table);
     assertTablePermission(req, table);
     const rows = await listRows(table, req.query, req.auth);

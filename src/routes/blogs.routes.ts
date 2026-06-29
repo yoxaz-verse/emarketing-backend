@@ -43,9 +43,9 @@ function stableErrorMessage(err: any, fallbackMessage: string): string {
   return err?.message ?? fallbackMessage;
 }
 
-router.get('/', async (_req, res) => {
+router.get('/', async (req, res) => {
   try {
-    const data = await listBlogs();
+    const data = await listBlogs(Number(req.query.page ?? 1), Number(req.query.page_size ?? 100));
     res.json(data);
   } catch (err: any) {
     const status = statusForError(err, 500);

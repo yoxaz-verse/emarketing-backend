@@ -613,17 +613,6 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
   }
 
   const mappedOrphanRows: any[] = [];
-  const orphanBackfillUpdates: Array<{
-    id: string;
-    campaign_id: string;
-    campaign_lead_id: string | null;
-    lead_id: string | null;
-    inbox_id: string | null;
-    to_email: string | null;
-    matched: boolean;
-    raw_payload: any;
-  }> = [];
-
   for (const rawRow of (orphanEventRows ?? []) as any[]) {
     const row = { ...rawRow };
     const messageId = String(row?.provider_message_id ?? '').trim().toLowerCase();
@@ -676,35 +665,6 @@ export async function getCampaignReplyOpenAnalytics(campaignId: string) {
     };
     mappedOrphanRows.push(row);
 
-    orphanBackfillUpdates.push({
-      id: String(row.id),
-      campaign_id: String(row.campaign_id),
-      campaign_lead_id: row.campaign_lead_id ? String(row.campaign_lead_id) : null,
-      lead_id: row.lead_id ? String(row.lead_id) : null,
-      inbox_id: row.inbox_id ? String(row.inbox_id) : null,
-      to_email: row.to_email ?? null,
-      matched: Boolean(row.matched),
-      raw_payload: row.raw_payload ?? {},
-    });
-  }
-
-  if (orphanBackfillUpdates.length > 0) {
-    await Promise.all(
-      orphanBackfillUpdates.map((update) =>
-        supabase
-          .from('email_tracking_events')
-          .update({
-            campaign_id: update.campaign_id,
-            campaign_lead_id: update.campaign_lead_id,
-            lead_id: update.lead_id,
-            inbox_id: update.inbox_id,
-            to_email: update.to_email,
-            matched: update.matched,
-            raw_payload: update.raw_payload,
-          })
-          .eq('id', update.id)
-      )
-    );
   }
 
   const eventRows = [...((scopedEventRows ?? []) as any[]), ...mappedOrphanRows];

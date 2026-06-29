@@ -3,20 +3,24 @@ import { supabase } from '../supabase.js';
 
 export async function getOperatorReplies(
   operatorId: string | null,
-  options?: { campaignId?: string | null; reviewStatus?: 'all' | 'unreviewed' | 'reviewed' }
+  options?: { campaignId?: string | null; reviewStatus?: 'all' | 'unreviewed' | 'reviewed'; page?: number; pageSize?: number }
 ) {
+  const page = Math.max(1, Math.trunc(Number(options?.page) || 1));
+  const pageSize = Math.max(1, Math.min(100, Math.trunc(Number(options?.pageSize) || 50)));
+  const from = (page - 1) * pageSize;
+  const to = from + pageSize - 1;
   let trackingQuery: any = supabase
     .from('email_tracking_events')
-    .select('id,event_at,lead_id,campaign_id,campaign_lead_id,inbox_id,raw_payload,from_email,to_email,matched')
+    .select('id,event_at,lead_id,campaign_id,campaign_lead_id,inbox_id,raw_payload,from_email,to_email,matched', { count: 'exact' })
     .eq('event_type', 'reply')
     .order('event_at', { ascending: false })
-    .limit(500);
+    .range(from, to);
 
   if (options?.campaignId) {
     trackingQuery = trackingQuery.eq('campaign_id', String(options.campaignId));
   }
 
-  const { data: trackingRows, error: trackingErr } = await trackingQuery;
+  const { data: trackingRows, error: trackingErr, count: trackingCount } = await trackingQuery;
   if (trackingErr) throw trackingErr;
 
   let campaignLeadQuery: any = supabase
@@ -41,16 +45,16 @@ export async function getOperatorReplies(
         interest_reviewed_by,
         operator_id
       )
-    `)
+    `, { count: 'exact' })
     .eq('status', 'replied')
     .order('created_at', { ascending: false })
-    .limit(1000);
+    .range(from, to);
 
   if (options?.campaignId) {
     campaignLeadQuery = campaignLeadQuery.eq('campaign_id', String(options.campaignId));
   }
 
-  const { data: repliedCampaignLeads, error: repliedCampaignLeadsErr } = await campaignLeadQuery;
+  const { data: repliedCampaignLeads, error: repliedCampaignLeadsErr, count: fallbackCount } = await campaignLeadQuery;
   if (repliedCampaignLeadsErr) throw repliedCampaignLeadsErr;
 
   const campaignIds = Array.from(new Set(
@@ -200,11 +204,12 @@ export async function getOperatorReplies(
       };
     });
 
-  return [...strictRows, ...fallbackRows].sort((a: any, b: any) => {
+  const rows = [...strictRows, ...fallbackRows].sort((a: any, b: any) => {
     const aTs = new Date(String(a?.replied_at ?? '')).getTime();
     const bTs = new Date(String(b?.replied_at ?? '')).getTime();
     return bTs - aTs;
-  });
+  }).slice(0, pageSize);
+  return { rows, total: Number(trackingCount ?? 0) + Number(fallbackCount ?? 0), page, page_size: pageSize };
 }
 
 export async function reviewLeadInterest(params: {

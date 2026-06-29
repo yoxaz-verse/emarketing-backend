@@ -157,26 +157,50 @@ export async function getOperationsSummary(auth?: AuthContext): Promise<Operatio
     ? await inboxesFallbackQuery
     : inboxesFullResult;
 
-  let leadsFullQuery = supabase
-    .from('leads')
-    .select('id,is_used,email_eligibility,permanently_failed,is_suppressed,status,replied_at,interest_status');
-  if (scopedOperatorId) {
-    leadsFullQuery = leadsFullQuery.eq('operator_id', scopedOperatorId);
-  }
-  const leadsFullResult = await leadsFullQuery;
-
-  let leadsFallbackQuery = supabase.from('leads').select('id,is_used,email_eligibility,permanently_failed,is_suppressed,status,replied_at');
-  if (scopedOperatorId) {
-    leadsFallbackQuery = leadsFallbackQuery.eq('operator_id', scopedOperatorId);
-  }
-  const leadsResult = leadsFullResult.error
-    ? await leadsFallbackQuery
-    : leadsFullResult;
+  const leadCountQuery = (configure?: (query: any) => any) => {
+    let query: any = supabase.from('leads').select('id', { count: 'exact', head: true });
+    if (scopedOperatorId) query = query.eq('operator_id', scopedOperatorId);
+    return configure ? configure(query) : query;
+  };
+  const sevenDaysAgoIso = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const [
+    leadTotalResult,
+    leadUsedResult,
+    leadFreeReadyResult,
+    leadBlockedResult,
+    repliedResult,
+    repliedLast7dResult,
+    unreviewedRepliesResult,
+    interestedRepliesResult,
+  ] = await Promise.all([
+    leadCountQuery(),
+    leadCountQuery((query) => query.eq('is_used', true)),
+    leadCountQuery((query) => query
+      .or('is_used.is.null,is_used.eq.false')
+      .or('is_suppressed.is.null,is_suppressed.eq.false')
+      .in('email_eligibility', ['eligible', 'risky'])),
+    leadCountQuery((query) => query.or('email_eligibility.eq.blocked,permanently_failed.eq.true,is_suppressed.eq.true')),
+    leadCountQuery((query) => query.eq('status', 'replied')),
+    leadCountQuery((query) => query.eq('status', 'replied').gte('replied_at', sevenDaysAgoIso)),
+    leadCountQuery((query) => query.eq('status', 'replied').or('interest_status.is.null,interest_status.eq.unreviewed')),
+    leadCountQuery((query) => query.eq('status', 'replied').eq('interest_status', 'interested')),
+  ]);
 
   if (campaignsResult.error) throw campaignsResult.error;
   if (inboxesResult.error) throw inboxesResult.error;
   if (campaignInboxesResult.error) throw campaignInboxesResult.error;
-  if (leadsResult.error) throw leadsResult.error;
+  const leadCountResults = [
+    leadTotalResult,
+    leadUsedResult,
+    leadFreeReadyResult,
+    leadBlockedResult,
+    repliedResult,
+    repliedLast7dResult,
+    unreviewedRepliesResult,
+    interestedRepliesResult,
+  ];
+  const leadCountError = leadCountResults.find((result) => result.error)?.error;
+  if (leadCountError) throw leadCountError;
 
   const inboxes = ((inboxesResult.data ?? []) as InboxRow[]).map((row) => ({
     ...row,
@@ -185,10 +209,6 @@ export async function getOperationsSummary(auth?: AuthContext): Promise<Operatio
     warmup_day: row.warmup_day ?? 1,
   }));
   const campaignInboxes = (campaignInboxesResult.data ?? []) as CampaignInboxRow[];
-  const leads = ((leadsResult.data ?? []) as LeadRow[]).map((row) => ({
-    ...row,
-    interest_status: row.interest_status ?? 'unreviewed',
-  }));
 
   const runningCampaignIds = new Set(
     campaigns
@@ -248,23 +268,6 @@ export async function getOperationsSummary(auth?: AuthContext): Promise<Operatio
   const idleInboxes = activeInboxes.filter((inbox) => !inUseInboxIds.has(String(inbox.id)));
   const idleDailyCapacity = totalDailyCapacity - inUseDailyCapacity;
 
-  const replies = leads.filter((lead) => String(lead.status ?? '').toLowerCase() === 'replied');
-  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-
-  const repliedLast7d = replies.filter((lead) => {
-    if (!lead.replied_at) return false;
-    const dt = new Date(lead.replied_at);
-    return !Number.isNaN(dt.getTime()) && dt >= sevenDaysAgo;
-  }).length;
-
-  const unreviewedReplies = replies.filter(
-    (lead) => String(lead.interest_status ?? 'unreviewed').toLowerCase() === 'unreviewed'
-  ).length;
-
-  const interestedReplies = replies.filter(
-    (lead) => String(lead.interest_status ?? '').toLowerCase() === 'interested'
-  ).length;
-
   const minHealth = toSafeNumber(sendingLimits.min_inbox_health_score, 60);
   const inboxesNeedingAttention = inboxes.filter((inbox) => (
     inbox.hard_paused === true ||
@@ -272,16 +275,9 @@ export async function getOperationsSummary(auth?: AuthContext): Promise<Operatio
     toSafeNumber(inbox.health_score, 100) < minHealth
   )).length;
 
-  const usedCount = leads.filter((lead) => lead.is_used === true).length;
-  const freeSendReady = leads.filter((lead) => {
-    const eligibility = String(lead.email_eligibility ?? '').toLowerCase();
-    return lead.is_used !== true && lead.is_suppressed !== true && (eligibility === 'eligible' || eligibility === 'risky');
-  }).length;
-  const blockedOrFailed = leads.filter((lead) => (
-    String(lead.email_eligibility ?? '').toLowerCase() === 'blocked' ||
-    lead.permanently_failed === true ||
-    lead.is_suppressed === true
-  )).length;
+  const usedCount = Number(leadUsedResult.count ?? 0);
+  const freeSendReady = Number(leadFreeReadyResult.count ?? 0);
+  const blockedOrFailed = Number(leadBlockedResult.count ?? 0);
 
   return {
     campaigns: {
@@ -304,16 +300,16 @@ export async function getOperationsSummary(auth?: AuthContext): Promise<Operatio
       idle_daily_capacity: Math.max(0, idleDailyCapacity),
     },
     leads: {
-      total: leads.length,
+      total: Number(leadTotalResult.count ?? 0),
       free_send_ready: freeSendReady,
       used: usedCount,
       blocked_or_failed: blockedOrFailed,
     },
     replies: {
-      total_replied: replies.length,
-      replied_last_7d: repliedLast7d,
-      unreviewed_replies: unreviewedReplies,
-      interested_replies: interestedReplies,
+      total_replied: Number(repliedResult.count ?? 0),
+      replied_last_7d: Number(repliedLast7dResult.count ?? 0),
+      unreviewed_replies: Number(unreviewedRepliesResult.count ?? 0),
+      interested_replies: Number(interestedRepliesResult.count ?? 0),
     },
     health: {
       inboxes_needing_attention: inboxesNeedingAttention,

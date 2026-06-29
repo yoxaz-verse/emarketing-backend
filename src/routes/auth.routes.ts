@@ -143,10 +143,7 @@ router.get('/me', requireAuthLite(), async (req, res) => {
   assertAuth(req); // ✅ TS now knows req.auth exists
 
   const userId = req.auth.user_id;
-  console.log('[GET /me] userId from token:', userId);
-
   if (!userId) {
-    console.log('[GET /me] No userId in token');
     return res.status(401).json({ error: 'UNAUTHORIZED' });
   }
 
@@ -157,11 +154,8 @@ router.get('/me', requireAuthLite(), async (req, res) => {
     .single();
 
   if (error || !user || user.active !== true) {
-    console.log('[GET /me] User lookup failed or inactive:', { error, user });
     return res.status(401).json({ error: 'UNAUTHORIZED' });
   }
-
-  console.log('[GET /me] User found:', user.id);
 
   return res.json({
     id: user.id,
