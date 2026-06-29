@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/requireAuth';
 import { supabase } from '../supabase';
+import { insertSystemEvent } from '../services/systemEvents.service';
 
 const router = Router();
 router.use(requireAuth('viewer'));
@@ -25,6 +26,61 @@ function isOperatorScopedRequest(req: any): boolean {
   const hasOperatorId = String(req?.auth?.operator_id ?? '').trim().length > 0;
   return !isAdmin && hasOperatorId;
 }
+
+router.post('/:id/remove-suppression', requireAuth('admin'), async (req, res) => {
+  const leadId = String(req.params.id ?? '').trim();
+  if (req.body?.confirm_explicit_consent !== true) {
+    return res.status(400).json({ error: 'Explicit re-consent confirmation is required.' });
+  }
+
+  try {
+    const { data: lead, error: leadError } = await supabase
+      .from('leads')
+      .select('id,email,email_eligibility,is_suppressed,suppression_reason')
+      .eq('id', leadId)
+      .maybeSingle();
+    if (leadError) throw leadError;
+    if (!lead) throw createHttpError('Lead not found', 404);
+    if (lead.is_suppressed !== true) {
+      return res.json({ success: true, lead_id: leadId, already_unsuppressed: true, requeued_count: 0 });
+    }
+
+    const eligibility = String(lead.email_eligibility ?? '').toLowerCase();
+    if (eligibility !== 'eligible' && eligibility !== 'risky') {
+      throw createHttpError('Validate this email successfully before removing suppression.', 409);
+    }
+
+    const previousReason = String(lead.suppression_reason ?? 'suppressed');
+    const { data: reconsentRows, error: reconsentError } = await supabase.rpc(
+      'remove_lead_suppression_with_reconsent',
+      { p_lead_id: leadId }
+    );
+    if (reconsentError) throw reconsentError;
+    const requeuedCount = Number((reconsentRows as any[])?.[0]?.requeued_count ?? 0);
+
+    await insertSystemEvent({
+      type: 'lead_suppression_removed',
+      entity: 'leads',
+      entity_id: leadId,
+      message: `Global suppression removed after explicit re-consent for ${String(lead.email ?? leadId)}.`,
+      meta: {
+        previous_reason: previousReason,
+        actor_user_id: req.auth?.user_id ?? null,
+        requeued_count: requeuedCount,
+      },
+    });
+
+    return res.json({
+      success: true,
+      lead_id: leadId,
+      already_unsuppressed: false,
+      requeued_count: requeuedCount,
+    });
+  } catch (err: any) {
+    console.error('[LEAD REMOVE SUPPRESSION ERROR]', err);
+    return res.status(resolveStatusCode(err, 500)).json({ error: err.message ?? 'Failed to remove suppression' });
+  }
+});
 
 router.post('/:id/reuse', async (req, res) => {
   const leadId = String(req.params.id ?? '').trim();

@@ -91,6 +91,7 @@ export async function resolveLeadsRead(
 
     is_blocked:
       lead.email_eligibility === 'blocked' ||
-      lead.permanently_failed === true,
+      lead.permanently_failed === true ||
+      lead.is_suppressed === true,
   }));
 }

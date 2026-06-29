@@ -30,6 +30,8 @@ import {
   isStartupRequeueableCampaignLead,
   requeueStartupCampaignLeads,
 } from './campaign.domain';
+import { CAMPAIGN_UNSUBSCRIBE_REASON, isLeadSuppressed } from './leadSuppression';
+import { canPassPreSendEligibility } from './sending/preSendGate.service';
 
 const RUNNER_WINDOW_TIMEZONE = 'Asia/Kolkata';
 const RUNNER_WINDOW_START_HOUR = 9;
@@ -94,6 +96,7 @@ type RunBatchSkipReason =
   | 'campaign_minute_throttled'
   | 'sequence_delay_not_elapsed'
   | 'deliverability_policy_blocked'
+  | 'lead_email_not_sendable'
   | 'user_unsubscribed_campaign'
   | 'send_skipped'
   | 'send_skipped_unknown'
@@ -902,6 +905,40 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
 
   if (campaignError) throw campaignError;
 
+  const { data: latestRunnerEvent, error: latestRunnerEventError } = await supabase
+    .from('system_events')
+    .select('type,created_at,message,meta')
+    .eq('entity_id', campaignId)
+    .in('type', ['CAMPAIGN_BATCH_EXECUTED', 'CAMPAIGN_BATCH_EXECUTION_FATAL'])
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (latestRunnerEventError) throw latestRunnerEventError;
+
+  const { data: latestSuccessfulSend, error: latestSuccessfulSendError } = await supabase
+    .from('email_logs')
+    .select('sent_at')
+    .eq('campaign_id', campaignId)
+    .eq('status', 'sent')
+    .order('sent_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (latestSuccessfulSendError) throw latestSuccessfulSendError;
+
+  const runnerEventAt = String((latestRunnerEvent as any)?.created_at ?? '').trim() || null;
+  const runnerAgeSeconds = runnerEventAt
+    ? Math.max(0, Math.floor((Date.now() - new Date(runnerEventAt).getTime()) / 1000))
+    : null;
+  const campaignIsRunning = String((campaign as any)?.status ?? '').toLowerCase() === 'running';
+  const runnerState = !campaignIsRunning
+    ? 'idle'
+    : String((latestRunnerEvent as any)?.type ?? '') === 'CAMPAIGN_BATCH_EXECUTION_FATAL'
+      ? 'failed'
+      : runnerAgeSeconds !== null && runnerAgeSeconds <= 150
+        ? 'healthy'
+        : 'stale';
+  const latestBatchMeta = ((latestRunnerEvent as any)?.meta ?? null) as Record<string, any> | null;
+
   const maxStep = await resolveCampaignMaxStep(campaignId);
   const [statusRowsResult, pausedRiskyResult, inboxesResult, remainingStatusStepMismatchCount] = await Promise.all([
     supabase
@@ -1108,6 +1145,12 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
   if (!scheduleGate.allowed) {
     next_actions.push(`Wait for sending window: ${scheduleGate.reason ?? 'outside_allowed_schedule'}`);
   }
+  if (campaignIsRunning && runnerState === 'stale') {
+    next_actions.push('Campaign runner heartbeat is stale; verify the active n8n minute workflow and its service credential.');
+  }
+  if (campaignIsRunning && runnerState === 'failed') {
+    next_actions.push(`Latest campaign batch failed: ${String(latestBatchMeta?.fatal_error ?? (latestRunnerEvent as any)?.message ?? 'unknown error')}`);
+  }
   if (counts.queued === 0 && counts.pending > 0) {
     next_actions.push('No queued leads yet; verify pending->queued migration conditions and campaign status.');
   }
@@ -1149,6 +1192,25 @@ export async function getCampaignExecutionDiagnostics(campaignId: string) {
       status: String((campaign as any)?.status ?? ''),
       operator_id: (campaign as any)?.operator_id ?? null,
       sequence_id: (campaign as any)?.sequence_id ?? null,
+    },
+    runner_health: {
+      state: runnerState,
+      last_heartbeat_at: runnerEventAt,
+      heartbeat_age_seconds: runnerAgeSeconds,
+      latest_event_type: (latestRunnerEvent as any)?.type ?? null,
+      last_successful_send_at: (latestSuccessfulSend as any)?.sent_at ?? null,
+      claimed_count: Number(latestBatchMeta?.claimed_count ?? 0),
+      sent_count: Number(latestBatchMeta?.sent_count ?? 0),
+      failed_count: Number(latestBatchMeta?.failed_count ?? 0),
+      skipped_count: Number(latestBatchMeta?.skipped_count ?? 0),
+      claim_reason: latestBatchMeta?.claim_reason ?? null,
+      skip_reasons: latestBatchMeta?.skip_reasons ?? {},
+      fatal_error: latestBatchMeta?.fatal_error
+        ?? (String((latestRunnerEvent as any)?.type ?? '') === 'CAMPAIGN_BATCH_EXECUTION_FATAL'
+          ? String((latestRunnerEvent as any)?.message ?? 'Campaign batch failed')
+          : null),
+      queue_snapshot_before: latestBatchMeta?.queue_snapshot_before ?? null,
+      queue_snapshot_after: latestBatchMeta?.queue_snapshot_after ?? null,
     },
     lead_counts: counts,
     status_step_mismatch: {
@@ -1972,7 +2034,9 @@ export async function sendCampaignEmail(campaignLeadId: string) {
       leads:lead_id (
         id,
         email,
-        email_eligibility
+        email_eligibility,
+        is_suppressed,
+        suppression_reason
       )
     `)
     .eq('id', campaignLeadId)
@@ -1986,7 +2050,7 @@ export async function sendCampaignEmail(campaignLeadId: string) {
     throw new Error('Campaign lead is not in processing state');
   }
 
-  if (isLeadGloballySuppressed((campaignLead as any)?.leads?.email_eligibility)) {
+  if (isLeadSuppressed((campaignLead as any)?.leads ?? {})) {
     await requeueCampaignLeadForSkip({
       campaignLeadId,
       nextStatus: 'paused',
@@ -1995,6 +2059,18 @@ export async function sendCampaignEmail(campaignLeadId: string) {
     return {
       skipped: true,
       reason: 'user_unsubscribed_campaign',
+    };
+  }
+
+  if (!canPassPreSendEligibility((campaignLead as any)?.leads?.email_eligibility)) {
+    await requeueCampaignLeadForSkip({
+      campaignLeadId,
+      nextStatus: 'paused',
+      statusReason: 'lead_email_not_sendable',
+    });
+    return {
+      skipped: true,
+      reason: 'lead_email_not_sendable',
     };
   }
 
@@ -2336,10 +2412,6 @@ function resolveCampaignUnsubscribeSecret(): string {
   );
 }
 
-function isLeadGloballySuppressed(leadEligibilityRaw: unknown): boolean {
-  return String(leadEligibilityRaw ?? '').trim().toLowerCase() === 'blocked';
-}
-
 async function resolveProviderSafeAuthSnapshot(input: {
   sendingDomainId: string | null;
   recipientProvider: RecipientMailboxProvider;
@@ -2410,8 +2482,9 @@ export async function unsubscribeCampaignLead(token: string) {
     supabase
       .from('leads')
       .update({
-        email_eligibility: 'blocked',
-        email_eligibility_reason: 'user_unsubscribed_campaign',
+        is_suppressed: true,
+        suppression_reason: CAMPAIGN_UNSUBSCRIBE_REASON,
+        suppressed_at: nowIso,
       })
       .eq('id', parsed.lead_id)
       .eq('email', parsed.email),

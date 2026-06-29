@@ -195,7 +195,7 @@ const PORT = Number(process.env.PORT) || 3000;
 async function assertAttachLeadSchema() {
   const { error } = await supabase
     .from('leads')
-    .select('id,email_eligibility,permanently_failed,is_used')
+    .select('id,email_eligibility,permanently_failed,is_used,is_suppressed,suppression_reason')
     .limit(1);
 
   if (!error) return;
@@ -203,7 +203,7 @@ async function assertAttachLeadSchema() {
   const message = String(error?.message ?? '');
   const code = String(error?.code ?? '');
   throw new Error(
-    `Attach schema guard failed: leads table missing required columns (id,email_eligibility,permanently_failed,is_used). code=${code} message=${message}`
+    `Attach schema guard failed: leads table missing required validation/suppression columns. Apply 20260629_separate_lead_suppression_from_validation.sql. code=${code} message=${message}`
   );
 }
 

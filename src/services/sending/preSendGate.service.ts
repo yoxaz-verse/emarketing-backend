@@ -4,6 +4,7 @@ export type SendDecision =
   | 'PAUSE'
   | 'BLOCK'
 import { getSendingLimitsConfig } from '../sendingLimitsConfig.service';
+import { isLeadSuppressed } from '../leadSuppression';
 
 export function canPassPreSendEligibility(value: unknown): boolean {
   const eligibility = String(value ?? '').toLowerCase();
@@ -23,6 +24,7 @@ export async function canSendEmail({
 }): Promise<SendDecision> {
   const config = await getSendingLimitsConfig();
 
+  if (isLeadSuppressed(lead ?? {})) return 'BLOCK'
   if (!canPassPreSendEligibility(lead.email_eligibility)) return 'BLOCK'
 
   if (inbox.health_score < config.min_inbox_health_score) return 'PAUSE'

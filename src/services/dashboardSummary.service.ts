@@ -67,6 +67,7 @@ type LeadRow = {
   is_used: boolean | null;
   email_eligibility: string | null;
   permanently_failed: boolean | null;
+  is_suppressed: boolean | null;
   status: string | null;
   replied_at: string | null;
   interest_status: string | null;
@@ -158,13 +159,13 @@ export async function getOperationsSummary(auth?: AuthContext): Promise<Operatio
 
   let leadsFullQuery = supabase
     .from('leads')
-    .select('id,is_used,email_eligibility,permanently_failed,status,replied_at,interest_status');
+    .select('id,is_used,email_eligibility,permanently_failed,is_suppressed,status,replied_at,interest_status');
   if (scopedOperatorId) {
     leadsFullQuery = leadsFullQuery.eq('operator_id', scopedOperatorId);
   }
   const leadsFullResult = await leadsFullQuery;
 
-  let leadsFallbackQuery = supabase.from('leads').select('id,is_used,email_eligibility,permanently_failed,status,replied_at');
+  let leadsFallbackQuery = supabase.from('leads').select('id,is_used,email_eligibility,permanently_failed,is_suppressed,status,replied_at');
   if (scopedOperatorId) {
     leadsFallbackQuery = leadsFallbackQuery.eq('operator_id', scopedOperatorId);
   }
@@ -274,11 +275,12 @@ export async function getOperationsSummary(auth?: AuthContext): Promise<Operatio
   const usedCount = leads.filter((lead) => lead.is_used === true).length;
   const freeSendReady = leads.filter((lead) => {
     const eligibility = String(lead.email_eligibility ?? '').toLowerCase();
-    return lead.is_used !== true && (eligibility === 'eligible' || eligibility === 'risky');
+    return lead.is_used !== true && lead.is_suppressed !== true && (eligibility === 'eligible' || eligibility === 'risky');
   }).length;
   const blockedOrFailed = leads.filter((lead) => (
     String(lead.email_eligibility ?? '').toLowerCase() === 'blocked' ||
-    lead.permanently_failed === true
+    lead.permanently_failed === true ||
+    lead.is_suppressed === true
   )).length;
 
   return {

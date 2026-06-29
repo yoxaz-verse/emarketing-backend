@@ -1,4 +1,5 @@
 import { supabase } from "../supabase";
+import { isLeadSuppressed } from './leadSuppression';
 type AuthContext = {
   role?: string | null;
   operator_id?: string | null;
@@ -43,7 +44,10 @@ export function isCampaignLeadAttachableState(input: {
   email_eligibility?: unknown;
   permanently_failed?: unknown;
   is_used?: unknown;
+  is_suppressed?: unknown;
+  suppression_reason?: unknown;
 }): boolean {
+  if (isLeadSuppressed(input)) return false;
   if (!isCampaignAttachableEligibility(input.email_eligibility)) return false;
   if (String(input.email_eligibility ?? '').toLowerCase() === 'blocked') return false;
   if (input.permanently_failed === true) return false;
@@ -152,14 +156,14 @@ export async function attachLeadsToCampaign(
 
   const { data: leadRows, error: leadFetchError } = await supabase
     .from('leads')
-    .select('id, email_eligibility, permanently_failed, is_used')
+    .select('id, email_eligibility, permanently_failed, is_used, is_suppressed, suppression_reason')
     .in('id', dedupedLeadIds);
 
   if (leadFetchError) {
     throw leadFetchError;
   }
 
-  const leadStateMap = new Map<string, { eligibility: string; isBlocked: boolean; isUsed: boolean }>(
+  const leadStateMap = new Map<string, { eligibility: string; isBlocked: boolean; isUsed: boolean; isSuppressed: boolean; suppressionReason: string | null }>(
     (leadRows ?? []).map((row: any) => [
       String(row.id),
       {
@@ -168,6 +172,8 @@ export async function attachLeadsToCampaign(
           String(row.email_eligibility ?? '').toLowerCase() === 'blocked' ||
           row.permanently_failed === true,
         isUsed: row.is_used === true,
+        isSuppressed: row.is_suppressed === true,
+        suppressionReason: row.suppression_reason ?? null,
       },
     ])
   );
@@ -185,6 +191,8 @@ export async function attachLeadsToCampaign(
       email_eligibility: state.eligibility,
       permanently_failed: state.isBlocked,
       is_used: state.isUsed,
+      is_suppressed: state.isSuppressed,
+      suppression_reason: state.suppressionReason,
     });
   });
   const skippedExisting = requested - newLeadIds.length;

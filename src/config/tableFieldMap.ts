@@ -110,6 +110,18 @@ export const TABLE_FIELD_MAP: Record<
       db: 'email_eligibility_reason',
       behavior: 'readonly',
     },
+    is_suppressed: {
+      db: 'is_suppressed',
+      behavior: 'readonly',
+    },
+    suppression_reason: {
+      db: 'suppression_reason',
+      behavior: 'readonly',
+    },
+    suppressed_at: {
+      db: 'suppressed_at',
+      behavior: 'readonly',
+    },
     eligibility_processing: {
       db: 'eligibility_processing',
       behavior: 'readonly',

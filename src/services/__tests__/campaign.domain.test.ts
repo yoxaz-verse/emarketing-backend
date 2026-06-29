@@ -34,6 +34,10 @@ test('campaign lead attach state excludes blocked, permanently failed, and used 
     isCampaignLeadAttachableState({ email_eligibility: 'blocked', permanently_failed: false, is_used: false }),
     false
   );
+  assert.equal(
+    isCampaignLeadAttachableState({ email_eligibility: 'eligible', permanently_failed: false, is_used: false, is_suppressed: true }),
+    false
+  );
 });
 
 test('startup requeue allows pending campaign leads', () => {

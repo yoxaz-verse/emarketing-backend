@@ -123,6 +123,9 @@ function buildInsertRow(row: UploadRow, operatorId: string | null, defaultSource
     eligibility_processing: false,
     retry_count: 0,
     permanently_failed: false,
+    is_suppressed: false,
+    suppression_reason: null,
+    suppressed_at: null,
     lead_status: 'pending_validation',
   };
 
@@ -194,6 +197,9 @@ async function insertWithSchemaFallback(
     'eligibility_processing',
     'retry_count',
     'permanently_failed',
+    'is_suppressed',
+    'suppression_reason',
+    'suppressed_at',
   ]);
 
   let allowedFields = new Set(Object.keys(rowsToInsert[0] ?? {}));
@@ -328,7 +334,15 @@ export async function uploadLeads(
 
     const updatePayload: Record<string, any> = {};
     for (const [key, value] of Object.entries(row)) {
-      if (key === 'id' || key === 'created_at' || key === 'operator_id' || key === 'email') continue;
+      if (
+        key === 'id' ||
+        key === 'created_at' ||
+        key === 'operator_id' ||
+        key === 'email' ||
+        key === 'is_suppressed' ||
+        key === 'suppression_reason' ||
+        key === 'suppressed_at'
+      ) continue;
       if (value === null || value === undefined) continue;
       if (typeof value === 'string' && value.trim() === '') continue;
       updatePayload[key] = value;
