@@ -1,9 +1,11 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/requireAuth';
+import { requireWriteRole } from '../middleware/security';
 import { createQuoteDraft, listQuotes, updateQuote } from '../services/inquiries/inquiries.service';
 
 const router = Router();
 router.use(requireAuth('viewer'));
+router.use(requireWriteRole);
 
 router.get('/', async (req, res) => {
   try {

@@ -10,9 +10,11 @@ import { validateSmtpAccount } from '../services/validation/smtp.validation';
 import { inspectSendingDomain } from '../services/validation/domain.validation';
 import { supabase } from '../supabase';
 import { requireAuth } from '../middleware/requireAuth';
+import { requireWriteRole } from '../middleware/security';
 
 const router = Router()
 router.use(requireAuth('viewer'));
+router.use(requireWriteRole);
 
 // Campaign Step 2 Email validation (ASYNC / WORKER STYLE)
 router.post('/lead', runEmailEligibilityValidation)

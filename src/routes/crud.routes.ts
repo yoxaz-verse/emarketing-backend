@@ -4,10 +4,12 @@ import { ALLOWED_TABLES } from '../config/allowedTables';
 import { deleteRow, deleteRowsBulk, insertRow, listRows, updateRow } from '../services/crudService';
 import { listRowsPage } from '../services/paginatedCrud.service';
 import { requireAuth } from '../middleware/requireAuth';
+import { requireWriteRole } from '../middleware/security';
 
 const router = Router();
 
 router.use(requireAuth('viewer'));
+router.use(requireWriteRole);
 
 const ADMIN_ONLY_TABLES = new Set<string>([
   'users',

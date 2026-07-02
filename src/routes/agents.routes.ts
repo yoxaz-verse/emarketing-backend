@@ -1,5 +1,7 @@
 import { Router } from 'express';
+import crypto from 'crypto';
 import { requireAuth } from '../middleware/requireAuth';
+import { requireWriteRole } from '../middleware/security';
 import {
   createAgent,
   deleteAgent,
@@ -40,8 +42,22 @@ function isWorkerAuthorized(authorization?: string) {
   if (!WORKER_SECRET) return false;
   if (!authorization || !authorization.startsWith('Bearer ')) return false;
   const token = authorization.slice(7).trim();
-  return token.length > 0 && token === WORKER_SECRET;
+  const expected = Buffer.from(WORKER_SECRET);
+  const provided = Buffer.from(token);
+  return token.length > 0 && expected.length === provided.length && crypto.timingSafeEqual(expected, provided);
 }
+
+router.use((req, res, next) => {
+  const workerRoute = req.method === 'GET' && req.path === '/tasks/next'
+    || req.method === 'POST' && /^\/tasks\/[^/]+\/result$/.test(req.path);
+  if (workerRoute) return next();
+  return requireAuth('viewer')(req, res, next);
+});
+router.use((req, res, next) => {
+  const workerRoute = req.method === 'GET' && req.path === '/tasks/next'
+    || req.method === 'POST' && /^\/tasks\/[^/]+\/result$/.test(req.path);
+  return workerRoute ? next() : requireWriteRole(req, res, next);
+});
 
 router.post('/', async (req, res) => {
   try {
@@ -203,8 +219,15 @@ router.post('/tasks/:id/result', async (req, res) => {
     if (!isWorkerAuthorized(String(req.headers.authorization ?? ''))) {
       return res.status(401).json({ ok: false, error: 'Unauthorized worker' });
     }
+    const status = String(req.body?.status ?? '');
+    if (!['completed', 'failed'].includes(status)) {
+      return res.status(400).json({ ok: false, error: 'Result status must be completed or failed' });
+    }
+    if (String(req.body?.result ?? '').length > 1_000_000) {
+      return res.status(413).json({ ok: false, error: 'Task result is too large' });
+    }
     const data = await submitAgentTaskResult(req.params.id, {
-      status: req.body?.status,
+      status,
       result: req.body?.result,
       structured_outputs: req.body?.structured_outputs,
       error: req.body?.error,

@@ -34,6 +34,7 @@ import {
   startEmailValidationQueueWorker,
 } from './worker/email/eligibility.bullmq.worker';
 import { supabase } from './supabase';
+import { securityHeaders } from './middleware/security';
 
 dotenv.config();
 
@@ -94,6 +95,9 @@ app.use(cors({
   origin: ['http://localhost:3000', 'http://localhost:3001', 'https://emarketing.obaol.com', 'https://www.emarketing.obaol.com'],
   credentials: true,
 }));
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
+app.use(securityHeaders);
 
 app.use((req, res, next) => {
   const startedAt = performance.now();
@@ -154,7 +158,12 @@ async function handlePublicSocialOAuthCallback(req: any, res: any, platformInput
   }
 }
 
-app.use(express.json());
+app.use(express.json({
+  limit: process.env.REQUEST_BODY_LIMIT || '1mb',
+  verify: (req, _res, buffer) => {
+    (req as express.Request & { rawBody?: Buffer }).rawBody = Buffer.from(buffer);
+  },
+}));
 app.use('/validate', validationRoutes);
 app.use('/auth', authRoutes);
 app.use('/campaigns', campaignRoutes);

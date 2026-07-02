@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { supabaseAdmin } from '../utils/supabaseAdmin.js';
 import { supabase } from '../supabase.js';
+import { requireServiceSecret } from '../middleware/security.js';
 
 const router = Router();
 
@@ -9,7 +10,7 @@ const router = Router();
 /**
  * BOOTSTRAP ADMIN CREATION (ONE-TIME)
  */
-router.post('/bootstrap', async (req, res) => {
+router.post('/bootstrap', requireServiceSecret('BOOTSTRAP_SECRET'), async (req, res) => {
   try {
     const { email, password } = req.body;
 

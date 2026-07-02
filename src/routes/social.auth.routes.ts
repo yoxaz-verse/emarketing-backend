@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/requireAuth';
+import { requireWriteRole } from '../middleware/security';
 import {
   disconnectPlatform,
   getConnectionStatuses,
@@ -53,6 +54,7 @@ router.get('/oauth2-credential/callback', async (req, res) => {
 });
 
 router.use(requireAuth('viewer'));
+router.use(requireWriteRole);
 
 router.get('/connections', async (req, res) => {
   try {

@@ -47,6 +47,8 @@ export async function initiateCampaignVoiceCall(campaignLeadId: string) {
 
     // 4. Trigger Voice Engine (Pass attributes to existing originate flow)
     const VOICE_ENGINE_URL = process.env.VOICE_ENGINE_URL || 'http://localhost:3004';
+    const VOICE_ENGINE_SECRET = String(process.env.VOICE_ENGINE_SECRET ?? '').trim();
+    if (!VOICE_ENGINE_SECRET) throw new Error('VOICE_ENGINE_SECRET is not configured');
 
     // Note: In a real scenario, we'd fetch the lead's phone number here.
     // Assuming 'leads' has a 'phone_number' column based on Voice Engine requirements.
@@ -56,11 +58,17 @@ export async function initiateCampaignVoiceCall(campaignLeadId: string) {
         .eq('id', lead.lead_id)
         .single();
 
-    const phoneNumber = leadDetail?.phone_number || '+10000000000'; // Fallback if not found
+    const phoneNumber = String(leadDetail?.phone_number ?? '').trim();
+    if (!/^\+[1-9]\d{7,14}$/.test(phoneNumber)) {
+        throw new Error('Lead does not have a valid E.164 phone number');
+    }
 
     const response = await fetch(`${VOICE_ENGINE_URL}/voice/start`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${VOICE_ENGINE_SECRET}`,
+        },
         body: JSON.stringify({
             phoneNumber,
             campaignId,

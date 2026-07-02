@@ -1,13 +1,14 @@
 
 import { Router } from 'express';
 import { ingestInboundReply } from '../services/replyIngestService.js';
+import { rateLimit, requireWebhookSignature } from '../middleware/security';
 
 const router = Router();
 
 
 
 // Campaign Step 15
-router.post('/', async (req, res) => {
+router.post('/', rateLimit({ name: 'reply-webhook', windowMs: 60_000, max: 120 }), requireWebhookSignature(), async (req, res) => {
     const result = await ingestInboundReply({
       from_email: req.body?.from_email ?? req.body?.from,
       message: req.body?.message,

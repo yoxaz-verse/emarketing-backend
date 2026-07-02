@@ -9,10 +9,11 @@ import {
   verifyResetOTP,
   resetPassword
 } from '../services/auth/passwordReset.service';
+import { rateLimit } from '../middleware/security';
 
 const router = Router();
 
-router.post('/login', async (req, res) => {
+router.post('/login', rateLimit({ name: 'login', windowMs: 15 * 60_000, max: 10 }), async (req, res) => {
   try {
     const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
@@ -80,7 +81,7 @@ router.post('/login', async (req, res) => {
   }
 });
 
-router.post('/forgot-password', async (req, res) => {
+router.post('/forgot-password', rateLimit({ name: 'forgot-password', windowMs: 15 * 60_000, max: 5 }), async (req, res) => {
   try {
     const { email } = req.body;
     if (!email) return res.status(400).json({ error: 'Email is required' });
@@ -93,7 +94,7 @@ router.post('/forgot-password', async (req, res) => {
   }
 });
 
-router.post('/verify-reset-otp', async (req, res) => {
+router.post('/verify-reset-otp', rateLimit({ name: 'verify-reset', windowMs: 15 * 60_000, max: 10 }), async (req, res) => {
   try {
     const { email, otp } = req.body;
     if (!email || !otp) return res.status(400).json({ error: 'Email and code are required' });
@@ -106,12 +107,12 @@ router.post('/verify-reset-otp', async (req, res) => {
   }
 });
 
-router.post('/reset-password', async (req, res) => {
+router.post('/reset-password', rateLimit({ name: 'reset-password', windowMs: 15 * 60_000, max: 5 }), async (req, res) => {
   try {
-    const { email, new_password } = req.body;
-    if (!email || !new_password) return res.status(400).json({ error: 'Email and new password are required' });
+    const { email, new_password, reset_token } = req.body;
+    if (!email || !new_password || !reset_token) return res.status(400).json({ error: 'Email, new password, and reset authorization are required' });
 
-    const result = await resetPassword(email, new_password);
+    const result = await resetPassword(email, new_password, reset_token);
     return res.json(result);
   } catch (err: any) {
     console.error('RESET PASSWORD ERROR:', err);

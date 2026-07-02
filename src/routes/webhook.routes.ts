@@ -4,6 +4,7 @@ import { handleBounce } from '../services/execution.service';
 import { dailyHealthRecovery } from '../services/webhook/health.service';
 import { ingestInboundReply } from '../services/replyIngestService.js';
 import { ingestClickProxyOpen, ingestPixelOpenEvent, ingestProviderEmailEvent } from '../services/emailTracking.service.js';
+import { rateLimit, requireServiceSecret, requireWebhookSignature } from '../middleware/security';
 
 const router = Router();
 
@@ -12,13 +13,13 @@ const router = Router();
 /**
  * Warmup 
  */
-router.post('/internal/warmup/advance', async (_req, res) => {
+router.post('/internal/warmup/advance', requireServiceSecret(), async (_req, res) => {
     await advanceInboxWarmup();
     res.json({ success: true });
   });
   
   
-router.post('/webhooks/bounce', async (req, res) => {
+router.post('/webhooks/bounce', rateLimit({ name: 'webhook', windowMs: 60_000, max: 120 }), requireWebhookSignature(), async (req, res) => {
     const { email, type, reason } = req.body;
   
     if (!email || !type) {
@@ -29,7 +30,7 @@ router.post('/webhooks/bounce', async (req, res) => {
     res.json({ success: true });
   });
 
-router.post('/webhooks/reply', async (req, res) => {
+router.post('/webhooks/reply', rateLimit({ name: 'webhook', windowMs: 60_000, max: 120 }), requireWebhookSignature(), async (req, res) => {
   try {
     const result = await ingestInboundReply({
       from_email: req.body?.from_email,
@@ -46,7 +47,7 @@ router.post('/webhooks/reply', async (req, res) => {
   }
 });
 
-router.post('/webhooks/email-event', async (req, res) => {
+router.post('/webhooks/email-event', rateLimit({ name: 'webhook', windowMs: 60_000, max: 120 }), requireWebhookSignature(), async (req, res) => {
   try {
     const result = await ingestProviderEmailEvent(req.body ?? {});
     if (result.success === false) {
@@ -97,7 +98,7 @@ router.get('/tracking/click/:token', async (req, res) => {
   }
 });
   
-  router.post('/internal/health/recover', async (_req, res) => {
+  router.post('/internal/health/recover', requireServiceSecret(), async (_req, res) => {
     await dailyHealthRecovery();
     res.json({ success: true });
   });

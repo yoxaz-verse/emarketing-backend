@@ -14,6 +14,7 @@ import {
   reviewLeadInterest
 } from '../services/operatorRepliesService.js';
 import { requireAuth } from '../middleware/requireAuth.js';
+import { requireWriteRole } from '../middleware/security.js';
 import { getEffectiveOperatorId } from '../utils/getEffectiveOperatorId.js';
 import { supabase } from '../supabase.js';
 import { getReplyCaptureHealth } from '../worker/replyCapture.worker.js';
@@ -21,6 +22,7 @@ import { getReplyCaptureHealth } from '../worker/replyCapture.worker.js';
 const router = Router();
 
 router.use(requireAuth('viewer'));
+router.use(requireWriteRole);
 
 router.post('/leads/upload', async (req: Request, res: Response) => {
   const requestBody = req.body ?? {};

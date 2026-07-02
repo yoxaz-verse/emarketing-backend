@@ -19,7 +19,7 @@ function authMeta(req: Request) {
 }
 
 export function requireAuthLite() {
-  return (req: Request, res: Response, next: NextFunction): void => {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     let token = '';
     let tokenSource: 'authorization_header' | 'cookie_auth_token' | 'none' = 'none';
     const authHeader = req.headers.authorization;
@@ -51,17 +51,28 @@ export function requireAuthLite() {
         JWT_SECRET
       ) as JwtPayload;
 
-      console.log('[requireAuthLite] Payload:', JSON.stringify(payload), authMeta(req));
+      if (!payload.user_id || !payload.role) {
+        res.status(401).json({ error: 'UNAUTHORIZED' });
+        return;
+      }
+
+      const { data: user, error } = await (await import('../supabase.js')).supabase
+        .from('users')
+        .select('id,role,operator_id,active')
+        .eq('id', payload.user_id)
+        .maybeSingle();
+      if (error || !user || user.active !== true) {
+        res.status(401).json({ error: 'UNAUTHORIZED' });
+        return;
+      }
 
       // ✅ MAP PAYLOAD → req.auth (IMPORTANT)
       req.auth = {
         type: 'user',
-        role: payload.role,
-        user_id: payload.user_id,
-        operator_id: payload.operator_id ?? null,
+        role: user.role,
+        user_id: user.id,
+        operator_id: user.operator_id ?? null,
       };
-
-      console.log('[requireAuthLite] req.auth set:', JSON.stringify(req.auth), authMeta(req));
 
       next();
     } catch (err) {

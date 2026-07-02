@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { supabase } from '../supabase';
 import { requireAuth } from '../middleware/requireAuth';
+import { requireWriteRole } from '../middleware/security';
 import {
   createSequenceRuns,
   validateSequenceGraph,
@@ -8,6 +9,7 @@ import {
 
 const router = Router();
 router.use(requireAuth('viewer'));
+router.use(requireWriteRole);
 
 function isAdmin(req: any): boolean {
   const role = String(req?.auth?.role ?? '').toLowerCase();

@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/requireAuth';
+import { requireWriteRole } from '../middleware/security';
 import {
   approveBlog,
   createBlogPlatformPublishJobs,
@@ -21,6 +22,7 @@ import {
 
 const router = Router();
 router.use(requireAuth('viewer'));
+router.use(requireWriteRole);
 
 function isSchemaError(err: any): boolean {
   const code = String(err?.code ?? '');

@@ -25,7 +25,30 @@ import { getReplyCaptureHealth } from '../worker/replyCapture.worker.js';
 
 const router = Router();
 
-// router.use(requireAuth('operator'));
+// Unsubscribe links are intentionally public and protected by their signed token.
+router.get('/unsubscribe', async (req, res) => {
+  try {
+    const token = String(req.query.token ?? '').trim();
+    if (!token) return res.status(400).send('<h1>Invalid unsubscribe link</h1>');
+    await unsubscribeCampaignLead(token);
+    return res.status(200).type('html').send('<!doctype html><html><body style="font-family:Arial,Helvetica,sans-serif;padding:24px"><h1>Unsubscribed</h1><p>You will not receive future campaign emails from OBAOL.</p></body></html>');
+  } catch {
+    return res.status(400).type('html').send('<!doctype html><html><body style="font-family:Arial,Helvetica,sans-serif;padding:24px"><h1>Unsubscribe failed</h1><p>This unsubscribe link is invalid or expired.</p></body></html>');
+  }
+});
+
+router.post('/unsubscribe', async (req, res) => {
+  try {
+    const token = String(req.body?.token ?? '').trim();
+    if (!token) return res.status(400).json({ error: 'token is required' });
+    return res.json(await unsubscribeCampaignLead(token));
+  } catch {
+    return res.status(400).json({ error: 'Unsubscribe link is invalid or expired' });
+  }
+});
+
+// All execution, diagnostics, recovery, and voice actions below require an app/service JWT.
+router.use(requireAuth('user'));
 
 
 // Campaign Step 6
@@ -136,34 +159,6 @@ router.post('/send-email', async (req, res) => {
   } catch (err: any) {
     console.error('[SEND EMAIL ERROR]', err);
     res.status(400).json({ error: err.message });
-  }
-});
-
-router.get('/unsubscribe', async (req, res) => {
-  try {
-    const token = String(req.query.token ?? '').trim();
-    if (!token) return res.status(400).send('<h1>Invalid unsubscribe link</h1>');
-    await unsubscribeCampaignLead(token);
-    return res
-      .status(200)
-      .type('html')
-      .send('<!doctype html><html><body style="font-family:Arial,Helvetica,sans-serif;padding:24px"><h1>Unsubscribed</h1><p>You will not receive future campaign emails from OBAOL.</p></body></html>');
-  } catch (err: any) {
-    return res
-      .status(400)
-      .type('html')
-      .send(`<!doctype html><html><body style="font-family:Arial,Helvetica,sans-serif;padding:24px"><h1>Unsubscribe failed</h1><p>${String(err?.message ?? 'Invalid unsubscribe link')}</p></body></html>`);
-  }
-});
-
-router.post('/unsubscribe', async (req, res) => {
-  try {
-    const token = String(req.body?.token ?? '').trim();
-    if (!token) return res.status(400).json({ error: 'token is required' });
-    const result = await unsubscribeCampaignLead(token);
-    return res.json(result);
-  } catch (err: any) {
-    return res.status(400).json({ error: err?.message ?? 'Unsubscribe failed' });
   }
 });
 

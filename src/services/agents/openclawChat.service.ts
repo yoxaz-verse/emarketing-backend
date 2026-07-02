@@ -1,6 +1,7 @@
 import { supabase } from '../../supabase';
 import { decryptSecret } from './encryption';
 import { AgentRecord, MemoryPolicy } from './types';
+import { safeFetch } from '../../utils/safeFetch';
 
 const REQUEST_TIMEOUT_MS = 30000;
 const DEFAULT_MEMORY_POLICY: MemoryPolicy = {
@@ -138,12 +139,12 @@ async function callOpenClaw(agent: AgentRecord, payload: Record<string, unknown>
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
-      const response = await fetch(url, {
+      const response = await safeFetch(url, {
         method: 'POST',
         headers,
         body: JSON.stringify(payload),
         signal: controller.signal,
-      });
+      }, { timeoutMs: REQUEST_TIMEOUT_MS });
 
       const raw = await response.text();
       let parsed: unknown;

@@ -1,5 +1,6 @@
 import { decryptSecret } from './encryption';
 import { AgentRecord, AgentTestRequest, AgentTestResponse } from './types';
+import { safeFetch } from '../../utils/safeFetch';
 
 const DEFAULT_TIMEOUT_MS = 15000;
 
@@ -89,12 +90,12 @@ export async function executeAgentTest(
     const baseUrl = toBaseUrl(agent);
     const targetUrl = `${baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
 
-    const res = await fetch(targetUrl, {
+    const res = await safeFetch(targetUrl, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
       signal: controller.signal,
-    });
+    }, { timeoutMs: DEFAULT_TIMEOUT_MS });
 
     const latencyMs = Date.now() - startedAt;
     const raw = await res.text();

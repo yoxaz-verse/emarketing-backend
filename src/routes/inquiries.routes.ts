@@ -13,6 +13,7 @@ import {
 } from '../services/inquiries/inquiries.service';
 
 const router = Router();
+import { rateLimit, requireWebhookSignature, requireWriteRole } from '../middleware/security';
 
 router.get('/webhook/:sourceCode', async (req, res) => {
   const sourceCode = String(req.params.sourceCode ?? '').trim().toLowerCase();
@@ -22,7 +23,7 @@ router.get('/webhook/:sourceCode', async (req, res) => {
   return res.status(200).json({ ok: true, source_code: sourceCode, challenge });
 });
 
-router.post('/webhook/:sourceCode', async (req, res) => {
+router.post('/webhook/:sourceCode', rateLimit({ name: 'inquiry-webhook', windowMs: 60_000, max: 60 }), requireWebhookSignature('INQUIRY_WEBHOOK_SECRET'), async (req, res) => {
   try {
     const sourceCode = String(req.params.sourceCode ?? '').trim().toLowerCase();
     if (!sourceCode) return res.status(400).json({ error: 'sourceCode is required' });
@@ -50,6 +51,7 @@ router.post('/webhook/:sourceCode', async (req, res) => {
 });
 
 router.use(requireAuth('viewer'));
+router.use(requireWriteRole);
 
 router.get('/sources', async (_req, res) => {
   try {

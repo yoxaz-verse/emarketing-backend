@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { supabase } from '../../supabase';
 import { createSocialPublishJobs } from '../social/social.service';
 import { SocialPlatformCode } from '../social/types';
+import { safeFetch } from '../../utils/safeFetch';
 
 type BlogStatus = 'ingested' | 'drafted' | 'pending_review' | 'approved' | 'scheduled' | 'published' | 'rejected';
 
@@ -197,7 +198,7 @@ function computeFetchMatchScore(tokens: string[], title: string, body: string, c
 }
 
 async function extractFromUrl(url: string): Promise<{ title: string; body: string }> {
-  const res = await fetch(url);
+  const res = await safeFetch(url);
   if (!res.ok) throw new Error(`Unable to fetch URL: ${res.status}`);
   const html = await res.text();
   const title = (html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? 'Imported Blog').trim();
@@ -357,7 +358,7 @@ export async function importBlog(input: ImportBlogInput, userId?: string | null)
     }, userId);
   }
 
-  const res = await fetch(sourceUrl);
+  const res = await safeFetch(sourceUrl);
   if (!res.ok) throw new Error(`Unable to fetch RSS feed: ${res.status}`);
   const xml = await res.text();
   const parsed = parseFirstRssItem(xml);
@@ -407,7 +408,7 @@ export async function fetchBlogsByContent(input: FetchBlogsInput) {
 
     if (source.provider_type !== 'rss') continue;
     try {
-      const res = await fetch(String(source.feed_url));
+      const res = await safeFetch(String(source.feed_url));
       if (!res.ok) continue;
       const xml = await res.text();
       const items = parseRssItems(xml).slice(0, 12);
@@ -556,7 +557,7 @@ export async function runRssIngestion(userId?: string | null) {
 
   for (const source of sources ?? []) {
     try {
-      const res = await fetch(String(source.feed_url));
+      const res = await safeFetch(String(source.feed_url));
       if (!res.ok) {
         rejectedItems.push({ source_id: source.id, reason: `rss_fetch_${res.status}`, url: source.feed_url });
         continue;

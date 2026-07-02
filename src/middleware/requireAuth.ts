@@ -90,16 +90,9 @@ export function requireAuth(
           .eq('id', jwtUser.user_id)
           .maybeSingle();
       
-        // ✅ USER NOT YET CREATED IN DB — ALLOW
-        if (!dbUser) {
-          console.info('[AUTH_ALLOW] JWT user not yet provisioned in users table', { tokenSource, userId: jwtUser.user_id, ...authMeta(req) });
-          req.auth = {
-            type: 'user',
-            user_id: jwtUser.user_id,
-            role: jwtUser.role,
-            operator_id: null,
-          };
-          return next();
+        if (error || !dbUser) {
+          console.warn('[AUTH_REJECT] JWT user is not provisioned', { tokenSource, userId: jwtUser.user_id, ...authMeta(req) });
+          return res.status(401).json({ error: 'User is not provisioned' });
         }
       
         if (!dbUser.active) {
