@@ -22,5 +22,7 @@ COPY --from=builder /app/src ./src
 
 EXPOSE 3000
 
+HEALTHCHECK --interval=15s --timeout=5s --retries=5 --start-period=20s \
+  CMD curl -fsS "http://127.0.0.1:${PORT:-3000}/ping" || exit 1
 
 CMD ["npm", "run", "start"]

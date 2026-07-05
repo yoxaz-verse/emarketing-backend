@@ -89,3 +89,6 @@ $$;
 
 grant execute on function public.dashboard_campaign_progress_summary(uuid)
   to authenticated, service_role;
+
+-- Make newly created RPC signatures visible to PostgREST immediately.
+notify pgrst, 'reload schema';
