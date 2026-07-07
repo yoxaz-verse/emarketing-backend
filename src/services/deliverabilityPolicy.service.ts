@@ -150,14 +150,13 @@ export function buildListUnsubscribeHeaders(unsubscribeUrl: string, inboxEmail: 
     'List-Unsubscribe': `<${unsubscribeUrl}>, <${mailto}>`,
     'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
     'X-Auto-Response-Suppress': 'OOF, AutoReply',
-    Precedence: 'bulk',
   };
 }
 
 export function buildCampaignUnsubscribeFooter(unsubscribeUrl: string): { html: string; text: string } {
   return {
-    html: `<hr style="margin-top:24px;margin-bottom:12px"/><p style="font-size:12px;color:#666">If you would prefer not to receive future emails from us, you can <a href="${unsubscribeUrl}">unsubscribe here</a>.</p>`,
-    text: `\n\n---\nIf you would prefer not to receive future emails from us, unsubscribe here: ${unsubscribeUrl}`,
+    html: `<p>To stop these updates, <a href="${unsubscribeUrl}">unsubscribe</a>.</p>`,
+    text: `\n\nTo stop these updates, unsubscribe: ${unsubscribeUrl}`,
   };
 }
 

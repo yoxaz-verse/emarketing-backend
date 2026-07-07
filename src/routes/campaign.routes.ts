@@ -77,8 +77,22 @@ function createHttpError(message: string, statusCode: number) {
   return error;
 }
 
+async function loadCampaignStatus(campaignId: string) {
+  const { data, error } = await supabase
+    .from('campaigns')
+    .select('id,status,started_at')
+    .eq('id', campaignId)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data) throw createHttpError('Campaign not found', 404);
+  return data;
+}
+
 const DEFAULT_SENDER_DISPLAY_NAME = 'OBAOL Team';
 const PERSONAL_NAME_HEURISTIC = /\b(joshua|jacob|alwin|joy)\b/i;
+const TERMINAL_LEAD_STATUSES = new Set(['replied', 'unsubscribed', 'bounced', 'completed', 'done']);
+const FAILED_LEAD_STATUSES = new Set(['failed', 'error', 'bounced', 'blocked', 'skipped', 'suppressed']);
 
 function senderWarningForName(name: string | null): string | null {
   const normalized = String(name ?? '').trim();
@@ -87,6 +101,183 @@ function senderWarningForName(name: string | null): string | null {
     return 'Sender name looks personal. Recommended: team/brand identity (e.g., OBAOL Team).';
   }
   return null;
+}
+
+function relationFirst(value: any) {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function cleanStatus(value: unknown) {
+  return String(value ?? 'pending').trim().toLowerCase() || 'pending';
+}
+
+function formatStatusReason(value: unknown) {
+  return String(value ?? '').trim().replace(/_/g, ' ') || null;
+}
+
+async function loadCampaignProgressData(campaignId: string) {
+  const [leadResult, sentResult, inboxResult, campaignResult] = await Promise.all([
+    supabase
+      .from('campaign_leads')
+      .select('id,campaign_id,lead_id,status,status_reason,current_step,last_sent_at,assigned_inbox_id,created_at,leads:lead_id(id,email,email_eligibility,is_suppressed)')
+      .eq('campaign_id', campaignId)
+      .order('created_at', { ascending: false }),
+    supabase
+      .from('email_logs')
+      .select('id,campaign_id,campaign_lead_id,lead_id,inbox_id,to_email,status,sent_at')
+      .eq('campaign_id', campaignId)
+      .eq('status', 'sent')
+      .order('sent_at', { ascending: true }),
+    supabase
+      .from('campaign_inboxes')
+      .select('inbox_id,inboxes:inbox_id(id,email_address)')
+      .eq('campaign_id', campaignId),
+    supabase
+      .from('campaigns')
+      .select('id,sequence_id')
+      .eq('id', campaignId)
+      .maybeSingle(),
+  ]);
+  const firstError = [leadResult, sentResult, inboxResult, campaignResult].find((result) => result.error)?.error;
+  if (firstError) throw firstError;
+
+  const sequenceId = String((campaignResult.data as any)?.sequence_id ?? '').trim();
+  const stepsResult = sequenceId
+    ? await supabase.from('sequence_steps').select('id,step_number').eq('sequence_id', sequenceId).order('step_number', { ascending: true })
+    : { data: [], error: null };
+  if (stepsResult.error) throw stepsResult.error;
+
+  const campaignLeads = (leadResult.data ?? []) as any[];
+  const sentLogs = (sentResult.data ?? []) as any[];
+  const sequenceSteps = (stepsResult.data ?? []) as any[];
+  const leadByCampaignLeadId = new Map(campaignLeads.map((row) => [String(row.id), row]));
+  const inboxEmailById = new Map<string, string>();
+
+  for (const row of inboxResult.data ?? []) {
+    const inbox = relationFirst((row as any).inboxes);
+    const inboxId = String((row as any).inbox_id ?? inbox?.id ?? '').trim();
+    const email = String(inbox?.email_address ?? '').trim();
+    if (inboxId && email) inboxEmailById.set(inboxId, email);
+  }
+
+  const referencedInboxIds = Array.from(new Set([
+    ...campaignLeads.map((row) => String((row as any).assigned_inbox_id ?? '').trim()),
+    ...sentLogs.map((row) => String((row as any).inbox_id ?? '').trim()),
+  ].filter(Boolean)));
+  const missingInboxIds = referencedInboxIds.filter((id) => !inboxEmailById.has(id));
+  if (missingInboxIds.length > 0) {
+    const missingInboxResult = await supabase
+      .from('inboxes')
+      .select('id,email_address')
+      .in('id', missingInboxIds);
+    if (missingInboxResult.error) throw missingInboxResult.error;
+    for (const inbox of missingInboxResult.data ?? []) {
+      const inboxId = String((inbox as any).id ?? '').trim();
+      const email = String((inbox as any).email_address ?? '').trim();
+      if (inboxId && email) inboxEmailById.set(inboxId, email);
+    }
+  }
+
+  const sentLogsByCampaignLeadId = new Map<string, any[]>();
+  for (const log of sentLogs) {
+    const key = String((log as any).campaign_lead_id ?? '').trim();
+    if (!key) continue;
+    const list = sentLogsByCampaignLeadId.get(key) ?? [];
+    list.push(log);
+    sentLogsByCampaignLeadId.set(key, list);
+  }
+
+  const sentLogRows = sentLogs.flatMap((log) => {
+    const campaignLeadId = String((log as any).campaign_lead_id ?? '').trim();
+    if (!campaignLeadId) return [];
+    const lead = leadByCampaignLeadId.get(campaignLeadId);
+    const list = sentLogsByCampaignLeadId.get(campaignLeadId) ?? [];
+    const round = Math.max(1, list.findIndex((candidate) => String(candidate.id) === String((log as any).id)) + 1);
+    const leadRelation = relationFirst(lead?.leads);
+    const inboxId = String((log as any).inbox_id ?? '').trim();
+    return [{
+      id: `sent:${String((log as any).id ?? `${campaignLeadId}:${round}`)}`,
+      source: 'email_logs',
+      campaign_lead_id: campaignLeadId,
+      lead_id: String((log as any).lead_id ?? lead?.lead_id ?? '').trim() || null,
+      lead_email: String((log as any).to_email ?? leadRelation?.email ?? '').trim() || 'Unknown lead',
+      round,
+      process_status: 'sent',
+      sender_inbox_id: inboxId || null,
+      sender_email: inboxEmailById.get(inboxId) || 'Unknown sender',
+      sent_at: (log as any).sent_at ?? null,
+      reason: 'Sent successfully',
+      sort_at: String((log as any).sent_at ?? ''),
+    }];
+  });
+
+  const pendingRows = campaignLeads.flatMap((lead) => {
+    const status = cleanStatus((lead as any).status);
+    const campaignLeadId = String((lead as any).id ?? '').trim();
+    const sentCount = sentLogsByCampaignLeadId.get(campaignLeadId)?.length ?? 0;
+    const currentStep = Math.max(1, Number((lead as any).current_step ?? sentCount + 1));
+    if (sentCount >= currentStep || TERMINAL_LEAD_STATUSES.has(status)) return [];
+    const inboxId = String((lead as any).assigned_inbox_id ?? '').trim();
+    const leadRelation = relationFirst((lead as any).leads);
+    return [{
+      id: `lead:${campaignLeadId}`,
+      source: 'campaign_leads',
+      campaign_lead_id: campaignLeadId,
+      lead_id: String((lead as any).lead_id ?? '').trim() || null,
+      lead_email: String(leadRelation?.email ?? '').trim() || 'Unknown lead',
+      round: currentStep,
+      process_status: status,
+      sender_inbox_id: inboxId || null,
+      sender_email: inboxId ? inboxEmailById.get(inboxId) || 'Assigned sender' : 'Unassigned',
+      sent_at: null,
+      reason: formatStatusReason((lead as any).status_reason) || (status === 'queued' ? 'Waiting to send' : null),
+      sort_at: String((lead as any).last_sent_at ?? (lead as any).created_at ?? ''),
+    }];
+  });
+
+  const maxRound = Math.max(
+    sequenceSteps.length,
+    ...campaignLeads.map((row) => Math.max(1, Number((row as any).current_step ?? 1))),
+    ...sentLogRows.map((row) => row.round),
+    1,
+  );
+  const totalLeads = campaignLeads.length;
+  const rounds = Array.from({ length: maxRound }, (_, index) => {
+    const round = index + 1;
+    const sentForRound = sentLogRows.filter((row) => row.round === round);
+    const activeForRound = campaignLeads.filter((row) => Math.max(1, Number((row as any).current_step ?? 1)) === round);
+    const failedCount = activeForRound.filter((row) => FAILED_LEAD_STATUSES.has(cleanStatus((row as any).status))).length;
+    const queuedCount = activeForRound.filter((row) => {
+      const status = cleanStatus((row as any).status);
+      const sentCount = sentLogsByCampaignLeadId.get(String((row as any).id ?? ''))?.length ?? 0;
+      return !FAILED_LEAD_STATUSES.has(status) && !TERMINAL_LEAD_STATUSES.has(status) && sentCount < round;
+    }).length;
+    const senderCounts = new Map<string, { inbox_id: string | null; email: string; count: number }>();
+    for (const row of sentForRound) {
+      const key = row.sender_inbox_id || row.sender_email;
+      const current = senderCounts.get(key) ?? { inbox_id: row.sender_inbox_id, email: row.sender_email, count: 0 };
+      current.count += 1;
+      senderCounts.set(key, current);
+    }
+    const sentCount = sentForRound.length;
+    return {
+      round,
+      total_count: totalLeads,
+      sent_count: sentCount,
+      queued_count: queuedCount,
+      failed_count: failedCount,
+      state: totalLeads > 0 && sentCount >= totalLeads ? 'completed' : sentCount > 0 || queuedCount > 0 || failedCount > 0 ? 'in_progress' : 'waiting',
+      sender_breakdown: Array.from(senderCounts.values()).sort((a, b) => b.count - a.count || a.email.localeCompare(b.email)),
+    };
+  });
+
+  const rows = [...sentLogRows, ...pendingRows].sort((a, b) => {
+    const timeCompare = new Date(b.sort_at || 0).getTime() - new Date(a.sort_at || 0).getTime();
+    if (timeCompare !== 0) return timeCompare;
+    return b.round - a.round || a.lead_email.localeCompare(b.lead_email);
+  });
+
+  return { campaignLeads, rows, rounds };
 }
 
 router.get('/:id/workspace', async (req, res) => {
@@ -225,6 +416,16 @@ router.get('/:id/health-summary', async (req, res) => {
   }
 });
 
+router.get('/:id/status', async (req, res) => {
+  try {
+    const campaignId = String(req.params.id ?? '');
+    await assertCampaignAccess(req, campaignId);
+    return res.json(await loadCampaignStatus(campaignId));
+  } catch (err: any) {
+    return res.status(resolveStatusCode(err)).json({ error: err?.message ?? 'Failed to load campaign status' });
+  }
+});
+
 router.get('/:id/leads/page', async (req, res) => {
   try {
     const campaignId = String(req.params.id ?? '');
@@ -273,15 +474,40 @@ router.get('/:id/progress/page', async (req, res) => {
   }
 });
 
+router.get('/:id/progress/logs', async (req, res) => {
+  try {
+    const campaignId = String(req.params.id ?? '');
+    await assertCampaignAccess(req, campaignId);
+    const { page, pageSize } = normalizePagination(req.query.page, req.query.page_size, 50);
+    const progress = await loadCampaignProgressData(campaignId);
+    const start = (page - 1) * pageSize;
+    return res.json({
+      rows: progress.rows.slice(start, start + pageSize),
+      total: progress.rows.length,
+      page,
+      page_size: pageSize,
+    });
+  } catch (err: any) {
+    return res.status(resolveStatusCode(err)).json({ error: err?.message ?? 'Failed to load campaign progress logs' });
+  }
+});
+
 router.get('/:id/progress-summary', async (req, res) => {
   try {
     const campaignId = String(req.params.id ?? '');
     await assertCampaignAccess(req, campaignId);
-    const { data, error } = await supabase.rpc('dashboard_campaign_progress_summary', {
-      p_campaign_id: campaignId,
-    });
+    const [summaryResult, progress] = await Promise.all([
+      supabase.rpc('dashboard_campaign_progress_summary', {
+        p_campaign_id: campaignId,
+      }),
+      loadCampaignProgressData(campaignId),
+    ]);
+    const { data, error } = summaryResult;
     if (error) throw error;
-    return res.json(data ?? { total: 0, groups: [], lead_mix: { eligible: 0, risky: 0, suppressed: 0 } });
+    return res.json({
+      ...(data ?? { total: 0, groups: [], lead_mix: { eligible: 0, risky: 0, suppressed: 0 } }),
+      rounds: progress.rounds,
+    });
   } catch (err: any) {
     return res.status(resolveStatusCode(err)).json({ error: err?.message ?? 'Failed to load campaign progress summary' });
   }
@@ -730,7 +956,7 @@ router.post('/:id/start', async (req, res) => {
       role: auth.role,
       hasOperatorId: Boolean(String(auth.operator_id ?? '').trim()),
     });
-    res.json({ success: true });
+    res.json({ success: true, campaign: await loadCampaignStatus(campaignId) });
   } catch (err: any) {
     const statusCode = resolveStatusCode(err);
     console.error('[START CAMPAIGN ERROR]', {
@@ -757,7 +983,7 @@ router.post('/:id/pause', async (req, res) => {
       role: auth.role,
       hasOperatorId: Boolean(String(auth.operator_id ?? '').trim()),
     });
-    res.json({ success: true });
+    res.json({ success: true, campaign: await loadCampaignStatus(campaignId) });
   } catch (err: any) {
     const statusCode = resolveStatusCode(err);
     console.error('[PAUSE CAMPAIGN ERROR]', {

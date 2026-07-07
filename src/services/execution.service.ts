@@ -2234,7 +2234,8 @@ export async function sendCampaignEmail(campaignLeadId: string) {
     body: bodyRaw,
     providerSafeAuth: authSnapshot,
   });
-  const minimalTrackingMode = DELIVERABILITY_MINIMAL_TRACKING_ENABLED && policy.minimalTracking;
+  const inboxFirstMode = policy.providerSensitive;
+  const minimalTrackingMode = inboxFirstMode || (DELIVERABILITY_MINIMAL_TRACKING_ENABLED && policy.minimalTracking);
   const trackingBase = resolveTrackingBaseUrl();
   const unsubscribeToken = buildCampaignUnsubscribeToken({
     campaign_id: String((campaignLead as any).campaign_id ?? ''),
@@ -2246,7 +2247,8 @@ export async function sendCampaignEmail(campaignLeadId: string) {
   const unsubscribeUrl = `${resolveCampaignUnsubscribeBaseUrl()}/execution/unsubscribe?token=${encodeURIComponent(unsubscribeToken)}`;
   const unsubscribeFooter = buildCampaignUnsubscribeFooter(unsubscribeUrl);
   const renderedBody = renderPlainTextAsHtml(policy.sanitizedBody);
-  const trackedBody = minimalTrackingMode
+  const trackingSuppressed = inboxFirstMode || minimalTrackingMode;
+  const trackedBody = trackingSuppressed
     ? renderedBody
     : withTrackedLinks(renderedBody, {
         campaignLeadId: String(campaignLeadId),
@@ -2256,7 +2258,7 @@ export async function sendCampaignEmail(campaignLeadId: string) {
         sentAtIso,
         trackingBase,
       });
-  const pixelHtml = minimalTrackingMode
+  const pixelHtml = trackingSuppressed
     ? ''
     : (() => {
         const pixelToken = makePixelToken({
@@ -2269,7 +2271,9 @@ export async function sendCampaignEmail(campaignLeadId: string) {
         return `<img src="${trackingBase}/tracking/open/${pixelToken}" alt="" width="1" height="1" style="display:none;opacity:0;" />`;
       })();
   const htmlBodyBase = `${trackedBody}\n${unsubscribeFooter.html}`;
-  const htmlBody = wrapCampaignHtmlBody(pixelHtml ? `${htmlBodyBase}\n${pixelHtml}` : htmlBodyBase);
+  const htmlBody = wrapCampaignHtmlBody(pixelHtml ? `${htmlBodyBase}\n${pixelHtml}` : htmlBodyBase, {
+    inboxFirstMode,
+  });
   const textBody = `${policy.sanitizedBody}${unsubscribeFooter.text}`;
   const effectiveSenderDisplayName = policy.effectiveSenderDisplayName || FIXED_CAMPAIGN_SENDER_NAME;
   const messageId = buildCampaignMessageId({
@@ -2290,6 +2294,23 @@ export async function sendCampaignEmail(campaignLeadId: string) {
         provider: policy.provider,
         minimal_tracking: minimalTrackingMode,
         multipart_plaintext: policy.useMultipartPlainText,
+      },
+    });
+  }
+
+  if (inboxFirstMode) {
+    await insertSystemEvent({
+      type: 'campaign_inbox_first_mode_applied',
+      entity: 'campaign_leads',
+      entity_id: campaignLeadId,
+      message: `Inbox-first campaign send applied for ${policy.provider} placement protection.`,
+      meta: {
+        campaign_id: campaignId,
+        campaign_lead_id: campaignLeadId,
+        provider: policy.provider,
+        open_pixel: false,
+        click_tracking: false,
+        minimal_html: true,
       },
     });
   }
@@ -2559,7 +2580,22 @@ function withTrackedLinks(
   });
 }
 
-function wrapCampaignHtmlBody(contentHtml: string): string {
+function wrapCampaignHtmlBody(
+  contentHtml: string,
+  options: { inboxFirstMode?: boolean } = {}
+): string {
+  if (options.inboxFirstMode) {
+    return [
+      '<!doctype html>',
+      '<html>',
+      '<head><meta charset="UTF-8"></head>',
+      '<body>',
+      contentHtml,
+      '</body>',
+      '</html>',
+    ].join('');
+  }
+
   return [
     '<!doctype html>',
     '<html>',

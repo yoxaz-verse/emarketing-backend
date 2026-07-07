@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   buildCampaignMessageId,
+  buildCampaignUnsubscribeFooter,
   buildCampaignUnsubscribeToken,
   buildListUnsubscribeHeaders,
   classifyRecipientProvider,
@@ -57,6 +58,27 @@ test('provider policy downgrades tracking and enforces team sender on sensitive 
   assert.equal(policy.useMultipartPlainText, true);
   assert.equal(policy.effectiveSenderDisplayName, 'OBAOL Team');
   assert.equal(policy.sanitizedBody.includes('Jacob'), false);
+});
+
+test('provider policy keeps standard tracking available for generic recipients', () => {
+  const policy = resolveDeliverabilityPolicy({
+    recipientEmail: 'lead@example.com',
+    firstTouch: true,
+    senderDisplayName: 'OBAOL Team',
+    subject: 'Hello',
+    body: 'Body',
+    providerSafeAuth: {
+      spfVerified: true,
+      dkimVerified: true,
+      dmarcVerified: true,
+      dmarcPolicy: 'reject',
+    },
+  });
+
+  assert.equal(policy.provider, 'generic');
+  assert.equal(policy.providerSensitive, false);
+  assert.equal(policy.minimalTracking, false);
+  assert.equal(policy.trackingDowngraded, false);
 });
 
 test('provider policy keeps hygiene without blocking when auth is not provider-safe', () => {
@@ -133,6 +155,17 @@ test('unsubscribe helpers build stable token and headers', () => {
   assert.equal(parsed.campaign_id, 'c1');
   assert.equal(headers['List-Unsubscribe-Post'], 'List-Unsubscribe=One-Click');
   assert.ok(headers['List-Unsubscribe'].includes('mailto:sender@example.com'));
+  assert.equal(headers.Precedence, undefined);
+  assert.equal(headers['X-Auto-Response-Suppress'], 'OOF, AutoReply');
+});
+
+test('campaign unsubscribe footer avoids newsletter-style wording', () => {
+  const footer = buildCampaignUnsubscribeFooter('https://example.com/execution/unsubscribe?token=abc');
+
+  assert.ok(footer.html.includes('To stop these updates'));
+  assert.ok(footer.text.includes('To stop these updates'));
+  assert.equal(footer.html.includes('future emails from us'), false);
+  assert.equal(footer.text.includes('future emails from us'), false);
 });
 
 test('message id is stable and uses inbox domain', () => {
