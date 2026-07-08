@@ -44,6 +44,7 @@ export type SocialJobPhase =
   | 'PUBLISH';
 
 export type SocialJobStatus =
+  | 'scheduled'
   | 'draft_created'
   | 'validated'
   | 'approval_pending'

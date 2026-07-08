@@ -35,9 +35,29 @@ function normalizedErrorCode(message: string): string {
 function fallbackIdempotencyKey(input: CreateSocialPublishRequestInput, userId?: string | null): string {
   const digest = crypto
     .createHash('sha256')
-    .update(JSON.stringify({ targets: input.targets, post_input: input.post_input, userId: userId ?? null }))
+    .update(JSON.stringify({ targets: input.targets, post_input: input.post_input, userId: userId ?? null, nonce: Date.now() }))
     .digest('hex');
   return `social-auto-${digest}`;
+}
+
+function isFutureSchedule(input: SocialPostInput): boolean {
+  if (!input.scheduled_at) return false;
+  const scheduledAt = new Date(input.scheduled_at);
+  return !Number.isNaN(scheduledAt.getTime()) && scheduledAt.getTime() > Date.now();
+}
+
+function isDueSchedule(input: SocialPostInput): boolean {
+  if (!input.scheduled_at) return true;
+  const scheduledAt = new Date(input.scheduled_at);
+  return !Number.isNaN(scheduledAt.getTime()) && scheduledAt.getTime() <= Date.now();
+}
+
+function canEditJobStatus(status: unknown): boolean {
+  return ['scheduled', 'draft_created', 'validated', 'approval_pending', 'failed', 'manual_action_required'].includes(String(status ?? ''));
+}
+
+function terminalJobStatus(status: unknown): boolean {
+  return ['published', 'failed', 'manual_action_required'].includes(String(status ?? ''));
 }
 
 function requiredFieldsByPlatform(platform: string): string[] {
@@ -221,19 +241,33 @@ async function createOrGetRequest(input: CreateSocialPublishRequestInput, userId
   return data;
 }
 
-async function createJob(requestId: string, connector: SocialConnectorCapability, input: SocialPostInput, createdBy?: string | null) {
+async function createJob(
+  requestId: string,
+  connector: SocialConnectorCapability,
+  input: SocialPostInput,
+  createdBy?: string | null,
+  operatorId?: string | null
+) {
+  const scheduled = isFutureSchedule(input);
   const { data, error } = await supabase
     .from('social_publish_jobs')
     .insert({
       request_id: requestId,
       platform_code: connector.code,
-      status: 'draft_created',
-      phase: 'DRAFT_CREATE',
+      status: scheduled ? 'scheduled' : 'draft_created',
+      phase: scheduled ? 'APPROVAL_PENDING' : 'DRAFT_CREATE',
       post_input: input,
       scheduled_at: input.scheduled_at ?? null,
-      timeline: [makeEvent('DRAFT_CREATE', 'draft_created', 'Draft payload created in panel')],
-      attempts: 1,
+      timeline: [
+        makeEvent(
+          scheduled ? 'APPROVAL_PENDING' : 'DRAFT_CREATE',
+          scheduled ? 'scheduled' : 'draft_created',
+          scheduled ? 'Post scheduled and waiting for due time' : 'Draft payload created in panel'
+        ),
+      ],
+      attempts: 0,
       created_by: createdBy ?? null,
+      operator_id: operatorId ?? null,
       updated_at: nowIso(),
     })
     .select('*')
@@ -322,7 +356,9 @@ async function executeLinkedInApiFlow(job: any, connector: SocialConnectorCapabi
 
 async function executeFlow(job: any, connector: SocialConnectorCapability, input: SocialPostInput, userId?: string | null, operatorId?: string | null) {
   const timeline = Array.isArray(job.timeline) ? [...job.timeline] : [];
-  const validationErrors = validateSocialPostInput(input);
+  const validationErrors = validateSocialPostInput(input).filter((error) => {
+    return !(isDueSchedule(input) && error === 'scheduled_at must be in the future');
+  });
 
   if (validationErrors.length > 0) {
     const message = validationErrors.join('; ');
@@ -381,15 +417,206 @@ export async function createSocialPublishJobs(input: CreateSocialPublishRequestI
   const jobs: any[] = [];
   for (const target of targets) {
     const connector = connectorMap.get(target)!;
-    const created = await createJob(request.id, connector, input.post_input, userId);
-    const executed = await executeFlow(created, connector, input.post_input, userId, operatorId);
-    jobs.push(executed);
+    const created = await createJob(request.id, connector, input.post_input, userId, operatorId);
+    if (isFutureSchedule(input.post_input)) {
+      jobs.push(created);
+    } else {
+      const executed = await executeFlow(created, connector, input.post_input, userId, operatorId);
+      jobs.push(executed);
+    }
   }
 
   return {
     request_id: request.id,
     idempotency_key: request.idempotency_key,
     jobs,
+  };
+}
+
+export async function listSocialPublishJobs(params: {
+  userId?: string | null;
+  operatorId?: string | null;
+  role?: string | null;
+  limit?: number;
+}) {
+  const role = String(params.role ?? '').toLowerCase();
+  const isAdmin = role === 'admin' || role === 'superadmin';
+  const limit = Math.min(Math.max(Number(params.limit ?? 200), 1), 500);
+
+  if (isAdmin && !params.operatorId) return [];
+
+  let query = supabase
+    .from('social_publish_jobs')
+    .select('*, social_publish_requests(*)')
+    .order('scheduled_at', { ascending: true, nullsFirst: false })
+    .order('created_at', { ascending: false })
+    .limit(limit);
+
+  if (isAdmin) {
+    query = query.eq('operator_id', params.operatorId);
+  } else {
+    query = query.eq('created_by', params.userId ?? '');
+    if (params.operatorId) query = query.eq('operator_id', params.operatorId);
+  }
+
+  const { data, error } = await query;
+  if (error) throw error;
+  return data ?? [];
+}
+
+export async function updateSocialPublishRequestJobs(params: {
+  requestId: string;
+  input: CreateSocialPublishRequestInput;
+  userId?: string | null;
+  operatorId?: string | null;
+  role?: string | null;
+}) {
+  const targets = Array.from(new Set((params.input.targets ?? []).map((t) => String(t).trim().toLowerCase()).filter(Boolean))) as SocialPlatformCode[];
+  if (targets.length === 0) throw new Error('At least one target platform is required');
+
+  const validationErrors = validateSocialPostInput(params.input.post_input);
+  if (validationErrors.length > 0) throw new Error(validationErrors.join('; '));
+
+  const role = String(params.role ?? '').toLowerCase();
+  const isAdmin = role === 'admin' || role === 'superadmin';
+  if (isAdmin && !params.operatorId) throw new Error('operator_id is required for admin scheduling');
+  let requestQuery = supabase
+    .from('social_publish_requests')
+    .select('*')
+    .eq('id', params.requestId);
+  if (isAdmin) {
+    if (params.operatorId) requestQuery = requestQuery.eq('operator_id', params.operatorId);
+  } else {
+    requestQuery = requestQuery.eq('created_by', params.userId ?? '');
+  }
+
+  const { data: request, error: requestError } = await requestQuery.maybeSingle();
+  if (requestError && requestError.code !== 'PGRST116') throw requestError;
+  if (!request) throw new Error('Social publish request not found');
+
+  const { data: existingJobs, error: jobsError } = await supabase
+    .from('social_publish_jobs')
+    .select('*')
+    .eq('request_id', params.requestId);
+  if (jobsError) throw jobsError;
+
+  const jobs = existingJobs ?? [];
+  const locked = jobs.filter((job: any) => !canEditJobStatus(job.status));
+  if (locked.length > 0) throw new Error('Published jobs cannot be edited');
+
+  const connectorMap = await getConnectorsByCodes(targets);
+  const missing = targets.filter((t) => !connectorMap.has(t));
+  if (missing.length > 0) throw new Error(`Unknown platform(s): ${missing.join(', ')}`);
+
+  const operatorId = params.operatorId ?? request.operator_id ?? null;
+  const requestPatch = await supabase
+    .from('social_publish_requests')
+    .update({
+      post_input: params.input.post_input,
+      targets,
+      operator_id: operatorId,
+      updated_at: nowIso(),
+    })
+    .eq('id', params.requestId)
+    .select('*')
+    .single();
+  if (requestPatch.error) throw requestPatch.error;
+
+  const existingByPlatform = new Map(jobs.map((job: any) => [String(job.platform_code), job]));
+  const targetSet = new Set<string>(targets);
+  const out: any[] = [];
+
+  for (const job of jobs) {
+    if (targetSet.has(String(job.platform_code))) continue;
+    const timeline = Array.isArray(job.timeline) ? [...job.timeline] : [];
+    timeline.push(makeEvent('PUBLISH', 'manual_action_required', 'Platform removed from scheduled calendar entry'));
+    const patched = await patchJob(job.id, {
+      status: 'manual_action_required',
+      phase: 'PUBLISH',
+      manual_task: null,
+      timeline,
+    });
+    out.push(patched);
+  }
+
+  for (const target of targets) {
+    const connector = connectorMap.get(target)!;
+    const existing = existingByPlatform.get(target);
+    if (existing) {
+      const timeline = Array.isArray((existing as any).timeline) ? [...(existing as any).timeline] : [];
+      timeline.push(makeEvent('APPROVAL_PENDING', 'scheduled', 'Scheduled calendar entry updated'));
+      const patched = await patchJob((existing as any).id, {
+        status: isFutureSchedule(params.input.post_input) ? 'scheduled' : 'draft_created',
+        phase: isFutureSchedule(params.input.post_input) ? 'APPROVAL_PENDING' : 'DRAFT_CREATE',
+        post_input: params.input.post_input,
+        scheduled_at: params.input.post_input.scheduled_at ?? null,
+        operator_id: operatorId,
+        error_code: null,
+        error_message: null,
+        provider_error_code: null,
+        provider_error_message: null,
+        validation_errors: null,
+        timeline,
+      });
+      out.push(isFutureSchedule(params.input.post_input) ? patched : await executeFlow(patched, connector, params.input.post_input, params.userId, operatorId));
+    } else {
+      const created = await createJob(params.requestId, connector, params.input.post_input, params.userId, operatorId);
+      out.push(isFutureSchedule(params.input.post_input) ? created : await executeFlow(created, connector, params.input.post_input, params.userId, operatorId));
+    }
+  }
+
+  return {
+    request_id: params.requestId,
+    jobs: out,
+  };
+}
+
+export async function processDueSocialPublishJobs(limit = 25) {
+  const now = nowIso();
+  const { data, error } = await supabase
+    .from('social_publish_jobs')
+    .select('*, social_publish_requests(*)')
+    .eq('status', 'scheduled')
+    .lte('scheduled_at', now)
+    .order('scheduled_at', { ascending: true })
+    .limit(Math.min(Math.max(Number(limit || 25), 1), 100));
+
+  if (error) throw error;
+
+  const processed: any[] = [];
+  for (const job of data ?? []) {
+    if (terminalJobStatus(job.status)) continue;
+    const claimed = await patchJob(job.id, {
+      status: 'draft_created',
+      phase: 'DRAFT_CREATE',
+      attempts: Number(job.attempts ?? 0) + 1,
+      timeline: [
+        ...(Array.isArray(job.timeline) ? job.timeline : []),
+        makeEvent('DRAFT_CREATE', 'draft_created', 'Due scheduled job claimed by social publish runner'),
+      ],
+    });
+
+    const { data: connector, error: connectorError } = await supabase
+      .from('social_connectors')
+      .select('*')
+      .eq('code', claimed.platform_code)
+      .single();
+    if (connectorError) throw connectorError;
+
+    const request = (job as any).social_publish_requests ?? {};
+    const executed = await executeFlow(
+      claimed,
+      connector as SocialConnectorCapability,
+      claimed.post_input as SocialPostInput,
+      claimed.created_by as string | null,
+      claimed.operator_id ?? request.operator_id ?? null
+    );
+    processed.push(executed);
+  }
+
+  return {
+    processed: processed.length,
+    jobs: processed,
   };
 }
 

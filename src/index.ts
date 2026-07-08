@@ -28,6 +28,7 @@ import inquiriesRoutes from './routes/inquiries.routes';
 import quotesRoutes from './routes/quotes.routes';
 import { startSequenceRunner } from './worker/sequenceRunner';
 import { startAgentMissionRunner } from './worker/agentMissionRunner';
+import { startSocialPublishRunner } from './worker/socialPublishRunner';
 import { startReplyCaptureWorker } from './worker/replyCapture.worker';
 import {
   getEmailValidationWorkerHealth,
@@ -379,6 +380,18 @@ async function checkSocialAppsSchemaReadiness() {
     ['platform_code', 'user_id', 'operator_id', 'access_token_encrypted', 'scopes', 'metadata'],
     connCheck.error
   );
+
+  const jobsCheck = await supabase
+    .from('social_publish_jobs')
+    .select('request_id,platform_code,operator_id,scheduled_at,status,phase,attempts,created_by,updated_at')
+    .limit(1);
+  logSocialSchemaCheck(
+    'SOCIAL_PUBLISH_JOBS_SCHEMA_CHECK',
+    'social_publish_jobs',
+    ['request_id', 'platform_code', 'operator_id', 'scheduled_at', 'status', 'phase', 'attempts', 'created_by', 'updated_at'],
+    jobsCheck.error,
+    { endpoints: ['/social/publish-jobs', '/social/publish-requests/:id'] }
+  );
 }
 
 async function checkInquirySchemaReadiness() {
@@ -525,6 +538,12 @@ try {
   startAgentMissionRunner();
 } catch (error) {
   console.error('[AGENT_MISSION_RUNNER_BOOT_ERROR]', error);
+}
+
+try {
+  startSocialPublishRunner();
+} catch (error) {
+  console.error('[SOCIAL_PUBLISH_RUNNER_BOOT_ERROR]', error);
 }
 
 try {
