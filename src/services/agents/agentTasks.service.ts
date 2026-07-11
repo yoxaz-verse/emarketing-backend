@@ -35,6 +35,13 @@ export const ALLOWED_TASK_STATUS = [
   'cancelled',
 ] as const;
 
+export const ALLOWED_APPROVAL_STATUS = [
+  'not_required',
+  'pending',
+  'approved',
+  'rejected',
+] as const;
+
 const WORKER_RESULT_STATUS = ['completed', 'failed'] as const;
 
 type AuthCtx = {
@@ -50,10 +57,12 @@ type CreateTaskInput = {
   metadata?: Record<string, unknown>;
   source_entity?: string | null;
   source_entity_id?: string | null;
+  approval_required?: boolean;
 };
 
 type ListTaskFilter = {
   status?: string;
+  approval_status?: string;
   role_key?: string;
   task_type?: string;
   limit?: number;
@@ -65,6 +74,10 @@ type SubmitTaskResultInput = {
   result?: string;
   structured_outputs?: unknown[];
   error?: string;
+};
+
+type ApprovalInput = {
+  notes?: string;
 };
 
 type CreateContextDocumentInput = {
@@ -105,6 +118,11 @@ function asObject(input: unknown): Record<string, unknown> {
   return input as Record<string, unknown>;
 }
 
+function shouldRequireApproval(metadata: Record<string, unknown>): boolean {
+  if (metadata.approval_required === false || metadata.requires_approval === false) return false;
+  return true;
+}
+
 async function addTaskEvent(taskId: string, eventType: string, message?: string, payload?: Record<string, unknown>) {
   const { error } = await supabase.from('agent_task_events').insert({
     task_id: taskId,
@@ -129,7 +147,10 @@ export async function createAgentTask(input: CreateTaskInput, auth: AuthCtx) {
   ensureEnum('task_type', taskType, ALLOWED_TASK_TYPES);
 
   const priority = Number.isFinite(Number(input.priority)) ? Number(input.priority) : 5;
-  const metadata = asObject(input.metadata);
+  const metadata = {
+    ...asObject(input.metadata),
+    approval_required: input.approval_required ?? asObject(input.metadata).approval_required ?? true,
+  };
 
   const { data, error } = await supabase
     .from('agent_tasks')
@@ -138,6 +159,7 @@ export async function createAgentTask(input: CreateTaskInput, auth: AuthCtx) {
       task_type: taskType,
       input: taskInput,
       status: 'pending',
+      approval_status: 'not_required',
       priority,
       metadata,
       source_entity: input.source_entity ?? null,
@@ -171,6 +193,11 @@ export async function listAgentTasks(filters: ListTaskFilter) {
   if (filters.status) {
     ensureEnum('status', filters.status, ALLOWED_TASK_STATUS);
     query = query.eq('status', filters.status);
+  }
+
+  if (filters.approval_status) {
+    ensureEnum('approval_status', filters.approval_status, ALLOWED_APPROVAL_STATUS);
+    query = query.eq('approval_status', filters.approval_status);
   }
 
   if (filters.role_key) {
@@ -248,11 +275,18 @@ export async function submitAgentTaskResult(taskId: string, input: SubmitTaskRes
 
   if (status === 'completed') {
     const structuredOutputs = Array.isArray(input.structured_outputs) ? input.structured_outputs : [];
+    const existing = await getAgentTaskById(taskId);
+    const existingApprovalStatus = String(existing?.approval_status ?? 'not_required');
+    const approvalStatus =
+      existingApprovalStatus === 'approved' || existingApprovalStatus === 'rejected'
+        ? existingApprovalStatus
+        : shouldRequireApproval(asObject(existing?.metadata)) ? 'pending' : 'not_required';
 
     const { data, error } = await supabase
       .from('agent_tasks')
       .update({
         status: 'completed',
+        approval_status: approvalStatus,
         result: String(input.result ?? ''),
         structured_outputs: structuredOutputs,
         error: null,
@@ -269,6 +303,12 @@ export async function submitAgentTaskResult(taskId: string, input: SubmitTaskRes
       structured_outputs_count: structuredOutputs.length,
     });
 
+    if (approvalStatus === 'pending') {
+      await addTaskEvent(taskId, 'approval_pending', 'Task output is waiting for approval', {
+        structured_outputs_count: structuredOutputs.length,
+      });
+    }
+
     await updateMissionRunFromTaskResult(taskId, 'completed', String(input.result ?? ''));
 
     return data;
@@ -278,6 +318,7 @@ export async function submitAgentTaskResult(taskId: string, input: SubmitTaskRes
     .from('agent_tasks')
     .update({
       status: 'failed',
+      approval_status: 'not_required',
       error: String(input.error ?? 'Task failed'),
       completed_at: now,
       updated_at: now,
@@ -293,6 +334,102 @@ export async function submitAgentTaskResult(taskId: string, input: SubmitTaskRes
   });
 
   await updateMissionRunFromTaskResult(taskId, 'failed', String(input.error ?? 'Task failed'));
+
+  return data;
+}
+
+export async function approveAgentTask(taskId: string, input: ApprovalInput, auth: AuthCtx) {
+  const existing = await getAgentTaskById(taskId);
+  if (String(existing.status) !== 'completed') {
+    throw new Error('Only completed tasks can be approved');
+  }
+  if (String(existing.approval_status ?? 'not_required') === 'approved') {
+    return existing;
+  }
+
+  const now = new Date().toISOString();
+  const { data, error } = await supabase
+    .from('agent_tasks')
+    .update({
+      approval_status: 'approved',
+      approved_by: auth.userId ?? null,
+      approved_at: now,
+      rejected_by: null,
+      rejected_at: null,
+      approval_notes: String(input.notes ?? '').trim() || null,
+      updated_at: now,
+    })
+    .eq('id', taskId)
+    .select('*')
+    .single();
+
+  if (error) throw error;
+
+  await addTaskEvent(taskId, 'approved', 'Task output approved', {
+    notes: String(input.notes ?? '').trim() || null,
+  });
+
+  const approvedResult = String(data.result ?? '').trim();
+  const roleKey = String(data.role_key ?? '').trim();
+  if (approvedResult && roleKey) {
+    const { error: contextError } = await supabase.from('agent_context_documents').insert({
+      name: `Approved ${String(data.task_type ?? 'agent')} output`,
+      role_key: roleKey,
+      content: approvedResult.slice(0, 100000),
+      active: true,
+      metadata: {
+        source: 'approved_agent_task',
+        task_id: taskId,
+        task_type: data.task_type ?? null,
+        structured_outputs_count: Array.isArray(data.structured_outputs) ? data.structured_outputs.length : 0,
+      },
+      created_by: auth.userId ?? null,
+      operator_id: auth.operatorId ?? null,
+    });
+
+    if (contextError) {
+      await addTaskEvent(taskId, 'approved_context_skipped', 'Approved output could not be added to agent context', {
+        error: contextError.message,
+      });
+    }
+  }
+
+  return data;
+}
+
+export async function rejectAgentTask(taskId: string, input: ApprovalInput, auth: AuthCtx) {
+  const notes = String(input.notes ?? '').trim();
+  if (!notes) throw new Error('approval_notes is required when rejecting a task');
+
+  const existing = await getAgentTaskById(taskId);
+  if (String(existing.status) !== 'completed') {
+    throw new Error('Only completed tasks can be rejected');
+  }
+  if (String(existing.approval_status ?? 'not_required') === 'rejected') {
+    return existing;
+  }
+
+  const now = new Date().toISOString();
+  const { data, error } = await supabase
+    .from('agent_tasks')
+    .update({
+      approval_status: 'rejected',
+      approved_by: null,
+      approved_at: null,
+      rejected_by: auth.userId ?? null,
+      rejected_at: now,
+      approval_notes: notes,
+      updated_at: now,
+    })
+    .eq('id', taskId)
+    .select('*')
+    .single();
+
+  if (error) throw error;
+
+  await addTaskEvent(taskId, 'rejected', 'Task output rejected', {
+    notes,
+  });
 
   return data;
 }

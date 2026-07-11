@@ -3,7 +3,7 @@ import { ALLOWED_ROLE_KEYS, ALLOWED_TASK_TYPES, listAgentTasks } from './agentTa
 import { createAgent, listAgents } from './agentIntegrations.service';
 
 const ALLOWED_EXECUTION_POLICIES = ['scheduled', 'always_on', 'manual_approval'] as const;
-const ALLOWED_OUTPUT_POLICIES = ['task_center_only'] as const;
+const ALLOWED_OUTPUT_POLICIES = ['task_center_only', 'approval_required'] as const;
 const ALLOWED_CADENCE_TYPES = ['daily', 'weekly'] as const;
 const ALLOWED_MISSION_STATUSES = ['queued', 'dispatched', 'completed', 'failed', 'skipped'] as const;
 
@@ -73,12 +73,15 @@ async function createTaskFromMission(mission: any, auth: AuthCtx, missionRunId: 
       task_type: mission.task_type,
       input: mission.instructions,
       status: 'pending',
+      approval_status: 'not_required',
       priority: mission.priority ?? 5,
       metadata: {
         ...(asObject(mission.metadata)),
         mission_id: mission.id,
         mission_run_id: missionRunId,
         execution_policy: mission.execution_policy,
+        output_policy: mission.output_policy,
+        approval_required: mission.output_policy === 'approval_required',
       },
       created_by: auth.userId ?? null,
       operator_id: auth.operatorId ?? null,
@@ -102,7 +105,7 @@ export async function createMission(input: CreateMissionInput, auth: AuthCtx) {
   const cadenceValue = Number.isFinite(Number(input.cadence_value)) ? Math.max(1, Number(input.cadence_value)) : 1;
   const timezone = String(input.timezone ?? 'Asia/Kolkata').trim() || 'Asia/Kolkata';
   const executionPolicy = String(input.execution_policy ?? 'scheduled').trim().toLowerCase();
-  const outputPolicy = String(input.output_policy ?? 'task_center_only').trim().toLowerCase();
+  const outputPolicy = String(input.output_policy ?? 'approval_required').trim().toLowerCase();
   const priority = Number.isFinite(Number(input.priority)) ? Number(input.priority) : 5;
   const nextRunAt = toIsoOrNull(input.next_run_at ?? null) ?? new Date(Date.now() + 60 * 1000).toISOString();
 
@@ -386,12 +389,16 @@ export async function getAgentRuntimeOverview() {
 
   const tasks = await listAgentTasks({ limit: 200 });
   const roleLatestTask = new Map<string, any>();
+  const rolePendingApprovals = new Map<string, number>();
   for (const task of tasks) {
     const key = String(task.role_key || '').trim();
     if (!key) continue;
     const existing = roleLatestTask.get(key);
     if (!existing || Date.parse(task.created_at) > Date.parse(existing.created_at)) {
       roleLatestTask.set(key, task);
+    }
+    if (String(task.approval_status ?? '') === 'pending') {
+      rolePendingApprovals.set(key, (rolePendingApprovals.get(key) ?? 0) + 1);
     }
   }
 
@@ -411,6 +418,7 @@ export async function getAgentRuntimeOverview() {
       .filter(Boolean)
       .sort()[0] ?? null;
     const latestTask = agent.role_key ? roleLatestTask.get(agent.role_key) ?? null : null;
+    const pendingApprovalCount = agent.role_key ? rolePendingApprovals.get(agent.role_key) ?? 0 : 0;
     return {
       ...agent,
       missions: missionList,
@@ -418,6 +426,7 @@ export async function getAgentRuntimeOverview() {
       active_mission_count: activeMissions.length,
       next_run_at: nextRunAt,
       latest_task: latestTask,
+      pending_approval_count: pendingApprovalCount,
     };
   });
 }
@@ -430,7 +439,7 @@ export function getMissionTemplates() {
       task_type: 'research',
       mission_goal: 'Track daily agro-trade developments and surface actionable insights.',
       instructions:
-        'Research top agro-trade developments for today relevant to OBAOL users. Return concise insights, risks, and one content opportunity.',
+        'Research top agro-trade developments for today relevant to OBAOL users. Return concise insights, risks, sources to verify, and one content opportunity for the content creator.',
       cadence_type: 'daily',
       cadence_value: 1,
       timezone: 'Asia/Kolkata',
@@ -442,7 +451,7 @@ export function getMissionTemplates() {
       task_type: 'content_creation',
       mission_goal: 'Produce one high-quality daily content asset.',
       instructions:
-        'Create one platform-ready content output for today based on current OBAOL priorities and yesterday insights.',
+        'Create one platform-ready content output for today based on OBAOL positioning, current priorities, and recent research context. Keep it ready for human approval before use.',
       cadence_type: 'daily',
       cadence_value: 1,
       timezone: 'Asia/Kolkata',
@@ -454,7 +463,7 @@ export function getMissionTemplates() {
       task_type: 'social_post',
       mission_goal: 'Refine and adapt drafts for publishing channels.',
       instructions:
-        'Review drafted content, improve clarity and CTA, and provide LinkedIn + WhatsApp channel-ready variants.',
+        'Review drafted content, improve clarity and CTA, and provide LinkedIn + WhatsApp channel-ready variants. Mark any assumption that needs approval.',
       cadence_type: 'daily',
       cadence_value: 1,
       timezone: 'Asia/Kolkata',
@@ -466,7 +475,7 @@ export function getMissionTemplates() {
       task_type: 'lead_enrichment',
       mission_goal: 'Improve lead quality signals for outreach.',
       instructions:
-        'Enrich available leads with practical qualification notes and segment tags for campaign execution.',
+        'Enrich available leads with practical qualification notes, segment tags, and outreach cautions for campaign execution. Do not invent missing contact data.',
       cadence_type: 'daily',
       cadence_value: 1,
       timezone: 'Asia/Kolkata',
@@ -478,7 +487,7 @@ export function getMissionTemplates() {
       task_type: 'email_sequence',
       mission_goal: 'Generate weekly campaign sequence plans.',
       instructions:
-        'Prepare a weekly campaign sequence plan with targeting angle, 3-step messaging, and CTA strategy.',
+        'Prepare a weekly campaign sequence plan with targeting angle, 3-step messaging, CTA strategy, and approval notes before any sending workflow uses it.',
       cadence_type: 'weekly',
       cadence_value: 1,
       timezone: 'Asia/Kolkata',
@@ -490,7 +499,7 @@ export function getMissionTemplates() {
       task_type: 'blog_draft',
       mission_goal: 'Summarize weekly outcomes and opportunities.',
       instructions:
-        'Create a weekly performance summary with wins, bottlenecks, and next-week recommendations.',
+        'Create a weekly performance summary with wins, bottlenecks, next-week recommendations, and follow-up research tasks for the employee-agent team.',
       cadence_type: 'weekly',
       cadence_value: 1,
       timezone: 'Asia/Kolkata',
@@ -560,7 +569,7 @@ export async function bootstrapEmployeeTeam(auth: AuthCtx) {
           next_run_at: new Date(Date.now() + 60 * 1000).toISOString(),
           active: true,
           execution_policy: 'scheduled',
-          output_policy: 'task_center_only',
+          output_policy: 'approval_required',
           priority: template.priority,
           metadata: { bootstrap: 'employee_team_v1' },
         },

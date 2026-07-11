@@ -16,7 +16,35 @@ import {
   validateSocialPostInput,
 } from './connectors';
 import { publishLinkedInTextLink } from './linkedin.client';
-import { getOperatorPlatformConnection, hasOAuthAppConfig, markConnectionFailure } from './socialAuth.service';
+import { getConnectionStatuses, getOperatorPlatformConnection, hasOAuthAppConfig, markConnectionFailure } from './socialAuth.service';
+
+type SocialConnectionReadiness = {
+  platform_code: string;
+  status: 'connected' | 'expired' | 'missing_scope' | 'disconnected';
+  reason: string | null;
+  scopes: string[];
+  expires_at: string | null;
+  metadata: Record<string, unknown>;
+};
+
+export type SocialTargetReadinessDetail = {
+  platform_code: string;
+  status: 'ready' | 'unknown_platform' | 'not_schedulable' | 'not_publishable' | 'unconfigured' | 'disconnected' | 'expired' | 'missing_scope';
+  reason: string;
+  missing_fields: string[];
+};
+
+export class SocialTargetReadinessError extends Error {
+  code = 'SOCIAL_TARGET_NOT_READY';
+  status = 400;
+  details: SocialTargetReadinessDetail[];
+
+  constructor(details: SocialTargetReadinessDetail[]) {
+    super(buildSocialTargetReadinessMessage(details));
+    this.name = 'SocialTargetReadinessError';
+    this.details = details;
+  }
+}
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -30,6 +58,112 @@ function normalizedErrorCode(message: string): string {
   if (message.includes('required')) return 'VALIDATION_REQUIRED_FIELD';
   if (message.includes('must be')) return 'VALIDATION_INVALID_VALUE';
   return 'VALIDATION_ERROR';
+}
+
+function platformLabel(platform: string): string {
+  const normalized = String(platform || '').trim().toLowerCase();
+  if (normalized === 'linkedin') return 'LinkedIn';
+  if (normalized === 'meta') return 'Meta';
+  if (normalized === 'reddit') return 'Reddit';
+  if (normalized === 'telegram') return 'Telegram';
+  if (normalized === 'whatsapp') return 'WhatsApp';
+  return normalized || 'Platform';
+}
+
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => String(item ?? '').trim()).filter(Boolean);
+}
+
+function connectorMissingFields(connector?: SocialConnectorCapability | null): string[] {
+  const metadata = (connector?.metadata && typeof connector.metadata === 'object') ? connector.metadata : {};
+  return asStringArray((metadata as Record<string, unknown>).missing_fields);
+}
+
+function connectorAppConfigured(connector?: SocialConnectorCapability | null): boolean {
+  if (!connector) return false;
+  const metadata = (connector.metadata && typeof connector.metadata === 'object') ? connector.metadata : {};
+  const appConfigured = (metadata as Record<string, unknown>).app_configured;
+  const oauthAppConfigured = (metadata as Record<string, unknown>).oauth_app_configured;
+  const missingFields = connectorMissingFields(connector);
+  if (appConfigured === false || oauthAppConfigured === false) return false;
+  return missingFields.length === 0;
+}
+
+export function evaluateSocialTargetReadiness(params: {
+  platform: string;
+  connector?: SocialConnectorCapability | null;
+  connection?: SocialConnectionReadiness | null;
+}): SocialTargetReadinessDetail | null {
+  const platform = String(params.platform || '').trim().toLowerCase();
+  const label = platformLabel(platform);
+  const connector = params.connector ?? null;
+  const connection = params.connection ?? null;
+
+  if (!connector) {
+    return {
+      platform_code: platform,
+      status: 'unknown_platform',
+      reason: `${label} connector is not configured in backend.`,
+      missing_fields: requiredFieldsByPlatform(platform),
+    };
+  }
+
+  if (!connector.can_schedule) {
+    return {
+      platform_code: platform,
+      status: 'not_schedulable',
+      reason: `${label} connector cannot schedule posts yet.`,
+      missing_fields: [],
+    };
+  }
+
+  if (!connector.can_publish) {
+    return {
+      platform_code: platform,
+      status: 'not_publishable',
+      reason: `${label} connector cannot publish posts yet.`,
+      missing_fields: [],
+    };
+  }
+
+  if (!connectorAppConfigured(connector)) {
+    const missingFields = connectorMissingFields(connector);
+    return {
+      platform_code: platform,
+      status: 'unconfigured',
+      reason: missingFields.length > 0
+        ? `${label} app credentials are incomplete: ${missingFields.join(', ')}.`
+        : `${label} app credentials are not configured.`,
+      missing_fields: missingFields.length > 0 ? missingFields : requiredFieldsByPlatform(platform),
+    };
+  }
+
+  if (!connection) {
+    return {
+      platform_code: platform,
+      status: 'disconnected',
+      reason: `${label} is not connected for this operator.`,
+      missing_fields: [],
+    };
+  }
+
+  if (connection.status !== 'connected') {
+    return {
+      platform_code: platform,
+      status: connection.status,
+      reason: connection.reason || `${label} status: ${connection.status}.`,
+      missing_fields: [],
+    };
+  }
+
+  return null;
+}
+
+export function buildSocialTargetReadinessMessage(details: SocialTargetReadinessDetail[]): string {
+  if (details.length === 0) return 'Selected social targets are not ready.';
+  if (details.length === 1) return details[0].reason;
+  return `Selected social targets are not ready: ${details.map((detail) => detail.reason).join(' ')}`;
 }
 
 function fallbackIdempotencyKey(input: CreateSocialPublishRequestInput, userId?: string | null): string {
@@ -135,17 +269,13 @@ export async function listSocialConnectors(userId?: string | null, operatorId?: 
   const rows = (data ?? []) as SocialConnectorCapability[];
   if (!userId || !operatorId) return rows;
 
-  const [statuses, operatorAppRowsResult, globalAppRowsResult] = await Promise.all([
+  const [connectionStatuses, oauthConfigStatuses, operatorAppRowsResult, globalAppRowsResult] = await Promise.all([
+    getConnectionStatuses(userId, operatorId),
     Promise.all(
-      rows.map(async (row) => {
-        const conn = await getOperatorPlatformConnection(row.code, userId, operatorId);
-        const oauthAppConfigured = await hasOAuthAppConfig(row.code, operatorId);
-        return {
-          code: row.code,
-          connected: Boolean(conn),
-          oauthAppConfigured,
-        };
-      })
+      rows.map(async (row) => ({
+        code: row.code,
+        oauthAppConfigured: await hasOAuthAppConfig(row.code, operatorId),
+      }))
     ),
     supabase
       .from('social_operator_oauth_apps')
@@ -174,8 +304,9 @@ export async function listSocialConnectors(userId?: string | null, operatorId?: 
     globalAppByPlatform.set(String((appRow as any).platform_code ?? '').toLowerCase(), appRow);
   }
 
-  const statusByCode = new Map(statuses.map((s) => [s.code, s.connected]));
-  const oauthConfigByCode = new Map(statuses.map((s) => [s.code, s.oauthAppConfigured]));
+  const typedConnectionStatuses = connectionStatuses as SocialConnectionReadiness[];
+  const connectionByCode = new Map<string, SocialConnectionReadiness>(typedConnectionStatuses.map((s: SocialConnectionReadiness) => [s.platform_code, s]));
+  const oauthConfigByCode = new Map(oauthConfigStatuses.map((s) => [s.code, s.oauthAppConfigured]));
 
   return rows.map((row) => {
     const appRow = mergePlatformConfigRow(
@@ -185,19 +316,55 @@ export async function listSocialConnectors(userId?: string | null, operatorId?: 
     const missingFields = missingConfigFieldsForPlatform(row.code, appRow);
     const appConfigured = missingFields.length === 0;
     const oauthAppConfigured = Boolean(oauthConfigByCode.get(row.code));
+    const connection = connectionByCode.get(row.code);
+    const connected = connection?.status === 'connected';
     return {
       ...row,
-      credentials_active: Boolean(statusByCode.get(row.code)),
+      credentials_active: connected,
       auth_type: oauthAppConfigured ? 'oauth2' : 'none',
-      status: statusByCode.get(row.code) ? 'api_enabled' : 'manual_assisted',
+      status: connected ? 'api_enabled' : 'manual_assisted',
       metadata: {
         ...(row.metadata ?? {}),
         oauth_app_configured: oauthAppConfigured,
         app_configured: appConfigured,
         missing_fields: missingFields,
+        connection_status: connection?.status ?? 'disconnected',
+        connection_reason: connection?.reason ?? null,
       },
     } as SocialConnectorCapability;
   });
+}
+
+async function assertSocialTargetsReady(targets: SocialPlatformCode[], userId?: string | null, operatorId?: string | null): Promise<Map<string, SocialConnectorCapability>> {
+  if (!userId || !operatorId) {
+    const details = targets.map((target) => ({
+      platform_code: target,
+      status: 'disconnected' as const,
+      reason: `${platformLabel(target)} requires user and operator context before scheduling.`,
+      missing_fields: [],
+    }));
+    throw new SocialTargetReadinessError(details);
+  }
+
+  const [connectors, connections] = await Promise.all([
+    listSocialConnectors(userId, operatorId),
+    getConnectionStatuses(userId, operatorId),
+  ]);
+  const connectorMap = new Map<string, SocialConnectorCapability>();
+  for (const connector of connectors) connectorMap.set(connector.code, connector);
+  const connectionMap = new Map<string, SocialConnectionReadiness>();
+  for (const connection of connections) connectionMap.set(connection.platform_code, connection as SocialConnectionReadiness);
+
+  const failures = targets
+    .map((target) => evaluateSocialTargetReadiness({
+      platform: target,
+      connector: connectorMap.get(target) ?? null,
+      connection: connectionMap.get(target) ?? null,
+    }))
+    .filter((detail): detail is SocialTargetReadinessDetail => Boolean(detail));
+
+  if (failures.length > 0) throw new SocialTargetReadinessError(failures);
+  return connectorMap;
 }
 
 async function getConnectorsByCodes(codes: string[]): Promise<Map<string, SocialConnectorCapability>> {
@@ -394,6 +561,7 @@ export async function createSocialPublishJobs(input: CreateSocialPublishRequestI
   const targets = Array.from(new Set((input.targets ?? []).map((t) => String(t).trim().toLowerCase()).filter(Boolean))) as SocialPlatformCode[];
   if (targets.length === 0) throw new Error('At least one target platform is required');
 
+  const connectorMap = await assertSocialTargetsReady(targets, userId, operatorId);
   const request = await createOrGetRequest({ ...input, targets }, userId, operatorId);
 
   const existingJobs = await supabase
@@ -409,10 +577,6 @@ export async function createSocialPublishJobs(input: CreateSocialPublishRequestI
       jobs: existingJobs.data,
     };
   }
-
-  const connectorMap = await getConnectorsByCodes(targets);
-  const missing = targets.filter((t) => !connectorMap.has(t));
-  if (missing.length > 0) throw new Error(`Unknown platform(s): ${missing.join(', ')}`);
 
   const jobs: any[] = [];
   for (const target of targets) {
@@ -504,11 +668,8 @@ export async function updateSocialPublishRequestJobs(params: {
   const locked = jobs.filter((job: any) => !canEditJobStatus(job.status));
   if (locked.length > 0) throw new Error('Published jobs cannot be edited');
 
-  const connectorMap = await getConnectorsByCodes(targets);
-  const missing = targets.filter((t) => !connectorMap.has(t));
-  if (missing.length > 0) throw new Error(`Unknown platform(s): ${missing.join(', ')}`);
-
   const operatorId = params.operatorId ?? request.operator_id ?? null;
+  const connectorMap = await assertSocialTargetsReady(targets, params.userId, operatorId);
   const requestPatch = await supabase
     .from('social_publish_requests')
     .update({

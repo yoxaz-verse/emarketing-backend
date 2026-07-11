@@ -22,6 +22,8 @@ import {
   listAgentContextDocuments,
   listAgentTasks,
   pickNextAgentTask,
+  approveAgentTask,
+  rejectAgentTask,
   submitAgentTaskResult,
 } from '../services/agents/agentTasks.service';
 import {
@@ -166,6 +168,7 @@ router.post('/tasks', requireAuth('viewer'), async (req, res) => {
         metadata: req.body?.metadata,
         source_entity: req.body?.source_entity,
         source_entity_id: req.body?.source_entity_id,
+        approval_required: req.body?.approval_required,
       },
       {
         userId: req.auth?.user_id,
@@ -189,6 +192,7 @@ router.get('/tasks', requireAuth('viewer'), async (req, res) => {
   try {
     const data = await listAgentTasks({
       status: req.query?.status ? String(req.query.status) : undefined,
+      approval_status: req.query?.approval_status ? String(req.query.approval_status) : undefined,
       role_key: req.query?.role_key ? String(req.query.role_key) : undefined,
       task_type: req.query?.task_type ? String(req.query.task_type) : undefined,
       limit: req.query?.limit ? Number(req.query.limit) : undefined,
@@ -236,6 +240,34 @@ router.post('/tasks/:id/result', async (req, res) => {
   } catch (err: any) {
     console.error('[AGENT TASK RESULT ERROR]', err?.message ?? err);
     return res.status(400).json({ ok: false, error: err.message ?? 'Submit result failed' });
+  }
+});
+
+router.post('/tasks/:id/approve', requireAuth('viewer'), async (req, res) => {
+  try {
+    const data = await approveAgentTask(
+      req.params.id,
+      { notes: req.body?.notes ?? req.body?.approval_notes },
+      { userId: req.auth?.user_id, operatorId: req.auth?.operator_id }
+    );
+    res.json({ ok: true, task: data });
+  } catch (err: any) {
+    console.error('[AGENT TASK APPROVE ERROR]', err?.message ?? err);
+    res.status(400).json({ ok: false, error: err.message ?? 'Approve task failed' });
+  }
+});
+
+router.post('/tasks/:id/reject', requireAuth('viewer'), async (req, res) => {
+  try {
+    const data = await rejectAgentTask(
+      req.params.id,
+      { notes: req.body?.notes ?? req.body?.approval_notes },
+      { userId: req.auth?.user_id, operatorId: req.auth?.operator_id }
+    );
+    res.json({ ok: true, task: data });
+  } catch (err: any) {
+    console.error('[AGENT TASK REJECT ERROR]', err?.message ?? err);
+    res.status(400).json({ ok: false, error: err.message ?? 'Reject task failed' });
   }
 });
 
