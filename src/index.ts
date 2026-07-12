@@ -23,12 +23,15 @@ import socialRoutes from './routes/social.routes';
 import socialAuthRoutes from './routes/social.auth.routes';
 import { handlePlatformCallback } from './services/social/socialAuth.service';
 import blogsRoutes from './routes/blogs.routes';
+import eventsRoutes from './routes/events.routes';
 import communitiesRoutes from './routes/communities.routes';
 import inquiriesRoutes from './routes/inquiries.routes';
 import quotesRoutes from './routes/quotes.routes';
+import industryIntelligenceRoutes from './routes/industry-intelligence.routes';
 import { startSequenceRunner } from './worker/sequenceRunner';
 import { startAgentMissionRunner } from './worker/agentMissionRunner';
 import { startSocialPublishRunner } from './worker/socialPublishRunner';
+import { startEventIngestionRunner } from './worker/eventIngestionRunner';
 import { startReplyCaptureWorker } from './worker/replyCapture.worker';
 import {
   getEmailValidationWorkerHealth,
@@ -199,9 +202,11 @@ app.get('/api/auth/:platform/callback', (req, res) => {
 app.use('/social', socialAuthRoutes);
 app.use('/social', socialRoutes);
 app.use('/blogs', blogsRoutes);
+app.use('/events', eventsRoutes);
 app.use('/communities', communitiesRoutes);
 app.use('/inquiries', inquiriesRoutes);
 app.use('/quotes', quotesRoutes);
+app.use('/industry-intelligence', industryIntelligenceRoutes);
 app.use('/', webhookRoutes);
 
 app.get('/ping/routes', (_req, res) => {
@@ -213,6 +218,12 @@ app.get('/ping/routes', (_req, res) => {
       '/inquiries/connector-runs',
       '/inquiries/webhook/:sourceCode',
       '/quotes',
+      '/events',
+      '/events/sources',
+      '/events/ingest/run',
+      '/industry-intelligence/sources',
+      '/industry-intelligence/fetch-runs',
+      '/industry-intelligence/opportunities',
     ],
   });
 });
@@ -425,6 +436,41 @@ async function checkInquirySchemaReadiness() {
   });
 }
 
+async function checkIndustryIntelligenceSchemaReadiness() {
+  const tables = [
+    'industry_intelligence_sources',
+    'industry_intelligence_fetch_runs',
+    'industry_intelligence_opportunities',
+  ];
+  for (const table of tables) {
+    const { error } = await supabase.from(table).select('*').limit(1);
+    if (!error) continue;
+
+    const message = String(error?.message ?? '');
+    const code = String(error?.code ?? '');
+    if (
+      code === '42P01' ||
+      code === 'PGRST205' ||
+      message.toLowerCase().includes('schema cache') ||
+      message.toLowerCase().includes('does not exist')
+    ) {
+      console.error('[INDUSTRY_INTELLIGENCE_SCHEMA_CHECK_FAILED]', {
+        table,
+        code,
+        message,
+        fix: 'Apply 20260712_create_industry_intelligence.sql and restart backend.',
+      });
+      return;
+    }
+    console.warn('[INDUSTRY_INTELLIGENCE_SCHEMA_CHECK_WARN]', { table, code, message });
+  }
+
+  console.info('[INDUSTRY_INTELLIGENCE_SCHEMA_CHECK_OK]', {
+    tables,
+    endpoints: ['/industry-intelligence/sources', '/industry-intelligence/fetch-runs', '/industry-intelligence/opportunities'],
+  });
+}
+
 async function checkReplyTrackingSchemaReadiness() {
   const checks: Array<{
     table: string;
@@ -495,6 +541,7 @@ async function boot() {
   await checkOperatorsSchemaReadiness();
   await checkSocialAppsSchemaReadiness();
   await checkInquirySchemaReadiness();
+  await checkIndustryIntelligenceSchemaReadiness();
   await checkReplyTrackingSchemaReadiness();
 
   app.listen(PORT, '0.0.0.0', () => {
@@ -514,11 +561,22 @@ async function boot() {
       quotesEndpoint: '/quotes',
       note: 'If UI shows Cannot POST /inquiries/fetch-runs, verify this process is the active runtime and restarted after deploy.',
     });
+    console.info('[INDUSTRY_INTELLIGENCE_ROUTE_HEALTH]', {
+      sourcesEndpoint: '/industry-intelligence/sources',
+      fetchRunsEndpoint: '/industry-intelligence/fetch-runs',
+      opportunitiesEndpoint: '/industry-intelligence/opportunities',
+      exportEndpoint: '/industry-intelligence/export',
+    });
     console.info('[SOCIAL_APPS_ROUTE_HEALTH]', {
       getCanonical: '/admin/social-apps/:platform?operator_id=...',
       putCanonical: '/admin/social-apps/:platform',
       getCompatAlias: '/admin/social-apps?platform=...&operator_id=...',
       putCompatAlias: '/admin/social-apps with body.platform',
+    });
+    console.info('[EVENTS_ROUTE_HEALTH]', {
+      eventsEndpoint: '/events',
+      sourcesEndpoint: '/events/sources',
+      ingestEndpoint: '/events/ingest/run',
     });
   });
 }
@@ -544,6 +602,12 @@ try {
   startSocialPublishRunner();
 } catch (error) {
   console.error('[SOCIAL_PUBLISH_RUNNER_BOOT_ERROR]', error);
+}
+
+try {
+  startEventIngestionRunner();
+} catch (error) {
+  console.error('[EVENT_INGESTION_RUNNER_BOOT_ERROR]', error);
 }
 
 try {
