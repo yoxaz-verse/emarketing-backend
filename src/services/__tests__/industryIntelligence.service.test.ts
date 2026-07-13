@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   makeIndustryOpportunityDedupeHash,
+  normalizeIndustrySourceErrorMessage,
   normalizeIndustrySourceUrl,
   parseIndustryHtmlItems,
   parseIndustryRssItems,
@@ -21,6 +22,14 @@ test('industry source URL normalization removes fragments and trailing slashes',
   );
   assert.equal(normalizeIndustrySourceUrl('https://example.com/path/'), 'https://example.com/path');
   assert.equal(normalizeIndustrySourceUrl(''), null);
+});
+
+test('industry source fetch errors are translated into actionable messages', () => {
+  const details = normalizeIndustrySourceErrorMessage('source_fetch_403');
+  assert.equal(details.error_code, 'source_fetch_403');
+  assert.equal(details.http_status, 403);
+  assert.match(details.error_message, /blocked access/i);
+  assert.match(details.suggested_action, /RSS\/API URL/i);
 });
 
 test('industry opportunity dedupe prefers normalized source URL', () => {

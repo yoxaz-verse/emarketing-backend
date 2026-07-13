@@ -2,12 +2,16 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/requireAuth';
 import { requireWriteRole } from '../middleware/security';
 import {
+  createIndustrySource,
   createIndustryFetchRun,
   exportIndustryOpportunities,
   getIndustrySummary,
   listIndustryFetchRuns,
   listIndustryOpportunities,
   listIndustrySources,
+  setIndustrySourceStatus,
+  testIndustrySource,
+  updateIndustrySource,
   updateIndustryOpportunity,
 } from '../services/industry-intelligence/industryIntelligence.service';
 
@@ -25,13 +29,84 @@ router.get('/summary', async (_req, res) => {
   }
 });
 
-router.get('/sources', async (_req, res) => {
+router.get('/sources', async (req, res) => {
   try {
-    const data = await listIndustrySources();
+    const includeInactive = String(req.query?.include_inactive ?? '').toLowerCase() === 'true';
+    const data = await listIndustrySources({ includeInactive });
     res.json(data);
   } catch (err: any) {
     console.error('[INDUSTRY_INTELLIGENCE_SOURCES_ERROR]', err?.message ?? err);
     res.status(500).json({ error: err?.message ?? 'Failed to list industry intelligence sources' });
+  }
+});
+
+router.post('/sources', async (req, res) => {
+  try {
+    const data = await createIndustrySource(req.body ?? {});
+    res.status(201).json(data);
+  } catch (err: any) {
+    console.error('[INDUSTRY_INTELLIGENCE_SOURCE_CREATE_ERROR]', err?.message ?? err);
+    res.status(400).json({ error: err?.message ?? 'Failed to create industry intelligence source' });
+  }
+});
+
+router.patch('/sources/:id', async (req, res) => {
+  try {
+    const id = String(req.params.id ?? '').trim();
+    if (!id) return res.status(400).json({ error: 'id is required' });
+    const data = await updateIndustrySource(id, req.body ?? {});
+    return res.json(data);
+  } catch (err: any) {
+    console.error('[INDUSTRY_INTELLIGENCE_SOURCE_UPDATE_ERROR]', err?.message ?? err);
+    return res.status(400).json({ error: err?.message ?? 'Failed to update industry intelligence source' });
+  }
+});
+
+router.post('/sources/:id/test', async (req, res) => {
+  try {
+    const id = String(req.params.id ?? '').trim();
+    if (!id) return res.status(400).json({ error: 'id is required' });
+    const data = await testIndustrySource(id);
+    return res.json(data);
+  } catch (err: any) {
+    console.error('[INDUSTRY_INTELLIGENCE_SOURCE_TEST_ERROR]', err?.message ?? err);
+    return res.status(400).json({ error: err?.message ?? 'Failed to test industry intelligence source' });
+  }
+});
+
+router.post('/sources/:id/pause', async (req, res) => {
+  try {
+    const id = String(req.params.id ?? '').trim();
+    if (!id) return res.status(400).json({ error: 'id is required' });
+    const data = await setIndustrySourceStatus(id, 'paused');
+    return res.json(data);
+  } catch (err: any) {
+    console.error('[INDUSTRY_INTELLIGENCE_SOURCE_PAUSE_ERROR]', err?.message ?? err);
+    return res.status(400).json({ error: err?.message ?? 'Failed to pause industry intelligence source' });
+  }
+});
+
+router.post('/sources/:id/disable', async (req, res) => {
+  try {
+    const id = String(req.params.id ?? '').trim();
+    if (!id) return res.status(400).json({ error: 'id is required' });
+    const data = await setIndustrySourceStatus(id, 'disabled');
+    return res.json(data);
+  } catch (err: any) {
+    console.error('[INDUSTRY_INTELLIGENCE_SOURCE_DISABLE_ERROR]', err?.message ?? err);
+    return res.status(400).json({ error: err?.message ?? 'Failed to disable industry intelligence source' });
+  }
+});
+
+router.post('/sources/:id/activate', async (req, res) => {
+  try {
+    const id = String(req.params.id ?? '').trim();
+    if (!id) return res.status(400).json({ error: 'id is required' });
+    const data = await setIndustrySourceStatus(id, 'active');
+    return res.json(data);
+  } catch (err: any) {
+    console.error('[INDUSTRY_INTELLIGENCE_SOURCE_ACTIVATE_ERROR]', err?.message ?? err);
+    return res.status(400).json({ error: err?.message ?? 'Failed to activate industry intelligence source' });
   }
 });
 

@@ -20,6 +20,7 @@ import {
   validateWhatsappAccess,
   type OAuthAppConfig,
 } from './platformAuth.client';
+import { socialOAuthSuccessUrl } from './oauthRedirect';
 
 const STATE_TTL_MINUTES = 15;
 
@@ -75,10 +76,6 @@ function normalizeScopes(scopes: string[] | null | undefined, platform: string):
     .map((s) => String(s || '').trim())
     .filter(Boolean);
   return out.length > 0 ? out : (PLATFORM_SCOPES[platform] ?? []);
-}
-
-function socialRedirectBase() {
-  return process.env.SOCIAL_OAUTH_SUCCESS_REDIRECT || 'http://localhost:3000/dashboard/social-connectors';
 }
 
 async function getOperatorOAuthAppRow(platform: string, operatorId?: string | null): Promise<OAuthAppRow | null> {
@@ -312,7 +309,7 @@ export async function startPlatformConnect(platform: string, userId?: string | n
       });
     }
 
-    return `${socialRedirectBase()}?social_connected=${encodeURIComponent(normalized)}`;
+    return socialOAuthSuccessUrl(normalized);
   }
 
   throw new Error(`Unsupported platform connect flow: ${normalized}`);

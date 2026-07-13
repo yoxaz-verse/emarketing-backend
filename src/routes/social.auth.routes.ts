@@ -7,6 +7,7 @@ import {
   handlePlatformCallback,
   startPlatformConnect,
 } from '../services/social/socialAuth.service';
+import { socialOAuthErrorUrl, socialOAuthSuccessUrl } from '../services/social/oauthRedirect';
 
 const router = Router();
 
@@ -21,12 +22,7 @@ function resolveOperatorId(req: any): string | null {
   return req.auth?.operator_id ?? null;
 }
 
-function socialRedirectBase() {
-  return process.env.SOCIAL_OAUTH_SUCCESS_REDIRECT || 'http://localhost:3000/dashboard/social-connectors';
-}
-
 async function handleCallback(req: any, res: any, platformInput?: string) {
-  const frontend = socialRedirectBase();
   try {
     const platform = String(platformInput ?? req.params?.platform ?? req.query?.platform ?? 'linkedin');
     await handlePlatformCallback({
@@ -35,11 +31,10 @@ async function handleCallback(req: any, res: any, platformInput?: string) {
       state: String(req.query?.state ?? ''),
     });
 
-    res.redirect(`${frontend}?social_connected=${encodeURIComponent(platform)}`);
+    res.redirect(socialOAuthSuccessUrl(platform));
   } catch (err: any) {
     console.error('[SOCIAL CONNECT CALLBACK ERROR]', err?.message ?? err);
-    const message = encodeURIComponent(err?.message ?? 'connect_failed');
-    res.redirect(`${frontend}?social_connect_error=${message}`);
+    res.redirect(socialOAuthErrorUrl(err?.message ?? 'connect_failed'));
   }
 }
 
@@ -68,19 +63,16 @@ router.get('/connections', async (req, res) => {
 });
 
 router.get('/connect/:platform', async (req, res) => {
-  const frontend = socialRedirectBase();
   try {
     const operatorId = resolveOperatorId(req);
     if (!operatorId) {
-      const message = encodeURIComponent('operator_id is required for admin action');
-      return res.redirect(`${frontend}?social_connect_error=${message}`);
+      return res.redirect(socialOAuthErrorUrl('operator_id is required for admin action'));
     }
     const authUrl = await startPlatformConnect(req.params.platform, req.auth?.user_id, operatorId);
     res.redirect(authUrl);
   } catch (err: any) {
     console.error('[SOCIAL CONNECT START ERROR]', err?.message ?? err);
-    const message = encodeURIComponent(err?.message ?? 'Failed to start social connect flow');
-    res.redirect(`${frontend}?social_connect_error=${message}`);
+    res.redirect(socialOAuthErrorUrl(err?.message ?? 'Failed to start social connect flow'));
   }
 });
 

@@ -22,6 +22,11 @@ import marketplacesRoutes from './routes/marketplaces.routes';
 import socialRoutes from './routes/social.routes';
 import socialAuthRoutes from './routes/social.auth.routes';
 import { handlePlatformCallback } from './services/social/socialAuth.service';
+import {
+  isSocialOAuthRedirectConfigured,
+  socialOAuthErrorUrl,
+  socialOAuthSuccessUrl,
+} from './services/social/oauthRedirect';
 import blogsRoutes from './routes/blogs.routes';
 import eventsRoutes from './routes/events.routes';
 import communitiesRoutes from './routes/communities.routes';
@@ -77,6 +82,7 @@ const bootFingerprint = {
   schemaGuardVersion,
   authGuardMode: 'role-hierarchy-v1',
   operatorRouteGuard: "requireAuth('viewer')",
+  socialOAuthRedirectConfigured: isSocialOAuthRedirectConfigured(),
 };
 
 console.info('[BACKEND_RUNTIME]', {
@@ -129,15 +135,11 @@ app.get('/ping', (_req, res) => {
     entrypoint,
     startedAt: bootFingerprint.startedAt,
     pid: process.pid,
+    socialOAuthRedirectConfigured: isSocialOAuthRedirectConfigured(),
   });
 });
 
-function socialRedirectBase() {
-  return process.env.SOCIAL_OAUTH_SUCCESS_REDIRECT || 'http://localhost:3000/dashboard/social-connectors';
-}
-
 async function handlePublicSocialOAuthCallback(req: any, res: any, platformInput?: string) {
-  const frontend = socialRedirectBase();
   const platform = String(platformInput ?? req.params?.platform ?? req.query?.platform ?? 'linkedin');
   const providerError =
     String(req.query?.error_message ?? '').trim() ||
@@ -155,11 +157,10 @@ async function handlePublicSocialOAuthCallback(req: any, res: any, platformInput
       state: String(req.query?.state ?? ''),
     });
 
-    res.redirect(`${frontend}?social_connected=${encodeURIComponent(platform)}`);
+    res.redirect(socialOAuthSuccessUrl(platform));
   } catch (err: any) {
     console.error('[SOCIAL CONNECT PUBLIC CALLBACK ERROR]', err?.message ?? err);
-    const message = encodeURIComponent(err?.message ?? 'connect_failed');
-    res.redirect(`${frontend}?social_connect_error=${message}`);
+    res.redirect(socialOAuthErrorUrl(err?.message ?? 'connect_failed'));
   }
 }
 

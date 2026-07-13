@@ -10,7 +10,10 @@ import {
   IndustryOpportunityInput,
   IndustryOpportunityPatch,
   IndustryOpportunityStatus,
+  IndustrySourceErrorDetails,
   IndustrySourceMode,
+  IndustrySourceStatus,
+  IndustrySourceUpsertInput,
 } from './types';
 
 const ALLOWED_CATEGORIES: IndustryOpportunityCategory[] = [
@@ -32,6 +35,9 @@ const ALLOWED_STATUSES: IndustryOpportunityStatus[] = [
   'closed',
 ];
 
+const ALLOWED_SOURCE_MODES: IndustrySourceMode[] = ['manual', 'rss', 'api', 'webhook'];
+const ALLOWED_SOURCE_STATUSES: IndustrySourceStatus[] = ['active', 'paused', 'disabled'];
+
 const FALLBACK_SOURCES: IndustryIntelligenceSource[] = [
   fallbackSource('startupindia', 'Startup India', 'html', 'https://www.startupindia.gov.in/content/sih/en/government-schemes.html', ['startup', 'agri-tech', 'technology'], { priority: 1 }),
   fallbackSource('agri_uddaan', 'Agri Udaan / Agritech Programs', 'html', 'https://aidea.naarm.org.in/', ['agri-tech', 'food-tech'], { priority: 2 }),
@@ -46,6 +52,23 @@ type SourceFetchMode = IndustrySourceMode | 'html';
 type ParsedIndustryItem = IndustryOpportunityInput & {
   confidence?: number;
 };
+
+type SourceFetchResult = {
+  items: ParsedIndustryItem[];
+  parser: SourceFetchMode;
+  source_url: string | null;
+  http_status: number | null;
+};
+
+class IndustrySourceFetchError extends Error {
+  details: IndustrySourceErrorDetails;
+
+  constructor(details: IndustrySourceErrorDetails) {
+    super(details.error_message);
+    this.name = 'IndustrySourceFetchError';
+    this.details = details;
+  }
+}
 
 function fallbackSource(
   code: string,
@@ -95,6 +118,148 @@ function isSchemaMissingError(err: any): boolean {
 function normalizeText(value: unknown): string | null {
   const v = String(value ?? '').trim();
   return v.length > 0 ? v : null;
+}
+
+function normalizeSourceCode(value: unknown): string {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80);
+}
+
+function parseMetadataInput(value: IndustrySourceUpsertInput['metadata']): Record<string, unknown> {
+  if (value === null || value === undefined || value === '') return {};
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+    } catch {
+      throw new Error('metadata must be valid JSON object');
+    }
+    throw new Error('metadata must be a JSON object');
+  }
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  throw new Error('metadata must be a JSON object');
+}
+
+function normalizeSourceTags(value: string[] | string | null | undefined): string[] {
+  if (Array.isArray(value)) return value.map((x) => String(x).trim()).filter(Boolean).slice(0, 20);
+  return String(value ?? '')
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .slice(0, 20);
+}
+
+function normalizeSourceMode(value: unknown, fallback: IndustrySourceMode = 'manual'): IndustrySourceMode {
+  const mode = String(value ?? fallback).trim().toLowerCase() as IndustrySourceMode;
+  if (!ALLOWED_SOURCE_MODES.includes(mode)) throw new Error(`Invalid source mode. Allowed: ${ALLOWED_SOURCE_MODES.join(', ')}`);
+  return mode;
+}
+
+function normalizeSourceStatus(value: unknown, fallback: IndustrySourceStatus = 'active'): IndustrySourceStatus {
+  const status = String(value ?? fallback).trim().toLowerCase() as IndustrySourceStatus;
+  if (!ALLOWED_SOURCE_STATUSES.includes(status)) throw new Error(`Invalid source status. Allowed: ${ALLOWED_SOURCE_STATUSES.join(', ')}`);
+  return status;
+}
+
+function normalizePollingInterval(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return 360;
+  const interval = Number(value);
+  if (!Number.isFinite(interval)) throw new Error('polling_interval_minutes must be a number');
+  return Math.min(10080, Math.max(5, Math.round(interval)));
+}
+
+function validatePublicUrl(raw: unknown, fieldName = 'source_url'): string | null {
+  const value = normalizeText(raw);
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Only HTTP and HTTPS URLs are allowed');
+    if (url.username || url.password) throw new Error('Credentials in source URLs are not allowed');
+    return url.toString();
+  } catch (err: any) {
+    throw new Error(`${fieldName} is invalid: ${err?.message ?? 'Invalid URL'}`);
+  }
+}
+
+function sourceStatusMessage(status: number): Pick<IndustrySourceErrorDetails, 'error_code' | 'error_message' | 'suggested_action'> {
+  if (status === 403) {
+    return {
+      error_code: 'source_fetch_403',
+      error_message: 'Source blocked access to this server.',
+      suggested_action: 'Try an RSS/API URL, manual import, or pause this source.',
+    };
+  }
+  if (status === 401) {
+    return {
+      error_code: 'source_fetch_401',
+      error_message: 'Source requires authentication before it can be fetched.',
+      suggested_action: 'Use an authenticated API/feed URL, manual import, or pause this source.',
+    };
+  }
+  if (status === 404) {
+    return {
+      error_code: 'source_fetch_404',
+      error_message: 'Source URL was not found.',
+      suggested_action: 'Check the website/feed URL or disable this source.',
+    };
+  }
+  if (status === 429) {
+    return {
+      error_code: 'source_fetch_429',
+      error_message: 'Source rate-limited this server.',
+      suggested_action: 'Increase the polling interval or retry later.',
+    };
+  }
+  return {
+    error_code: `source_fetch_${status}`,
+    error_message: `Source returned HTTP ${status}.`,
+    suggested_action: 'Check the source URL, switch to RSS/API if available, or pause this source.',
+  };
+}
+
+function makeSourceErrorDetails(params: {
+  source?: Pick<IndustryIntelligenceSource, 'name' | 'mode'> | null;
+  sourceUrl?: string | null;
+  httpStatus?: number | null;
+  errorCode?: string | null;
+  message?: string | null;
+  suggestedAction?: string | null;
+}): IndustrySourceErrorDetails {
+  const checkedAt = nowIso();
+  if (params.httpStatus) {
+    const statusMessage = sourceStatusMessage(params.httpStatus);
+    return {
+      ...statusMessage,
+      http_status: params.httpStatus,
+      source_url: params.sourceUrl ?? null,
+      source_name: params.source?.name ?? null,
+      mode: params.source?.mode ?? null,
+      checked_at: checkedAt,
+    };
+  }
+
+  const rawMessage = normalizeText(params.message) ?? 'Source fetch failed.';
+  return {
+    error_code: normalizeText(params.errorCode) ?? 'source_fetch_failed',
+    http_status: null,
+    error_message: rawMessage,
+    suggested_action: normalizeText(params.suggestedAction) ?? 'Check the source URL, network availability, or use manual import.',
+    source_url: params.sourceUrl ?? null,
+    source_name: params.source?.name ?? null,
+    mode: params.source?.mode ?? null,
+    checked_at: checkedAt,
+  };
+}
+
+export function normalizeIndustrySourceErrorMessage(value: unknown): IndustrySourceErrorDetails {
+  const raw = normalizeText(value);
+  const match = raw?.match(/^source_fetch_(\d{3})$/);
+  if (match) return makeSourceErrorDetails({ httpStatus: Number(match[1]) });
+  return makeSourceErrorDetails({ message: raw ?? 'Source fetch failed.' });
 }
 
 function decodeXml(input: string): string {
@@ -332,24 +497,47 @@ function parserFor(source: IndustryIntelligenceSource): SourceFetchMode {
   return source.mode === 'rss' ? 'rss' : 'html';
 }
 
-async function fetchSourceItems(source: IndustryIntelligenceSource): Promise<ParsedIndustryItem[]> {
+async function fetchSourceItems(source: IndustryIntelligenceSource): Promise<SourceFetchResult> {
   const sourceUrl = sourceUrlFor(source);
   if (!sourceUrl) throw new Error('source_url or metadata.feed_url is required');
-  const response = await safeFetch(sourceUrl, {
-    headers: {
-      'User-Agent': 'OBAOL Industry Intelligence/1.0',
-      Accept: 'application/rss+xml, application/xml, text/xml, text/html, application/json;q=0.9, */*;q=0.8',
-    },
-  }, { timeoutMs: 20000 });
-  if (!response.ok) throw new Error(`source_fetch_${response.status}`);
+  let response: Response;
+  try {
+    response = await safeFetch(sourceUrl, {
+      headers: {
+        'User-Agent': 'OBAOL Industry Intelligence/1.0',
+        Accept: 'application/rss+xml, application/xml, text/xml, text/html, application/json;q=0.9, */*;q=0.8',
+      },
+    }, { timeoutMs: 20000 });
+  } catch (err: any) {
+    throw new IndustrySourceFetchError(makeSourceErrorDetails({
+      source,
+      sourceUrl,
+      message: err?.message ?? 'Source fetch failed.',
+      errorCode: 'source_fetch_failed',
+    }));
+  }
+  if (!response.ok) {
+    throw new IndustrySourceFetchError(makeSourceErrorDetails({
+      source,
+      sourceUrl,
+      httpStatus: response.status,
+    }));
+  }
   const text = await response.text();
   const parser = parserFor(source);
-  if (parser === 'rss') return parseIndustryRssItems(text, source);
+  if (parser === 'rss') {
+    return {
+      items: parseIndustryRssItems(text, source),
+      parser,
+      source_url: sourceUrl,
+      http_status: response.status,
+    };
+  }
   if (parser === 'api') {
     try {
       const parsed = JSON.parse(text);
       const rows = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.items) ? parsed.items : Array.isArray(parsed?.results) ? parsed.results : [];
-      return rows.map((row: any) => ({
+      const items = rows.map((row: any) => ({
         title: normalizeText(row.title ?? row.name) ?? '',
         summary: normalizeText(row.summary ?? row.description ?? row.excerpt),
         source_name: source.name,
@@ -366,19 +554,31 @@ async function fetchSourceItems(source: IndustryIntelligenceSource): Promise<Par
         raw_payload: row,
         confidence: 0.75,
       })).filter((item: ParsedIndustryItem) => normalizeText(item.title) && isRelevantIndustryItem(item));
+      return { items, parser, source_url: sourceUrl, http_status: response.status };
     } catch {
-      return parseIndustryHtmlItems(text, sourceUrl, source);
+      return {
+        items: parseIndustryHtmlItems(text, sourceUrl, source),
+        parser: 'html',
+        source_url: sourceUrl,
+        http_status: response.status,
+      };
     }
   }
-  return parseIndustryHtmlItems(text, sourceUrl, source);
+  return {
+    items: parseIndustryHtmlItems(text, sourceUrl, source),
+    parser,
+    source_url: sourceUrl,
+    http_status: response.status,
+  };
 }
 
-export async function listIndustrySources(): Promise<IndustryIntelligenceSource[]> {
-  const { data, error } = await supabase
+export async function listIndustrySources(options: { includeInactive?: boolean } = {}): Promise<IndustryIntelligenceSource[]> {
+  let query = supabase
     .from('industry_intelligence_sources')
     .select('*')
-    .eq('status', 'active')
     .order('name', { ascending: true });
+  if (!options.includeInactive) query = query.eq('status', 'active');
+  const { data, error } = await query;
 
   if (error) {
     if (isSchemaMissingError(error)) return FALLBACK_SOURCES;
@@ -388,6 +588,177 @@ export async function listIndustrySources(): Promise<IndustryIntelligenceSource[
   const rows = (data ?? []) as IndustryIntelligenceSource[];
   if (rows.length === 0) return FALLBACK_SOURCES;
   return rows.map((row) => ({ ...row, source_origin: 'db' }));
+}
+
+function buildSourceInsertPayload(payload: IndustrySourceUpsertInput) {
+  const code = normalizeSourceCode(payload.code);
+  const name = normalizeText(payload.name);
+  if (!code) throw new Error('Source code is required');
+  if (!name) throw new Error('Source name is required');
+  const mode = normalizeSourceMode(payload.mode, 'manual');
+  const sourceUrl = validatePublicUrl(payload.source_url);
+  const supportsFetch = payload.supports_fetch ?? (mode === 'rss' || mode === 'api');
+  if (supportsFetch && mode !== 'manual' && mode !== 'webhook' && !sourceUrl) {
+    throw new Error('source_url is required for fetchable RSS/API sources');
+  }
+
+  const metadata = parseMetadataInput(payload.metadata);
+  const metadataWithUrl = sourceUrl && !metadata.source_url && !metadata.feed_url
+    ? { ...metadata, [mode === 'rss' ? 'feed_url' : 'source_url']: sourceUrl, parser: mode === 'rss' ? 'rss' : metadata.parser ?? 'html' }
+    : metadata;
+
+  return {
+    code,
+    name,
+    mode,
+    status: normalizeSourceStatus(payload.status, 'active'),
+    region: normalizeText(payload.region) ?? 'India',
+    sector_focus: normalizeSourceTags(payload.sector_focus),
+    source_url: sourceUrl,
+    supports_fetch: Boolean(supportsFetch),
+    supports_manual: payload.supports_manual ?? true,
+    auth_ready: payload.auth_ready ?? false,
+    health_status: normalizeText(payload.health_status) ?? 'unknown',
+    metadata: metadataWithUrl,
+    polling_interval_minutes: normalizePollingInterval(payload.polling_interval_minutes),
+  };
+}
+
+function buildSourceUpdatePayload(existing: IndustryIntelligenceSource, payload: IndustrySourceUpsertInput) {
+  const mode = payload.mode === undefined ? existing.mode : normalizeSourceMode(payload.mode, existing.mode);
+  const sourceUrl = payload.source_url === undefined ? existing.source_url ?? null : validatePublicUrl(payload.source_url);
+  const nextMetadata = payload.metadata === undefined
+    ? existing.metadata ?? {}
+    : { ...(existing.metadata ?? {}), ...parseMetadataInput(payload.metadata) };
+  const supportsFetch = payload.supports_fetch ?? existing.supports_fetch;
+  if (supportsFetch && mode !== 'manual' && mode !== 'webhook' && !sourceUrl && !nextMetadata.feed_url && !nextMetadata.source_url && !nextMetadata.url) {
+    throw new Error('source_url is required for fetchable RSS/API sources');
+  }
+
+  return {
+    ...(payload.code !== undefined ? { code: normalizeSourceCode(payload.code) } : {}),
+    ...(payload.name !== undefined ? { name: normalizeText(payload.name) } : {}),
+    mode,
+    ...(payload.status !== undefined ? { status: normalizeSourceStatus(payload.status, existing.status as IndustrySourceStatus) } : {}),
+    ...(payload.region !== undefined ? { region: normalizeText(payload.region) } : {}),
+    ...(payload.sector_focus !== undefined ? { sector_focus: normalizeSourceTags(payload.sector_focus) } : {}),
+    ...(payload.source_url !== undefined ? { source_url: sourceUrl } : {}),
+    supports_fetch: Boolean(supportsFetch),
+    ...(payload.supports_manual !== undefined ? { supports_manual: Boolean(payload.supports_manual) } : {}),
+    ...(payload.auth_ready !== undefined ? { auth_ready: Boolean(payload.auth_ready) } : {}),
+    ...(payload.health_status !== undefined ? { health_status: normalizeText(payload.health_status) ?? existing.health_status } : {}),
+    metadata: nextMetadata,
+    ...(payload.polling_interval_minutes !== undefined ? { polling_interval_minutes: normalizePollingInterval(payload.polling_interval_minutes) } : {}),
+    updated_at: nowIso(),
+  };
+}
+
+export async function createIndustrySource(payload: IndustrySourceUpsertInput): Promise<IndustryIntelligenceSource> {
+  const insertPayload = buildSourceInsertPayload(payload);
+  const { data, error } = await supabase
+    .from('industry_intelligence_sources')
+    .insert(insertPayload)
+    .select('*')
+    .single();
+  if (error) {
+    if (error.code === '23505') throw new Error(`Source code "${insertPayload.code}" already exists`);
+    throw error;
+  }
+  return { ...(data as IndustryIntelligenceSource), source_origin: 'db' };
+}
+
+export async function updateIndustrySource(sourceId: string, payload: IndustrySourceUpsertInput): Promise<IndustryIntelligenceSource> {
+  const { data: existing, error: readError } = await supabase
+    .from('industry_intelligence_sources')
+    .select('*')
+    .eq('id', sourceId)
+    .single();
+  if (readError) throw readError;
+
+  const updatePayload = buildSourceUpdatePayload(existing as IndustryIntelligenceSource, payload);
+  if ('code' in updatePayload && !updatePayload.code) throw new Error('Source code is required');
+  if ('name' in updatePayload && !updatePayload.name) throw new Error('Source name is required');
+
+  const { data, error } = await supabase
+    .from('industry_intelligence_sources')
+    .update(updatePayload)
+    .eq('id', sourceId)
+    .select('*')
+    .single();
+  if (error) {
+    if (error.code === '23505') throw new Error(`Source code "${updatePayload.code}" already exists`);
+    throw error;
+  }
+  return { ...(data as IndustryIntelligenceSource), source_origin: 'db' };
+}
+
+export async function setIndustrySourceStatus(sourceId: string, status: IndustrySourceStatus): Promise<IndustryIntelligenceSource> {
+  const nextStatus = normalizeSourceStatus(status);
+  const { data, error } = await supabase
+    .from('industry_intelligence_sources')
+    .update({ status: nextStatus, updated_at: nowIso() })
+    .eq('id', sourceId)
+    .select('*')
+    .single();
+  if (error) throw error;
+  return { ...(data as IndustryIntelligenceSource), source_origin: 'db' };
+}
+
+async function updateSourceHealth(source: IndustryIntelligenceSource | null, details: {
+  ok: boolean;
+  errorDetails?: IndustrySourceErrorDetails | null;
+}) {
+  if (!source?.id || String(source.id).startsWith('fallback-')) return;
+  await supabase
+    .from('industry_intelligence_sources')
+    .update({
+      last_checked_at: nowIso(),
+      last_success_at: details.ok ? nowIso() : source.last_success_at ?? null,
+      last_error: details.errorDetails?.error_message ?? null,
+      health_status: details.ok ? 'healthy' : 'error',
+      updated_at: nowIso(),
+    })
+    .eq('id', source.id);
+}
+
+export async function testIndustrySource(sourceId: string) {
+  const { data: source, error } = await supabase
+    .from('industry_intelligence_sources')
+    .select('*')
+    .eq('id', sourceId)
+    .single();
+  if (error) throw error;
+
+  const started = Date.now();
+  try {
+    const fetched = await fetchSourceItems(source as IndustryIntelligenceSource);
+    await updateSourceHealth(source as IndustryIntelligenceSource, { ok: true });
+    return {
+      ok: true,
+      source_code: source.code,
+      source_url: fetched.source_url,
+      parser: fetched.parser,
+      http_status: fetched.http_status,
+      fetched_count: fetched.items.length,
+      latency_ms: Date.now() - started,
+      error: null,
+    };
+  } catch (err: any) {
+    const details = err instanceof IndustrySourceFetchError
+      ? err.details
+      : makeSourceErrorDetails({ source: source as IndustryIntelligenceSource, sourceUrl: sourceUrlFor(source as IndustryIntelligenceSource), message: err?.message });
+    await updateSourceHealth(source as IndustryIntelligenceSource, { ok: false, errorDetails: details });
+    return {
+      ok: false,
+      source_code: source.code,
+      source_url: details.source_url,
+      parser: parserFor(source as IndustryIntelligenceSource),
+      http_status: details.http_status,
+      fetched_count: 0,
+      latency_ms: Date.now() - started,
+      error: details,
+    };
+  }
 }
 
 async function resolveSourceByCode(code: string): Promise<IndustryIntelligenceSource | null> {
@@ -508,8 +879,37 @@ export async function createIndustryFetchRun(params: {
     const source = (await resolveSourceByCode(sourceCode)) ?? fallbackByCode.get(sourceCode) ?? null;
     const mode = source?.mode ?? 'manual';
     let items = params.itemsBySource?.[sourceCode] ?? [];
+    let parser: SourceFetchMode = source ? parserFor(source) : 'manual';
+    let fetchHttpStatus: number | null = null;
+    let fetchSourceUrl: string | null = source ? sourceUrlFor(source) : null;
+    let sourceFetchError: IndustrySourceErrorDetails | null = null;
+    if (source && source.status !== 'active') {
+      sourceFetchError = makeSourceErrorDetails({
+        source,
+        sourceUrl: fetchSourceUrl,
+        message: `Source is ${source.status}. Activate it before fetching.`,
+        errorCode: 'source_inactive',
+        suggestedAction: 'Reactivate this source before running a fetch.',
+      });
+      items = [];
+    }
     if (!Array.isArray(items) || items.length === 0) {
-      items = source && mode !== 'webhook' && mode !== 'manual' ? await fetchSourceItems(source) : [];
+      if (!sourceFetchError && source && mode !== 'webhook' && mode !== 'manual') {
+        try {
+          const fetched = await fetchSourceItems(source);
+          items = fetched.items;
+          parser = fetched.parser;
+          fetchHttpStatus = fetched.http_status;
+          fetchSourceUrl = fetched.source_url;
+        } catch (err: any) {
+          sourceFetchError = err instanceof IndustrySourceFetchError
+            ? err.details
+            : makeSourceErrorDetails({ source, sourceUrl: fetchSourceUrl, message: err?.message });
+          items = [];
+        }
+      } else {
+        items = [];
+      }
     }
 
     let sourceInserted = 0;
@@ -517,6 +917,13 @@ export async function createIndustryFetchRun(params: {
     let sourceFailed = 0;
     let firstError: string | null = null;
     totalReceived += items.length;
+
+    if (sourceFetchError) {
+      failed += 1;
+      sourceFailed += 1;
+      firstError = sourceFetchError.error_message;
+      errors.push(`${sourceCode}: ${sourceFetchError.error_message}`);
+    }
 
     for (const item of items) {
       try {
@@ -547,27 +954,24 @@ export async function createIndustryFetchRun(params: {
     sourceResults.push({
       source_code: sourceCode,
       mode,
-      status: sourceFailed > 0 ? 'completed_with_errors' : 'completed',
+      status: sourceFetchError ? 'failed' : (sourceFailed > 0 ? 'completed_with_errors' : 'completed'),
       latency_ms: Date.now() - started,
       fetched_count: items.length,
       inserted_count: sourceInserted,
       deduped_count: sourceDeduped,
       failed_count: sourceFailed,
+      parser,
+      source_url: fetchSourceUrl,
+      http_status: sourceFetchError?.http_status ?? fetchHttpStatus,
+      error_code: sourceFetchError?.error_code ?? null,
       error_message: firstError,
+      suggested_action: sourceFetchError?.suggested_action ?? null,
     });
 
-    if (source?.id && !String(source.id).startsWith('fallback-')) {
-      await supabase
-        .from('industry_intelligence_sources')
-        .update({
-          last_checked_at: nowIso(),
-          last_success_at: sourceFailed > 0 ? source.last_success_at ?? null : nowIso(),
-          last_error: firstError,
-          health_status: sourceFailed > 0 ? 'error' : 'healthy',
-          updated_at: nowIso(),
-        })
-        .eq('id', source.id);
-    }
+    await updateSourceHealth(source, {
+      ok: sourceFailed === 0,
+      errorDetails: sourceFetchError ?? (firstError ? makeSourceErrorDetails({ source, sourceUrl: fetchSourceUrl, message: firstError }) : null),
+    });
   }
 
   const { data: updatedRun, error: updateError } = await supabase

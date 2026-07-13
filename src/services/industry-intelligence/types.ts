@@ -17,6 +17,8 @@ export type IndustryOpportunityStatus =
 
 export type IndustrySourceMode = 'manual' | 'rss' | 'api' | 'webhook';
 
+export type IndustrySourceStatus = 'active' | 'paused' | 'disabled';
+
 export type IndustryIntelligenceSource = {
   id: string;
   code: string;
@@ -38,6 +40,33 @@ export type IndustryIntelligenceSource = {
   created_at: string;
   updated_at: string;
   source_origin?: 'db' | 'fallback';
+};
+
+export type IndustrySourceUpsertInput = {
+  code?: string | null;
+  name?: string | null;
+  mode?: string | null;
+  status?: string | null;
+  region?: string | null;
+  sector_focus?: string[] | string | null;
+  source_url?: string | null;
+  supports_fetch?: boolean | null;
+  supports_manual?: boolean | null;
+  auth_ready?: boolean | null;
+  health_status?: string | null;
+  metadata?: Record<string, unknown> | string | null;
+  polling_interval_minutes?: number | string | null;
+};
+
+export type IndustrySourceErrorDetails = {
+  error_code: string;
+  http_status: number | null;
+  error_message: string;
+  suggested_action: string;
+  source_url: string | null;
+  source_name?: string | null;
+  mode?: string | null;
+  checked_at?: string | null;
 };
 
 export type IndustryFetchRun = {
