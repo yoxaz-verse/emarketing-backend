@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import { supabase } from '../supabase';
 import { safeFetch } from '../utils/safeFetch';
 
-export type EventProviderType = 'rss' | 'ics' | 'api';
+export type EventProviderType = 'rss' | 'ics' | 'api' | 'html';
 export type EventScope = 'international' | 'india' | 'kerala' | 'district';
 export type EventStatus = 'discovered' | 'planned' | 'ignored' | 'expired';
 
@@ -15,6 +15,7 @@ type EventSourceInput = {
   state?: string | null;
   district?: string | null;
   categories?: string[];
+  parser_key?: string | null;
   trust_score?: number;
   polling_interval_minutes?: number;
   active?: boolean;
@@ -47,8 +48,34 @@ export type ParsedEventItem = {
 };
 
 const SCOPES: EventScope[] = ['international', 'india', 'kerala', 'district'];
-const PROVIDERS: EventProviderType[] = ['rss', 'ics', 'api'];
+const PROVIDERS: EventProviderType[] = ['rss', 'ics', 'api', 'html'];
 const STATUSES: EventStatus[] = ['discovered', 'planned', 'ignored', 'expired'];
+const MONTHS: Record<string, number> = {
+  jan: 0,
+  january: 0,
+  feb: 1,
+  february: 1,
+  mar: 2,
+  march: 2,
+  apr: 3,
+  april: 3,
+  may: 4,
+  jun: 5,
+  june: 5,
+  jul: 6,
+  july: 6,
+  aug: 7,
+  august: 7,
+  sep: 8,
+  sept: 8,
+  september: 8,
+  oct: 9,
+  october: 9,
+  nov: 10,
+  november: 10,
+  dec: 11,
+  december: 11,
+};
 
 function cleanCdata(input: string): string {
   return decodeXml(input.replace(/<!\[CDATA\[|\]\]>/g, '').trim());
@@ -68,6 +95,11 @@ function stripHtml(input: string): string {
   return decodeXml(input.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim());
 }
 
+function htmlAttr(input: string, name: string): string {
+  const match = input.match(new RegExp(`${name}\\s*=\\s*["']([^"']+)["']`, 'i'));
+  return match?.[1] ? decodeXml(match[1].trim()) : '';
+}
+
 function normalizeString(value: unknown): string {
   return String(value ?? '').trim();
 }
@@ -84,7 +116,7 @@ function normalizeScope(value: unknown): EventScope {
 
 function normalizeProvider(value: unknown): EventProviderType {
   const normalized = normalizeString(value).toLowerCase();
-  if (!PROVIDERS.includes(normalized as EventProviderType)) throw new Error('provider_type must be rss, ics, or api');
+  if (!PROVIDERS.includes(normalized as EventProviderType)) throw new Error('provider_type must be rss, ics, api, or html');
   return normalized as EventProviderType;
 }
 
@@ -106,6 +138,138 @@ function parseOptionalIsoDate(value: unknown): string | null {
   if (!raw) return null;
   const date = new Date(raw);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function absoluteUrl(url: string | null | undefined, baseUrl?: string | null): string | null {
+  const raw = normalizeString(url);
+  if (!raw) return null;
+  try {
+    return new URL(raw, normalizeString(baseUrl) || undefined).toString();
+  } catch {
+    return raw;
+  }
+}
+
+function dateFromParts(year: number, month: number, day: number): string | null {
+  const date = new Date(Date.UTC(year, month, day, 9, 0, 0));
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function parseHumanEventDate(input: string, now = new Date()): string | null {
+  const text = normalizeString(input)
+    .replace(/(\d)(?:st|nd|rd|th)\b/gi, '$1')
+    .replace(/\s+/g, ' ');
+  if (!text) return null;
+
+  const iso = parseOptionalIsoDate(text.match(/\d{4}-\d{2}-\d{2}/)?.[0] ?? text);
+  if (iso) return iso;
+
+  const numeric = text.match(/\b(\d{1,2})[./-](\d{1,2})[./-](20\d{2})\b/);
+  if (numeric) return dateFromParts(Number(numeric[3]), Number(numeric[2]) - 1, Number(numeric[1]));
+
+  const dayMonthYear = text.match(/\b(\d{1,2})(?:\s*(?:-|to|&)\s*\d{1,2})?\s+([A-Za-z]{3,9}),?\s+(20\d{2})\b/i);
+  if (dayMonthYear) {
+    const month = MONTHS[dayMonthYear[2].toLowerCase()];
+    if (month !== undefined) return dateFromParts(Number(dayMonthYear[3]), month, Number(dayMonthYear[1]));
+  }
+
+  const monthDayYear = text.match(/\b([A-Za-z]{3,9})\s+(\d{1,2})(?:\s*(?:-|to|&)\s*\d{1,2})?,?\s+(20\d{2})\b/i);
+  if (monthDayYear) {
+    const month = MONTHS[monthDayYear[1].toLowerCase()];
+    if (month !== undefined) return dateFromParts(Number(monthDayYear[3]), month, Number(monthDayYear[2]));
+  }
+
+  const dayMonthNoYear = text.match(/\b(\d{1,2})(?:\s*(?:-|to|&)\s*\d{1,2})?\s+([A-Za-z]{3,9})\b/i);
+  if (dayMonthNoYear) {
+    const month = MONTHS[dayMonthNoYear[2].toLowerCase()];
+    if (month !== undefined) {
+      const year = month < now.getUTCMonth() - 1 ? now.getUTCFullYear() + 1 : now.getUTCFullYear();
+      return dateFromParts(year, month, Number(dayMonthNoYear[1]));
+    }
+  }
+
+  return null;
+}
+
+function findHtmlDate(blockText: string): string | null {
+  const labelled = blockText.match(/\b(?:date|dates|event date|from)\s*[:\-]\s*([^|•\n]{4,80})/i)?.[1];
+  return parseHumanEventDate(labelled ?? blockText);
+}
+
+function findHtmlLocation(blockText: string): string | null {
+  const match = blockText.match(/\b(?:venue|location|place|city)\s*[:\-]\s*([^|•\n]{2,120})/i);
+  return normalizeNullable(match?.[1]?.replace(/\b(?:date|event date)\b.*$/i, ''));
+}
+
+function findHtmlTitle(block: string, blockText: string): string {
+  const heading = block.match(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/i)?.[1];
+  if (heading) return stripHtml(heading).slice(0, 300);
+  const titleAttr = htmlAttr(block, 'title');
+  if (titleAttr) return titleAttr.slice(0, 300);
+  const lines = blockText.split(/\s{2,}|\n/).map((line) => line.trim()).filter(Boolean);
+  return (lines.find((line) => !/^(date|venue|location|read more)\b/i.test(line)) ?? blockText).slice(0, 300);
+}
+
+function htmlBlocksForParser(html: string, parserKey: string): string[] {
+  const normalizedKey = parserKey.toLowerCase();
+  const classHints: Record<string, string[]> = {
+    tpci_forthcoming_events: ['event', 'post', 'card', 'col'],
+    apeda_trade_fairs: ['event', 'trade', 'fair', 'exhibition', 'row'],
+    spices_board_trade_fairs: ['event', 'trade', 'fair', 'views-row', 'row'],
+    ksum_events: ['event', 'card', 'views-row', 'row'],
+    itpo_aahar_events: ['event', 'fair', 'exhibition', 'aahar', 'row'],
+    cepci_events: ['event', 'fair', 'news', 'row'],
+    ipga_events: ['event', 'conference', 'row', 'post'],
+  };
+  const hints = classHints[normalizedKey] ?? ['event', 'trade', 'fair', 'card', 'row', 'post'];
+  const blocks: string[] = [];
+  const elementRegex = /<(article|li|tr|div|section)\b[^>]*>[\s\S]*?<\/\1>/gi;
+  for (const match of html.matchAll(elementRegex)) {
+    const block = match[0] ?? '';
+    const className = htmlAttr(block.slice(0, 500), 'class').toLowerCase();
+    const text = stripHtml(block);
+    if (text.length < 12) continue;
+    if (hints.some((hint) => className.includes(hint) || text.toLowerCase().includes(hint))) {
+      blocks.push(block);
+    }
+  }
+  return blocks.length > 0 ? blocks : [html];
+}
+
+export function parseHtmlEventItems(html: string, source: { source_url?: string | null; parser_key?: string | null; categories?: string[] | null }): ParsedEventItem[] {
+  const parserKey = normalizeString(source.parser_key) || 'generic_html_events';
+  const items: ParsedEventItem[] = [];
+  const seen = new Set<string>();
+
+  for (const block of htmlBlocksForParser(html, parserKey)) {
+    const blockText = stripHtml(block);
+    const startsAt = findHtmlDate(blockText);
+    if (!startsAt) continue;
+
+    const href = htmlAttr(block.match(/<a\b[\s\S]*?<\/a>/i)?.[0] ?? block, 'href');
+    const sourceUrl = absoluteUrl(href, source.source_url) ?? normalizeNullable(source.source_url);
+    const title = findHtmlTitle(block, blockText);
+    if (!title || /^\d{1,2}\s+[A-Za-z]{3,9}/.test(title)) continue;
+
+    const key = `${title.toLowerCase()}|${startsAt}|${sourceUrl ?? ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    items.push({
+      external_id: sourceUrl ?? key,
+      title,
+      description: blockText.slice(0, 5000) || null,
+      starts_at: startsAt,
+      ends_at: null,
+      timezone: 'Asia/Kolkata',
+      location: findHtmlLocation(blockText),
+      category: Array.isArray(source.categories) ? source.categories[0] ?? null : null,
+      source_url: sourceUrl,
+      source_snapshot: { parser: 'html', parser_key: parserKey },
+    });
+  }
+
+  return items;
 }
 
 function xmlTag(input: string, names: string[]): string {
@@ -382,6 +546,7 @@ export async function createEventSource(input: EventSourceInput, userId?: string
     state: normalizeNullable(input.state),
     district: normalizeNullable(input.district),
     categories: normalizeCategories(input.categories),
+    parser_key: normalizeNullable(input.parser_key),
     trust_score: Math.max(0, Math.min(1, Number(input.trust_score ?? 0.7) || 0.7)),
     polling_interval_minutes: Math.max(15, Math.trunc(Number(input.polling_interval_minutes ?? 360) || 360)),
     active: input.active !== false,
@@ -446,6 +611,7 @@ async function fetchSourceItems(source: any): Promise<ParsedEventItem[]> {
   const text = await response.text();
   if (source.provider_type === 'api') return parseApiEventItems(text);
   if (source.provider_type === 'ics') return parseIcsEventItems(text);
+  if (source.provider_type === 'html') return parseHtmlEventItems(text, source);
   return parseRssEventItems(text);
 }
 

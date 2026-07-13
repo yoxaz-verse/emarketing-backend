@@ -9,6 +9,7 @@ import {
   startCampaign,
   pauseCampaign
 } from '../services/campaign.domain';
+import { getCampaignDeletePreview } from '../services/campaignDelete.service';
 import { getCampaignRepliesFeed, getCampaignReplyOpenAnalytics } from '../services/emailTracking.service.js';
 import { getSendingLimitsConfig } from '../services/sendingLimitsConfig.service';
 import { normalizePagination } from '../utils/pagination';
@@ -76,6 +77,19 @@ function createHttpError(message: string, statusCode: number) {
   error.statusCode = statusCode;
   return error;
 }
+
+router.get('/:id/delete-preview', async (req, res) => {
+  try {
+    const campaignId = String(req.params.id ?? '').trim();
+    await assertCampaignAccess(req, campaignId);
+    const preview = await getCampaignDeletePreview(campaignId);
+    res.json(preview);
+  } catch (error: any) {
+    res.status(resolveStatusCode(error)).json({
+      error: error?.message ?? 'Failed to load campaign delete preview',
+    });
+  }
+});
 
 async function loadCampaignStatus(campaignId: string) {
   const { data, error } = await supabase

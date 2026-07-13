@@ -1,5 +1,6 @@
 import { AllowedTable } from '../../config/allowedTables';
 import { supabase } from '../../supabase';
+import { deleteCampaignDependents } from '../campaignDelete.service';
 import { handleUserBeforeDelete } from './userLifeCycle';
 import { handleVoiceAgentsBeforeDelete } from './voiceAgentLifeCycle';
 
@@ -20,31 +21,7 @@ export async function runBeforeDelete(
     await handleUserBeforeDelete(id);
   }
   if (table === 'campaigns') {
-    const { data: campaign, error } = await supabase
-      .from('campaigns')
-      .select('id,status')
-      .eq('id', id)
-      .maybeSingle();
-
-    if (error) throw error;
-    if (campaign && String(campaign.status).toLowerCase() === 'running') {
-      throwHttpError('Cannot delete a running campaign. Pause it first.', 409);
-    }
-    // Clean dependent rows for any non-running campaign state so delete does not fail
-    // because of residual campaign_leads / campaign_inboxes references.
-    if (campaign) {
-      const { error: deleteCampaignLeadsError } = await supabase
-        .from('campaign_leads')
-        .delete()
-        .eq('campaign_id', id);
-      if (deleteCampaignLeadsError) throw deleteCampaignLeadsError;
-
-      const { error: deleteCampaignInboxesError } = await supabase
-        .from('campaign_inboxes')
-        .delete()
-        .eq('campaign_id', id);
-      if (deleteCampaignInboxesError) throw deleteCampaignInboxesError;
-    }
+    await deleteCampaignDependents(id);
   }
   if (table === 'sequences') {
     const { data: linkedCampaigns, error } = await supabase

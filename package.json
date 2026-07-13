@@ -7,7 +7,7 @@
     "start": "tsx src/index.ts",
     "build": "tsc",
     "start:node": "npm run build && node dist/index.js",
-    "test": "npm run build && node --test dist/**/*.test.js",
+    "test": "npm run build && find dist -name '*.test.js' -print0 | xargs -0 node --test",
     "check": "npm run test"
   },
   "dependencies": {

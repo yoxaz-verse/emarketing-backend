@@ -81,6 +81,7 @@ router.post('/sources', requireAuth('user'), async (req, res) => {
         state: req.body?.state,
         district: req.body?.district,
         categories: req.body?.categories,
+        parser_key: req.body?.parser_key,
         trust_score: req.body?.trust_score,
         polling_interval_minutes: req.body?.polling_interval_minutes,
         active: req.body?.active,
