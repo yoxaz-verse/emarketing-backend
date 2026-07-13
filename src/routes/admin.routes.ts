@@ -113,6 +113,7 @@ router.get('/operators', async (req, res) => {
 });
 
 const SOCIAL_PLATFORMS: SocialPlatform[] = ['linkedin', 'meta', 'reddit', 'telegram', 'whatsapp'];
+export const SOCIAL_APP_SECRET_PLACEHOLDER = '***';
 
 function isSocialPlatform(value: string): value is SocialPlatform {
   return SOCIAL_PLATFORMS.includes(value as SocialPlatform);
@@ -190,6 +191,32 @@ function extractConfig(platform: SocialPlatform, input: Record<string, unknown>)
   };
 }
 
+export function isSocialAppSecretPlaceholder(value: unknown): boolean {
+  return String(value ?? '').trim() === SOCIAL_APP_SECRET_PLACEHOLDER;
+}
+
+export function buildSocialAppUpsertPayload(params: {
+  platform: SocialPlatform;
+  extracted: ReturnType<typeof extractConfig>;
+  existingSecretEncrypted?: string | null;
+}) {
+  const existingSecretEncrypted = String(params.existingSecretEncrypted ?? '').trim();
+  const shouldPreserveSecret = isSocialAppSecretPlaceholder(params.extracted.secret) && Boolean(existingSecretEncrypted);
+
+  return {
+    platform_code: params.platform,
+    client_id: params.extracted.client_id || null,
+    client_secret_encrypted: shouldPreserveSecret
+      ? existingSecretEncrypted
+      : encryptSocialSecret(params.extracted.secret),
+    redirect_uri: params.extracted.redirect_uri || null,
+    scopes: params.extracted.scopes,
+    metadata: params.extracted.metadata ?? {},
+    active: true,
+    updated_at: new Date().toISOString(),
+  };
+}
+
 function missingRequired(platform: SocialPlatform, source: Record<string, string>): string[] {
   return requiredFieldsByPlatform(platform).filter((key) => !String(source[key] ?? '').trim());
 }
@@ -249,6 +276,23 @@ function isSocialAppSchemaMismatch(error: any): boolean {
 
 const SOCIAL_APP_SCHEMA_ERROR =
   'Social app OAuth schema is not ready. Apply Backend/sql/20260618_fix_social_app_oauth_schema.sql and restart backend.';
+
+async function getExistingSocialAppSecretEncrypted(platform: SocialPlatform, operatorId: string, isGlobalScope: boolean): Promise<string> {
+  const query = isGlobalScope
+    ? supabase
+      .from('social_global_oauth_apps')
+      .select('client_secret_encrypted')
+      .eq('platform_code', platform)
+    : supabase
+      .from('social_operator_oauth_apps')
+      .select('client_secret_encrypted')
+      .eq('operator_id', operatorId)
+      .eq('platform_code', platform);
+
+  const { data, error } = await query.maybeSingle();
+  if (error && error.code !== 'PGRST116') throw error;
+  return String((data as any)?.client_secret_encrypted ?? '').trim();
+}
 
 async function handleGetSocialApp(req: any, res: any, platformRaw: string, operatorIdRaw: string, scopeRaw?: string) {
   try {
@@ -339,27 +383,30 @@ async function handlePutSocialApp(req: any, res: any, platformRaw: string, body:
     if (!isGlobalScope && !operatorId) return res.status(400).json({ error: 'operator_id is required' });
 
     const extracted = extractConfig(platform, (body ?? {}) as Record<string, unknown>);
+    const existingSecretEncrypted = isSocialAppSecretPlaceholder(extracted.secret)
+      ? await getExistingSocialAppSecretEncrypted(platform, operatorId, isGlobalScope)
+      : '';
     const checkMap: Record<string, string> = {};
     if (platform === 'linkedin') {
       checkMap.client_id = extracted.client_id;
-      checkMap.client_secret = extracted.secret;
+      checkMap.client_secret = isSocialAppSecretPlaceholder(extracted.secret) ? existingSecretEncrypted : extracted.secret;
       checkMap.redirect_uri = extracted.redirect_uri;
     } else if (platform === 'meta') {
       checkMap.app_id = extracted.client_id;
-      checkMap.app_secret = extracted.secret;
+      checkMap.app_secret = isSocialAppSecretPlaceholder(extracted.secret) ? existingSecretEncrypted : extracted.secret;
       checkMap.redirect_uri = extracted.redirect_uri;
     } else if (platform === 'reddit') {
       checkMap.client_id = extracted.client_id;
-      checkMap.client_secret = extracted.secret;
+      checkMap.client_secret = isSocialAppSecretPlaceholder(extracted.secret) ? existingSecretEncrypted : extracted.secret;
       checkMap.redirect_uri = extracted.redirect_uri;
       checkMap.user_agent = String((extracted.metadata as any).user_agent ?? '');
     } else if (platform === 'telegram') {
-      checkMap.bot_token = extracted.secret;
+      checkMap.bot_token = isSocialAppSecretPlaceholder(extracted.secret) ? existingSecretEncrypted : extracted.secret;
       checkMap.chat_id = String((extracted.metadata as any).chat_id ?? '');
     } else {
       checkMap.phone_number_id = String((extracted.metadata as any).phone_number_id ?? '');
       checkMap.business_account_id = String((extracted.metadata as any).business_account_id ?? '');
-      checkMap.access_token = extracted.secret;
+      checkMap.access_token = isSocialAppSecretPlaceholder(extracted.secret) ? existingSecretEncrypted : extracted.secret;
     }
 
     const requiredMissing = missingRequired(platform, checkMap);
@@ -367,16 +414,7 @@ async function handlePutSocialApp(req: any, res: any, platformRaw: string, body:
       return res.status(400).json({ error: `Missing required fields: ${requiredMissing.join(', ')}` });
     }
 
-    const payload = {
-      platform_code: platform,
-      client_id: extracted.client_id || null,
-      client_secret_encrypted: encryptSocialSecret(extracted.secret),
-      redirect_uri: extracted.redirect_uri || null,
-      scopes: extracted.scopes,
-      metadata: extracted.metadata ?? {},
-      active: true,
-      updated_at: new Date().toISOString(),
-    };
+    const payload = buildSocialAppUpsertPayload({ platform, extracted, existingSecretEncrypted });
 
     const { error } = isGlobalScope
       ? await supabase

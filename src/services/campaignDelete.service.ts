@@ -11,6 +11,7 @@ export type CampaignDeletePreview = {
     campaign_voice_agents: number;
     email_logs: number;
     email_tracking_events: number;
+    system_events: number;
   };
   preserves: string[];
 };
@@ -30,6 +31,17 @@ async function countRows(table: string, column: string, value: string): Promise<
     .from(table)
     .select('id', { count: 'exact', head: true })
     .eq(column, value);
+
+  if (error) throw error;
+  return Number(count ?? 0);
+}
+
+async function countCampaignSystemEvents(campaignId: string): Promise<number> {
+  const { count, error } = await supabase
+    .from('system_events')
+    .select('id', { count: 'exact', head: true })
+    .eq('entity_id', campaignId)
+    .in('entity', ['campaign', 'campaigns']);
 
   if (error) throw error;
   return Number(count ?? 0);
@@ -61,12 +73,14 @@ export async function getCampaignDeletePreview(campaignId: string): Promise<Camp
     campaignVoiceAgents,
     emailLogs,
     emailTrackingEvents,
+    systemEvents,
   ] = await Promise.all([
     countRows('campaign_leads', 'campaign_id', campaignId),
     countRows('campaign_inboxes', 'campaign_id', campaignId),
     countRows('campaign_voice_agents', 'campaign_id', campaignId),
     countRows('email_logs', 'campaign_id', campaignId),
     countRows('email_tracking_events', 'campaign_id', campaignId),
+    countCampaignSystemEvents(campaignId),
   ]);
 
   const canDelete = !isRunningStatus((campaign as any).status);
@@ -86,6 +100,7 @@ export async function getCampaignDeletePreview(campaignId: string): Promise<Camp
       campaign_voice_agents: campaignVoiceAgents,
       email_logs: emailLogs,
       email_tracking_events: emailTrackingEvents,
+      system_events: systemEvents,
     },
     preserves: ['leads', 'inboxes', 'voice_agents', 'sequences', 'operators', 'users'],
   };
@@ -107,6 +122,16 @@ async function deleteWhereCampaignLeadIds(table: string, campaignLeadIds: string
     .from(table)
     .delete()
     .in('campaign_lead_id', campaignLeadIds);
+
+  if (error) throw error;
+}
+
+async function deleteCampaignSystemEvents(campaignId: string) {
+  const { error } = await supabase
+    .from('system_events')
+    .delete()
+    .eq('entity_id', campaignId)
+    .in('entity', ['campaign', 'campaigns']);
 
   if (error) throw error;
 }
@@ -133,4 +158,5 @@ export async function deleteCampaignDependents(campaignId: string) {
   await deleteWhereCampaignId('campaign_voice_agents', campaignId);
   await deleteWhereCampaignId('campaign_inboxes', campaignId);
   await deleteWhereCampaignId('campaign_leads', campaignId);
+  await deleteCampaignSystemEvents(campaignId);
 }

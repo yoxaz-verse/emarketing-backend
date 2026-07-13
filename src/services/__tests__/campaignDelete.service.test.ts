@@ -28,7 +28,7 @@ function installSupabaseMock(t: test.TestContext, state: MockState) {
       eq(column: string, value: unknown) {
         state.calls.push({ table, operation: this._operation, column, value });
 
-        if (table === 'campaigns') {
+        if (table === 'campaigns' || table === 'system_events') {
           return this;
         }
 
@@ -45,6 +45,9 @@ function installSupabaseMock(t: test.TestContext, state: MockState) {
       },
       in(column: string, value: unknown) {
         state.calls.push({ table, operation: this._operation, column, value });
+        if (table === 'system_events' && this._operation === 'select') {
+          return Promise.resolve({ count: state.counts?.[table] ?? 0, error: null });
+        }
         return Promise.resolve({ error: null });
       },
       maybeSingle() {
@@ -65,6 +68,7 @@ test('campaign delete preview returns counts for a paused campaign', async (t) =
       campaign_voice_agents: 1,
       email_logs: 30,
       email_tracking_events: 44,
+      system_events: 5,
     },
     calls: [],
   };
@@ -82,6 +86,7 @@ test('campaign delete preview returns counts for a paused campaign', async (t) =
     campaign_voice_agents: 1,
     email_logs: 30,
     email_tracking_events: 44,
+    system_events: 5,
   });
 });
 
@@ -131,6 +136,7 @@ test('campaign dependent delete removes tracking and logs before campaign links'
     'campaign_voice_agents.campaign_id',
     'campaign_inboxes.campaign_id',
     'campaign_leads.campaign_id',
+    'system_events.entity_id',
   ]);
   assert.equal(deletes.some((item) => item.startsWith('leads.')), false);
   assert.equal(deletes.some((item) => item.startsWith('inboxes.')), false);
