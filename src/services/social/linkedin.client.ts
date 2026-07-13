@@ -25,6 +25,15 @@ export type LinkedInOAuthAppConfig = {
   scopes: string[];
 };
 
+export type LinkedInTokenResponse = {
+  access_token: string;
+  expires_in: number;
+  refresh_token?: string;
+  refresh_token_expires_in?: number;
+  id_token?: string;
+  scope?: string;
+};
+
 function isExpired(expiresAt?: string | null): boolean {
   if (!expiresAt) return false;
   return new Date(expiresAt).getTime() <= Date.now() + 60_000;
@@ -108,7 +117,7 @@ export async function publishLinkedInTextLink(conn: LinkedInConnection, input: P
 }
 
 export function linkedInAuthorizeUrl(state: string, config: LinkedInOAuthAppConfig): string {
-  const scope = (config.scopes ?? []).join(' ').trim() || 'w_member_social r_liteprofile';
+  const scope = (config.scopes ?? []).join(' ').trim() || 'w_member_social openid profile';
 
   const params = new URLSearchParams({
     response_type: 'code',
@@ -121,12 +130,7 @@ export function linkedInAuthorizeUrl(state: string, config: LinkedInOAuthAppConf
   return `https://www.linkedin.com/oauth/v2/authorization?${params.toString()}`;
 }
 
-export async function exchangeLinkedInCode(code: string, config: LinkedInOAuthAppConfig): Promise<{
-  access_token: string;
-  expires_in: number;
-  refresh_token?: string;
-  refresh_token_expires_in?: number;
-}> {
+export async function exchangeLinkedInCode(code: string, config: LinkedInOAuthAppConfig): Promise<LinkedInTokenResponse> {
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
     code,
@@ -151,7 +155,36 @@ export async function exchangeLinkedInCode(code: string, config: LinkedInOAuthAp
   return res.json();
 }
 
-export async function fetchLinkedInActorUrn(accessToken: string): Promise<string> {
+function subjectUrnFromIdToken(idToken?: string | null): string | null {
+  const token = String(idToken ?? '').trim();
+  const payload = token.split('.')[1];
+  if (!payload) return null;
+
+  try {
+    const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    const sub = String(parsed?.sub ?? '').trim();
+    return sub ? `urn:li:person:${sub}` : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchLinkedInOidcActorUrn(accessToken: string): Promise<string | null> {
+  const res = await fetch('https://api.linkedin.com/v2/userinfo', {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (!res.ok) return null;
+
+  const data = await res.json();
+  const sub = String(data?.sub ?? '').trim();
+  return sub ? `urn:li:person:${sub}` : null;
+}
+
+async function fetchLinkedInLegacyActorUrn(accessToken: string): Promise<string> {
   const res = await fetch('https://api.linkedin.com/v2/me', {
     method: 'GET',
     headers: {
@@ -169,4 +202,14 @@ export async function fetchLinkedInActorUrn(accessToken: string): Promise<string
   const id = String(data?.id ?? '').trim();
   if (!id) throw new Error('LinkedIn profile id missing');
   return `urn:li:person:${id}`;
+}
+
+export async function fetchLinkedInActorUrn(accessToken: string, idToken?: string | null): Promise<string> {
+  const fromIdToken = subjectUrnFromIdToken(idToken);
+  if (fromIdToken) return fromIdToken;
+
+  const fromUserInfo = await fetchLinkedInOidcActorUrn(accessToken);
+  if (fromUserInfo) return fromUserInfo;
+
+  return fetchLinkedInLegacyActorUrn(accessToken);
 }

@@ -137,7 +137,7 @@ function extractConfig(platform: SocialPlatform, input: Record<string, unknown>)
       client_id: trim(input.client_id),
       secret: trim(input.client_secret),
       redirect_uri: trim(input.redirect_uri),
-      scopes: scopes.length > 0 ? scopes : ['w_member_social', 'r_liteprofile'],
+      scopes: scopes.length > 0 ? scopes : ['w_member_social', 'openid', 'profile'],
       metadata: {},
     };
   }

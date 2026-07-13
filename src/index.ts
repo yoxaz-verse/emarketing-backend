@@ -23,6 +23,7 @@ import socialRoutes from './routes/social.routes';
 import socialAuthRoutes from './routes/social.auth.routes';
 import { handlePlatformCallback } from './services/social/socialAuth.service';
 import {
+  classifySocialOAuthError,
   isSocialOAuthRedirectConfigured,
   socialOAuthErrorUrl,
   socialOAuthSuccessUrl,
@@ -159,8 +160,9 @@ async function handlePublicSocialOAuthCallback(req: any, res: any, platformInput
 
     res.redirect(socialOAuthSuccessUrl(platform));
   } catch (err: any) {
-    console.error('[SOCIAL CONNECT PUBLIC CALLBACK ERROR]', err?.message ?? err);
-    res.redirect(socialOAuthErrorUrl(err?.message ?? 'connect_failed'));
+    const message = err?.message ?? 'connect_failed';
+    console.error('[SOCIAL CONNECT PUBLIC CALLBACK ERROR]', message);
+    res.redirect(socialOAuthErrorUrl(message, process.env, classifySocialOAuthError(message)));
   }
 }
 

@@ -7,7 +7,11 @@ import {
   handlePlatformCallback,
   startPlatformConnect,
 } from '../services/social/socialAuth.service';
-import { socialOAuthErrorUrl, socialOAuthSuccessUrl } from '../services/social/oauthRedirect';
+import {
+  classifySocialOAuthError,
+  socialOAuthErrorUrl,
+  socialOAuthSuccessUrl,
+} from '../services/social/oauthRedirect';
 
 const router = Router();
 
@@ -33,8 +37,9 @@ async function handleCallback(req: any, res: any, platformInput?: string) {
 
     res.redirect(socialOAuthSuccessUrl(platform));
   } catch (err: any) {
-    console.error('[SOCIAL CONNECT CALLBACK ERROR]', err?.message ?? err);
-    res.redirect(socialOAuthErrorUrl(err?.message ?? 'connect_failed'));
+    const message = err?.message ?? 'connect_failed';
+    console.error('[SOCIAL CONNECT CALLBACK ERROR]', message);
+    res.redirect(socialOAuthErrorUrl(message, process.env, classifySocialOAuthError(message)));
   }
 }
 
@@ -71,8 +76,9 @@ router.get('/connect/:platform', async (req, res) => {
     const authUrl = await startPlatformConnect(req.params.platform, req.auth?.user_id, operatorId);
     res.redirect(authUrl);
   } catch (err: any) {
-    console.error('[SOCIAL CONNECT START ERROR]', err?.message ?? err);
-    res.redirect(socialOAuthErrorUrl(err?.message ?? 'Failed to start social connect flow'));
+    const message = err?.message ?? 'Failed to start social connect flow';
+    console.error('[SOCIAL CONNECT START ERROR]', message);
+    res.redirect(socialOAuthErrorUrl(message, process.env, classifySocialOAuthError(message)));
   }
 });
 

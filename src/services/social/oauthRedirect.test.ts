@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  classifySocialOAuthError,
   isSocialOAuthRedirectConfigured,
   socialOAuthErrorUrl,
   socialOAuthRedirectBase,
@@ -45,5 +46,27 @@ test('social OAuth success and error URLs preserve existing query parameters', (
   assert.equal(
     socialOAuthErrorUrl('LinkedIn profile fetch failed', env),
     'https://emarketing.obaol.com/dashboard/social-connectors?social_connect_error=LinkedIn%20profile%20fetch%20failed'
+  );
+});
+
+test('social OAuth error URL can include a stable error code', () => {
+  const env = {
+    SOCIAL_OAUTH_SUCCESS_REDIRECT: 'https://emarketing.obaol.com/dashboard/social-connectors',
+  } as NodeJS.ProcessEnv;
+
+  assert.equal(
+    socialOAuthErrorUrl('LinkedIn profile fetch failed', env, 'provider_permission_denied'),
+    'https://emarketing.obaol.com/dashboard/social-connectors?social_connect_error=LinkedIn%20profile%20fetch%20failed&social_connect_error_code=provider_permission_denied'
+  );
+});
+
+test('social OAuth classifier treats LinkedIn 403 access denied as provider permission failure', () => {
+  assert.equal(
+    classifySocialOAuthError('LinkedIn profile fetch failed (403): {"code":"ACCESS_DENIED","message":"Not enough permissions"}'),
+    'provider_permission_denied'
+  );
+  assert.notEqual(
+    classifySocialOAuthError('LinkedIn profile fetch failed (403): {"code":"ACCESS_DENIED","message":"Not enough permissions"}'),
+    'backend_unavailable'
   );
 });

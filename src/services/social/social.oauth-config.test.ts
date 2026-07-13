@@ -20,6 +20,19 @@ test('LinkedIn authorize URL includes the configured redirect URI exactly', asyn
   assert.equal(parsed.searchParams.get('redirect_uri'), redirectUri);
 });
 
+test('LinkedIn authorize URL defaults to OIDC profile scopes for new configs', async () => {
+  const { linkedInAuthorizeUrl } = await import('./linkedin.client.js');
+  const authUrl = linkedInAuthorizeUrl('state-value', {
+    clientId: 'linkedin-client-id',
+    clientSecret: 'linkedin-client-secret',
+    redirectUri: 'https://emarketing-backend.infra.obaol.com/social/oauth2-credential/callback',
+    scopes: [],
+  });
+
+  const parsed = new URL(authUrl);
+  assert.equal(parsed.searchParams.get('scope'), 'w_member_social openid profile');
+});
+
 test('social app upsert payload preserves existing secret when form submits placeholder', async () => {
   const { buildSocialAppUpsertPayload, SOCIAL_APP_SECRET_PLACEHOLDER } = await import('../../routes/admin.routes.js');
   const existingSecretEncrypted = 'already-encrypted-client-secret';
@@ -46,12 +59,12 @@ test('social app upsert payload stores configured LinkedIn scopes', async () => 
       client_id: 'linkedin-client-id',
       secret: 'linkedin-client-secret',
       redirect_uri: 'https://emarketing-backend.infra.obaol.com/social/oauth2-credential/callback',
-      scopes: ['w_member_social', 'r_liteprofile'],
+      scopes: ['w_member_social', 'openid', 'profile'],
       metadata: {},
     },
   });
 
-  assert.deepEqual(payload.scopes, ['w_member_social', 'r_liteprofile']);
+  assert.deepEqual(payload.scopes, ['w_member_social', 'openid', 'profile']);
 });
 
 test('social app read fields return LinkedIn scopes and keep client secret masked', async () => {
@@ -60,11 +73,11 @@ test('social app read fields return LinkedIn scopes and keep client secret maske
     client_id: 'linkedin-client-id',
     client_secret_encrypted: 'encrypted-secret-value',
     redirect_uri: 'https://emarketing-backend.infra.obaol.com/social/oauth2-credential/callback',
-    scopes: ['w_member_social', 'r_liteprofile'],
+    scopes: ['w_member_social', 'openid', 'profile'],
     metadata: {},
   }, true);
 
   assert.equal(fields.client_secret, SOCIAL_APP_SECRET_PLACEHOLDER);
   assert.notEqual(fields.client_secret, 'encrypted-secret-value');
-  assert.equal(fields.scopes, 'w_member_social,r_liteprofile');
+  assert.equal(fields.scopes, 'w_member_social,openid,profile');
 });
