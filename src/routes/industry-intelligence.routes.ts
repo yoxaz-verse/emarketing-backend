@@ -4,6 +4,7 @@ import { requireWriteRole } from '../middleware/security';
 import {
   createIndustryFetchRun,
   exportIndustryOpportunities,
+  getIndustrySummary,
   listIndustryFetchRuns,
   listIndustryOpportunities,
   listIndustrySources,
@@ -13,6 +14,16 @@ import {
 const router = Router();
 router.use(requireAuth('viewer'));
 router.use(requireWriteRole);
+
+router.get('/summary', async (_req, res) => {
+  try {
+    const data = await getIndustrySummary();
+    res.json(data);
+  } catch (err: any) {
+    console.error('[INDUSTRY_INTELLIGENCE_SUMMARY_ERROR]', err?.message ?? err);
+    res.status(500).json({ error: err?.message ?? 'Failed to load industry intelligence summary' });
+  }
+});
 
 router.get('/sources', async (_req, res) => {
   try {

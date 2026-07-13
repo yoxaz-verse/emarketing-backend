@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import XLSX from 'xlsx';
 import { supabase } from '../../supabase';
+import { safeFetch } from '../../utils/safeFetch';
 import {
   IndustryFetchRun,
   IndustryIntelligenceSource,
@@ -32,18 +33,25 @@ const ALLOWED_STATUSES: IndustryOpportunityStatus[] = [
 ];
 
 const FALLBACK_SOURCES: IndustryIntelligenceSource[] = [
-  fallbackSource('startupindia', 'Startup India', 'api', ['startup', 'agri-tech', 'technology'], { priority: 1 }),
-  fallbackSource('agri_uddaan', 'Agri Udaan / Agritech Programs', 'manual', ['agri-tech', 'food-tech'], { priority: 2 }),
-  fallbackSource('nasscom', 'NASSCOM / DeepTech Programs', 'rss', ['technology', 'deeptech'], { priority: 3 }),
-  fallbackSource('yourstory', 'YourStory Funding News', 'rss', ['startup', 'funding'], { priority: 4 }),
-  fallbackSource('inc42', 'Inc42 Funding & Accelerators', 'rss', ['startup', 'funding'], { priority: 5 }),
-  fallbackSource('investindia', 'Invest India Programs', 'api', ['startup', 'agri-tech', 'export'], { priority: 6 }),
+  fallbackSource('startupindia', 'Startup India', 'html', 'https://www.startupindia.gov.in/content/sih/en/government-schemes.html', ['startup', 'agri-tech', 'technology'], { priority: 1 }),
+  fallbackSource('agri_uddaan', 'Agri Udaan / Agritech Programs', 'html', 'https://aidea.naarm.org.in/', ['agri-tech', 'food-tech'], { priority: 2 }),
+  fallbackSource('nasscom', 'NASSCOM / DeepTech Programs', 'html', 'https://www.nasscom.in/what-we-do/innovation-startups', ['technology', 'deeptech'], { priority: 3 }),
+  fallbackSource('yourstory', 'YourStory Funding News', 'rss', 'https://yourstory.com/feed', ['startup', 'funding'], { priority: 4 }),
+  fallbackSource('inc42', 'Inc42 Funding & Accelerators', 'rss', 'https://inc42.com/feed/', ['startup', 'funding'], { priority: 5 }),
+  fallbackSource('investindia', 'Invest India Programs', 'html', 'https://www.investindia.gov.in/schemes-for-startups', ['startup', 'agri-tech', 'export'], { priority: 6 }),
 ];
+
+type SourceFetchMode = IndustrySourceMode | 'html';
+
+type ParsedIndustryItem = IndustryOpportunityInput & {
+  confidence?: number;
+};
 
 function fallbackSource(
   code: string,
   name: string,
-  mode: IndustrySourceMode,
+  mode: SourceFetchMode,
+  sourceUrl: string,
   sectorFocus: string[],
   metadata: Record<string, unknown>
 ): IndustryIntelligenceSource {
@@ -51,16 +59,20 @@ function fallbackSource(
     id: `fallback-${code}`,
     code,
     name,
-    mode,
+    mode: mode === 'html' ? 'api' : mode,
     status: 'active',
     region: 'India',
     sector_focus: sectorFocus,
+    source_url: sourceUrl,
     supports_fetch: mode !== 'manual',
     supports_manual: true,
     auth_ready: false,
     health_status: 'fallback',
-    metadata: { ...metadata, fallback: true },
+    metadata: { ...metadata, fallback: true, source_url: sourceUrl, parser: mode },
     last_checked_at: null,
+    last_success_at: null,
+    last_error: null,
+    polling_interval_minutes: 360,
     created_at: new Date(0).toISOString(),
     updated_at: new Date(0).toISOString(),
     source_origin: 'fallback',
@@ -83,6 +95,66 @@ function isSchemaMissingError(err: any): boolean {
 function normalizeText(value: unknown): string | null {
   const v = String(value ?? '').trim();
   return v.length > 0 ? v : null;
+}
+
+function decodeXml(input: string): string {
+  return input
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'");
+}
+
+function cleanCdata(input: string): string {
+  return decodeXml(input.replace(/<!\[CDATA\[|\]\]>/g, '').trim());
+}
+
+function stripHtml(input: string): string {
+  return decodeXml(input.replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim());
+}
+
+function xmlTag(input: string, names: string[]): string {
+  for (const name of names) {
+    const match = input.match(new RegExp(`<${name}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${name}>`, 'i'));
+    if (match?.[1]) return cleanCdata(match[1]);
+  }
+  return '';
+}
+
+function rssItemBlocks(xml: string): string[] {
+  const itemMatches = Array.from(xml.matchAll(/<item(?:\s[^>]*)?>([\s\S]*?)<\/item>/gi));
+  if (itemMatches.length > 0) return itemMatches.map((match) => match[1] ?? '');
+  return Array.from(xml.matchAll(/<entry(?:\s[^>]*)?>([\s\S]*?)<\/entry>/gi)).map((match) => match[1] ?? '');
+}
+
+function rssLink(item: string): string {
+  const link = xmlTag(item, ['link']);
+  if (link) return link;
+  const href = item.match(/<link[^>]+href=["']([^"']+)["']/i)?.[1];
+  return href ? cleanCdata(href) : '';
+}
+
+function parseOptionalDate(value: unknown): string | null {
+  const raw = normalizeText(value);
+  if (!raw) return null;
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function normalizeAbsoluteUrl(raw: string, baseUrl: string): string | null {
+  const value = normalizeText(raw);
+  if (!value) return null;
+  try {
+    return new URL(value, baseUrl).toString();
+  } catch {
+    return null;
+  }
 }
 
 function nowIso(): string {
@@ -119,11 +191,13 @@ function inferCategory(input: IndustryOpportunityInput): IndustryOpportunityCate
   }
 
   const haystack = `${input.title ?? ''} ${input.summary ?? ''}`.toLowerCase();
-  if (haystack.includes('grant')) return 'grant';
-  if (haystack.includes('accelerator') || haystack.includes('incubator')) return 'accelerator';
   if (haystack.includes('demo day')) return 'demo_day';
-  if (haystack.includes('pitch')) return 'pitch_event';
-  if (haystack.includes('investor') || haystack.includes('vc')) return 'investor_call';
+  if (haystack.includes('grant')) return 'grant';
+  if (haystack.includes('scheme') || haystack.includes('subsidy')) return 'grant';
+  if (haystack.includes('seed') || haystack.includes('funding') || haystack.includes('raises') || haystack.includes('raised') || haystack.includes('investment')) return 'seed_funding';
+  if (haystack.includes('accelerator') || haystack.includes('incubator')) return 'accelerator';
+  if (haystack.includes('pitch') || haystack.includes('startup showcase')) return 'pitch_event';
+  if (haystack.includes('investor') || haystack.includes('vc') || haystack.includes('venture capital')) return 'investor_call';
   if (haystack.includes('program') || haystack.includes('challenge')) return 'ecosystem_program';
   return 'seed_funding';
 }
@@ -156,6 +230,81 @@ function relevanceFor(input: IndustryOpportunityInput): number {
   return Math.min(100, score);
 }
 
+function isRelevantIndustryItem(input: IndustryOpportunityInput): boolean {
+  const itemText = `${input.title ?? ''} ${input.summary ?? ''}`.toLowerCase();
+  const haystack = `${itemText} ${input.sector ?? ''} ${input.geography ?? ''}`.toLowerCase();
+  const indiaSignals = ['india', 'indian', 'bharat', 'startup india', 'karnataka', 'maharashtra', 'telangana', 'kerala', 'tamil nadu', 'gujarat', 'delhi', 'bengaluru', 'mumbai', 'hyderabad'];
+  const topicSignals = ['startup', 'funding', 'fund', 'grant', 'seed', 'accelerator', 'incubator', 'pitch', 'demo day', 'investor', 'venture', 'agri', 'farm', 'foodtech', 'deeptech', 'technology', 'scheme'];
+  return indiaSignals.some((signal) => haystack.includes(signal)) && topicSignals.some((signal) => itemText.includes(signal));
+}
+
+export function parseIndustryRssItems(xml: string, source: Pick<IndustryIntelligenceSource, 'name' | 'code' | 'region' | 'sector_focus'>): ParsedIndustryItem[] {
+  const items: ParsedIndustryItem[] = [];
+  for (const item of rssItemBlocks(xml)) {
+    const title = xmlTag(item, ['title']);
+    if (!title) continue;
+    const summary = stripHtml(xmlTag(item, ['description', 'summary', 'content:encoded', 'content'])).slice(0, 1600);
+    const sourceUrl = rssLink(item);
+    const publishedAt = parseOptionalDate(xmlTag(item, ['pubDate', 'published', 'updated', 'dc:date']));
+    const category = inferCategory({ title, summary });
+    const parsed: ParsedIndustryItem = {
+      title: title.slice(0, 300),
+      summary: summary || null,
+      source_name: source.name,
+      source_url: sourceUrl || null,
+      category,
+      sector: source.sector_focus?.[0] ?? null,
+      geography: source.region ?? 'India',
+      opportunity_date: publishedAt,
+      organizer_or_investor: source.name,
+      relevance_score: relevanceFor({ title, summary, sector: source.sector_focus?.[0] ?? null }),
+      tags: [source.code, category, ...(source.sector_focus ?? [])].slice(0, 8),
+      useful_for_funding: ['seed_funding', 'grant', 'accelerator', 'investor_call'].includes(category),
+      useful_for_partnerships: ['accelerator', 'ecosystem_program', 'pitch_event', 'demo_day'].includes(category),
+      useful_for_content: true,
+      raw_payload: { parser: 'rss', guid: xmlTag(item, ['guid', 'id']) || null },
+      confidence: sourceUrl ? 0.8 : 0.55,
+    };
+    if (isRelevantIndustryItem(parsed)) items.push(parsed);
+  }
+  return items;
+}
+
+export function parseIndustryHtmlItems(html: string, baseUrl: string, source: Pick<IndustryIntelligenceSource, 'name' | 'code' | 'region' | 'sector_focus'>): ParsedIndustryItem[] {
+  const candidates = new Map<string, ParsedIndustryItem>();
+  const anchorRegex = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  for (const match of html.matchAll(anchorRegex)) {
+    const href = match[1] ?? '';
+    const text = stripHtml(match[2] ?? '').slice(0, 300);
+    if (!text || text.length < 12) continue;
+    const sourceUrl = normalizeAbsoluteUrl(href, baseUrl);
+    const category = inferCategory({ title: text, summary: text });
+    const parsed: ParsedIndustryItem = {
+      title: text,
+      summary: text,
+      source_name: source.name,
+      source_url: sourceUrl,
+      category,
+      sector: source.sector_focus?.[0] ?? null,
+      geography: source.region ?? 'India',
+      opportunity_date: nowIso(),
+      organizer_or_investor: source.name,
+      relevance_score: relevanceFor({ title: text, summary: text, sector: source.sector_focus?.[0] ?? null }),
+      tags: [source.code, category, ...(source.sector_focus ?? [])].slice(0, 8),
+      useful_for_funding: ['seed_funding', 'grant', 'accelerator', 'investor_call'].includes(category),
+      useful_for_partnerships: ['accelerator', 'ecosystem_program', 'pitch_event', 'demo_day'].includes(category),
+      useful_for_content: true,
+      raw_payload: { parser: 'html_anchor' },
+      confidence: sourceUrl ? 0.55 : 0.35,
+    };
+    if (isRelevantIndustryItem(parsed)) {
+      candidates.set(sourceUrl ?? `${source.code}:${text.toLowerCase()}`, parsed);
+    }
+  }
+
+  return Array.from(candidates.values()).slice(0, 20);
+}
+
 export function makeIndustryOpportunityDedupeHash(sourceCode: string, input: IndustryOpportunityInput): string {
   const sourceUrl = normalizeIndustrySourceUrl(input.source_url);
   const parts = sourceUrl
@@ -170,31 +319,58 @@ export function makeIndustryOpportunityDedupeHash(sourceCode: string, input: Ind
   return crypto.createHash('sha256').update(parts.join('|')).digest('hex');
 }
 
-function fakeAdapterItems(source: IndustryIntelligenceSource, index: number): IndustryOpportunityInput[] {
-  const stamp = Date.now();
-  const sourceName = source.name;
-  return [
-    {
-      title: `${sourceName}: India agri-tech seed and pitch opportunity`,
-      summary: `Sample v1 intelligence item for India tech/agri-tech funding discovery from ${sourceName}. Configure feed/API metadata to replace sample items.`,
-      source_name: sourceName,
-      source_url: `https://example.com/obaol-industry-intelligence/${source.code}/${stamp}-${index}`,
-      category: index % 2 === 0 ? 'seed_funding' : 'pitch_event',
-      sector: source.sector_focus?.[0] ?? 'agri-tech',
-      geography: 'India',
-      funding_stage: 'seed',
-      amount_text: 'Seed / program dependent',
-      opportunity_date: nowIso(),
-      organizer_or_investor: sourceName,
-      relevance_score: 80,
-      tags: ['india', 'agri-tech', 'funding'],
-      useful_for_funding: true,
-      useful_for_clients: false,
-      useful_for_partnerships: true,
-      useful_for_content: true,
-      raw_payload: { synthetic: true, source_code: source.code },
+function sourceUrlFor(source: IndustryIntelligenceSource): string | null {
+  return normalizeText(source.source_url)
+    ?? normalizeText(source.metadata?.feed_url)
+    ?? normalizeText(source.metadata?.source_url)
+    ?? normalizeText(source.metadata?.url);
+}
+
+function parserFor(source: IndustryIntelligenceSource): SourceFetchMode {
+  const parser = String(source.metadata?.parser ?? '').toLowerCase();
+  if (parser === 'html' || parser === 'rss' || parser === 'api' || parser === 'webhook' || parser === 'manual') return parser;
+  return source.mode === 'rss' ? 'rss' : 'html';
+}
+
+async function fetchSourceItems(source: IndustryIntelligenceSource): Promise<ParsedIndustryItem[]> {
+  const sourceUrl = sourceUrlFor(source);
+  if (!sourceUrl) throw new Error('source_url or metadata.feed_url is required');
+  const response = await safeFetch(sourceUrl, {
+    headers: {
+      'User-Agent': 'OBAOL Industry Intelligence/1.0',
+      Accept: 'application/rss+xml, application/xml, text/xml, text/html, application/json;q=0.9, */*;q=0.8',
     },
-  ];
+  }, { timeoutMs: 20000 });
+  if (!response.ok) throw new Error(`source_fetch_${response.status}`);
+  const text = await response.text();
+  const parser = parserFor(source);
+  if (parser === 'rss') return parseIndustryRssItems(text, source);
+  if (parser === 'api') {
+    try {
+      const parsed = JSON.parse(text);
+      const rows = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.items) ? parsed.items : Array.isArray(parsed?.results) ? parsed.results : [];
+      return rows.map((row: any) => ({
+        title: normalizeText(row.title ?? row.name) ?? '',
+        summary: normalizeText(row.summary ?? row.description ?? row.excerpt),
+        source_name: source.name,
+        source_url: normalizeText(row.source_url ?? row.url ?? row.link),
+        category: normalizeText(row.category),
+        sector: normalizeText(row.sector) ?? source.sector_focus?.[0] ?? null,
+        geography: normalizeText(row.geography ?? row.region) ?? source.region ?? 'India',
+        funding_stage: normalizeText(row.funding_stage ?? row.stage),
+        amount_text: normalizeText(row.amount_text ?? row.amount),
+        deadline_date: normalizeText(row.deadline_date ?? row.deadline),
+        opportunity_date: normalizeText(row.opportunity_date ?? row.published_at ?? row.date),
+        organizer_or_investor: normalizeText(row.organizer_or_investor ?? row.organizer ?? row.investor) ?? source.name,
+        tags: row.tags,
+        raw_payload: row,
+        confidence: 0.75,
+      })).filter((item: ParsedIndustryItem) => normalizeText(item.title) && isRelevantIndustryItem(item));
+    } catch {
+      return parseIndustryHtmlItems(text, sourceUrl, source);
+    }
+  }
+  return parseIndustryHtmlItems(text, sourceUrl, source);
 }
 
 export async function listIndustrySources(): Promise<IndustryIntelligenceSource[]> {
@@ -333,7 +509,7 @@ export async function createIndustryFetchRun(params: {
     const mode = source?.mode ?? 'manual';
     let items = params.itemsBySource?.[sourceCode] ?? [];
     if (!Array.isArray(items) || items.length === 0) {
-      items = source && mode !== 'webhook' ? fakeAdapterItems(source, index) : [];
+      items = source && mode !== 'webhook' && mode !== 'manual' ? await fetchSourceItems(source) : [];
     }
 
     let sourceInserted = 0;
@@ -379,6 +555,19 @@ export async function createIndustryFetchRun(params: {
       failed_count: sourceFailed,
       error_message: firstError,
     });
+
+    if (source?.id && !String(source.id).startsWith('fallback-')) {
+      await supabase
+        .from('industry_intelligence_sources')
+        .update({
+          last_checked_at: nowIso(),
+          last_success_at: sourceFailed > 0 ? source.last_success_at ?? null : nowIso(),
+          last_error: firstError,
+          health_status: sourceFailed > 0 ? 'error' : 'healthy',
+          updated_at: nowIso(),
+        })
+        .eq('id', source.id);
+    }
   }
 
   const { data: updatedRun, error: updateError } = await supabase
@@ -424,6 +613,45 @@ export async function listIndustryFetchRuns(limit: number = 20): Promise<Industr
     throw error;
   }
   return (data ?? []) as IndustryFetchRun[];
+}
+
+export async function getIndustrySummary() {
+  const [total, newRows, shortlisted, applied, recentRuns, sources] = await Promise.all([
+    supabase.from('industry_intelligence_opportunities').select('id', { count: 'exact', head: true }),
+    supabase.from('industry_intelligence_opportunities').select('id', { count: 'exact', head: true }).eq('status', 'new'),
+    supabase.from('industry_intelligence_opportunities').select('id', { count: 'exact', head: true }).eq('status', 'shortlisted'),
+    supabase.from('industry_intelligence_opportunities').select('id', { count: 'exact', head: true }).eq('status', 'applied'),
+    supabase.from('industry_intelligence_fetch_runs').select('*').order('created_at', { ascending: false }).limit(5),
+    supabase.from('industry_intelligence_sources').select('id,code,name,health_status,last_checked_at,last_success_at,last_error').eq('status', 'active'),
+  ]);
+
+  const schemaError = [total.error, newRows.error, shortlisted.error, applied.error, recentRuns.error, sources.error].find(isSchemaMissingError);
+  if (schemaError) {
+    return {
+      total: 0,
+      new_count: 0,
+      shortlisted_count: 0,
+      applied_count: 0,
+      last_run: null,
+      source_health: [],
+    };
+  }
+  const nonSchemaError = [total.error, newRows.error, shortlisted.error, applied.error, recentRuns.error, sources.error].find(Boolean);
+  if (nonSchemaError) throw nonSchemaError;
+
+  const sourceRows = sources.data ?? [];
+  const healthySources = sourceRows.filter((source: any) => source.health_status === 'healthy').length;
+
+  return {
+    total: Number(total.count ?? 0),
+    new_count: Number(newRows.count ?? 0),
+    shortlisted_count: Number(shortlisted.count ?? 0),
+    applied_count: Number(applied.count ?? 0),
+    last_run: recentRuns.data?.[0] ?? null,
+    source_health: sourceRows,
+    healthy_sources: healthySources,
+    total_sources: sourceRows.length,
+  };
 }
 
 export async function listIndustryOpportunities(filters: IndustryOpportunityFilters) {

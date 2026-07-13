@@ -25,12 +25,16 @@ export type IndustryIntelligenceSource = {
   status: string;
   region: string | null;
   sector_focus: string[] | null;
+  source_url?: string | null;
   supports_fetch: boolean;
   supports_manual: boolean;
   auth_ready: boolean;
   health_status: string;
   metadata: Record<string, unknown>;
   last_checked_at: string | null;
+  last_success_at?: string | null;
+  last_error?: string | null;
+  polling_interval_minutes?: number | null;
   created_at: string;
   updated_at: string;
   source_origin?: 'db' | 'fallback';

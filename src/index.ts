@@ -32,6 +32,7 @@ import { startSequenceRunner } from './worker/sequenceRunner';
 import { startAgentMissionRunner } from './worker/agentMissionRunner';
 import { startSocialPublishRunner } from './worker/socialPublishRunner';
 import { startEventIngestionRunner } from './worker/eventIngestionRunner';
+import { startIndustryIntelligenceRunner } from './worker/industryIntelligenceRunner';
 import { startReplyCaptureWorker } from './worker/replyCapture.worker';
 import {
   getEmailValidationWorkerHealth,
@@ -222,6 +223,7 @@ app.get('/ping/routes', (_req, res) => {
       '/events/sources',
       '/events/ingest/run',
       '/industry-intelligence/sources',
+      '/industry-intelligence/summary',
       '/industry-intelligence/fetch-runs',
       '/industry-intelligence/opportunities',
     ],
@@ -563,6 +565,7 @@ async function boot() {
     });
     console.info('[INDUSTRY_INTELLIGENCE_ROUTE_HEALTH]', {
       sourcesEndpoint: '/industry-intelligence/sources',
+      summaryEndpoint: '/industry-intelligence/summary',
       fetchRunsEndpoint: '/industry-intelligence/fetch-runs',
       opportunitiesEndpoint: '/industry-intelligence/opportunities',
       exportEndpoint: '/industry-intelligence/export',
@@ -608,6 +611,12 @@ try {
   startEventIngestionRunner();
 } catch (error) {
   console.error('[EVENT_INGESTION_RUNNER_BOOT_ERROR]', error);
+}
+
+try {
+  startIndustryIntelligenceRunner();
+} catch (error) {
+  console.error('[INDUSTRY_INTELLIGENCE_RUNNER_BOOT_ERROR]', error);
 }
 
 try {
