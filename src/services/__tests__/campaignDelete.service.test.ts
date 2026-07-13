@@ -137,6 +137,7 @@ test('campaign dependent delete removes tracking and logs before campaign links'
     'campaign_inboxes.campaign_id',
     'campaign_leads.campaign_id',
     'system_events.entity_id',
+    'system_events.entity',
   ]);
   assert.equal(deletes.some((item) => item.startsWith('leads.')), false);
   assert.equal(deletes.some((item) => item.startsWith('inboxes.')), false);
