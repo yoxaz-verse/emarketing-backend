@@ -221,7 +221,7 @@ function missingRequired(platform: SocialPlatform, source: Record<string, string
   return requiredFieldsByPlatform(platform).filter((key) => !String(source[key] ?? '').trim());
 }
 
-function nonSecretFields(platform: SocialPlatform, row: any, hasSecret: boolean): Record<string, string> {
+export function nonSecretFields(platform: SocialPlatform, row: any, hasSecret: boolean): Record<string, string> {
   const metadata = (row?.metadata && typeof row.metadata === 'object') ? row.metadata : {};
   const fields: Record<string, string> = {};
 
@@ -229,6 +229,9 @@ function nonSecretFields(platform: SocialPlatform, row: any, hasSecret: boolean)
     fields.client_id = String(row.client_id ?? '');
     fields.redirect_uri = String(row.redirect_uri ?? '');
     fields.client_secret = hasSecret ? '***' : '';
+    fields.scopes = Array.isArray(row.scopes)
+      ? row.scopes.map((scope: unknown) => String(scope ?? '').trim()).filter(Boolean).join(',')
+      : '';
     return fields;
   }
 
