@@ -29,17 +29,18 @@ function resolveOperatorId(req: any): string | null {
 async function handleCallback(req: any, res: any, platformInput?: string) {
   try {
     const platform = String(platformInput ?? req.params?.platform ?? req.query?.platform ?? 'linkedin');
-    await handlePlatformCallback({
+    const result = await handlePlatformCallback({
       platform,
       code: String(req.query?.code ?? ''),
       state: String(req.query?.state ?? ''),
     });
 
-    res.redirect(socialOAuthSuccessUrl(platform));
+    res.redirect(socialOAuthSuccessUrl(platform, process.env, { operatorId: result.context.operatorId }));
   } catch (err: any) {
     const message = err?.message ?? 'connect_failed';
+    const operatorId = String(err?.socialOAuthContext?.operatorId ?? '').trim();
     console.error('[SOCIAL CONNECT CALLBACK ERROR]', message);
-    res.redirect(socialOAuthErrorUrl(message, process.env, classifySocialOAuthError(message)));
+    res.redirect(socialOAuthErrorUrl(message, process.env, classifySocialOAuthError(message), { operatorId }));
   }
 }
 

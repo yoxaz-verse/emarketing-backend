@@ -8,6 +8,10 @@ export type SocialOAuthErrorCode =
   | 'oauth_state_error'
   | 'unknown';
 
+export type SocialOAuthRedirectContext = {
+  operatorId?: string | null;
+};
+
 function normalizeBaseUrl(value: string): string {
   return value.replace(/[?#].*$/, '').replace(/\/+$/, '');
 }
@@ -25,8 +29,28 @@ export function socialOAuthRedirectBase(env: NodeJS.ProcessEnv = process.env): s
     : LOCAL_SOCIAL_OAUTH_REDIRECT;
 }
 
-export function socialOAuthSuccessUrl(platform: string, env: NodeJS.ProcessEnv = process.env): string {
-  return `${socialOAuthRedirectBase(env)}?social_connected=${encodeURIComponent(platform)}`;
+function appendRedirectParams(
+  baseUrl: string,
+  params: Record<string, string | null | undefined>,
+): string {
+  const query: string[] = [];
+  for (const [key, value] of Object.entries(params)) {
+    const normalized = String(value ?? '').trim();
+    if (normalized) query.push(`${encodeURIComponent(key)}=${encodeURIComponent(normalized)}`);
+  }
+  const queryString = query.join('&');
+  return queryString ? `${baseUrl}?${queryString}` : baseUrl;
+}
+
+export function socialOAuthSuccessUrl(
+  platform: string,
+  env: NodeJS.ProcessEnv = process.env,
+  context?: SocialOAuthRedirectContext,
+): string {
+  return appendRedirectParams(socialOAuthRedirectBase(env), {
+    social_connected: platform,
+    operator_id: context?.operatorId,
+  });
 }
 
 export function classifySocialOAuthError(message: string): SocialOAuthErrorCode {
@@ -80,9 +104,12 @@ export function classifySocialOAuthError(message: string): SocialOAuthErrorCode 
 export function socialOAuthErrorUrl(
   message: string,
   env: NodeJS.ProcessEnv = process.env,
-  errorCode?: SocialOAuthErrorCode
+  errorCode?: SocialOAuthErrorCode,
+  context?: SocialOAuthRedirectContext,
 ): string {
-  const params = [`social_connect_error=${encodeURIComponent(message)}`];
-  if (errorCode) params.push(`social_connect_error_code=${encodeURIComponent(errorCode)}`);
-  return `${socialOAuthRedirectBase(env)}?${params.join('&')}`;
+  return appendRedirectParams(socialOAuthRedirectBase(env), {
+    social_connect_error: message,
+    social_connect_error_code: errorCode,
+    operator_id: context?.operatorId,
+  });
 }

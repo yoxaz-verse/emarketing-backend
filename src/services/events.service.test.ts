@@ -179,6 +179,114 @@ test('parseHtmlEventItems handles KSUM event cards', async () => {
   assert.equal(items[0].starts_at, '2026-08-08T09:00:00.000Z');
 });
 
+test('parseHtmlEventItems extracts JSON-LD Event data before HTML fallback', async () => {
+  const { parseHtmlEventItems } = await loadEventsModule();
+  const items = parseHtmlEventItems(`
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "Event",
+        "@id": "impact-expo-2027",
+        "name": "IndiaAI AgriTech Impact Expo",
+        "startDate": "2027-02-16T10:00:00+05:30",
+        "endDate": "2027-02-16T17:00:00+05:30",
+        "url": "/events/agritech-impact",
+        "location": {
+          "name": "Bharat Mandapam",
+          "address": { "addressLocality": "New Delhi", "addressCountry": "India" }
+        },
+        "description": "AI for agriculture showcase"
+      }
+    </script>
+  `, {
+    source_url: 'https://indiaai.gov.in/events',
+    parser_key: 'indiaai_events',
+    categories: ['ai'],
+  });
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].title, 'IndiaAI AgriTech Impact Expo');
+  assert.equal(items[0].starts_at, '2027-02-16T04:30:00.000Z');
+  assert.equal(items[0].ends_at, '2027-02-16T11:30:00.000Z');
+  assert.equal(items[0].source_url, 'https://indiaai.gov.in/events/agritech-impact');
+  assert.match(items[0].location ?? '', /Bharat Mandapam/);
+  assert.equal(items[0].source_snapshot?.parser, 'json_ld');
+});
+
+test('parseHtmlEventItems handles IndiaAI, Startup India, and Karnataka startup parser keys', async () => {
+  const { parseHtmlEventItems } = await loadEventsModule();
+  const cases = [
+    {
+      parser_key: 'indiaai_events',
+      html: '<div class="event card"><h3>AI for Agriculture Forum</h3><p>Date: 21 August 2026</p><p>Location: Bengaluru</p></div>',
+      title: 'AI for Agriculture Forum',
+    },
+    {
+      parser_key: 'startup_india_challenges',
+      html: '<article class="challenge card"><h2>Bharat AgriTech Grand Challenge</h2><p>Deadline: 22 August 2026</p><p>Venue: Online</p></article>',
+      title: 'Bharat AgriTech Grand Challenge',
+    },
+    {
+      parser_key: 'karnataka_startup_events',
+      html: '<section class="elevate program"><h2>Elevate Agri AI Pitch Day</h2><p>Date: 23 August 2026</p><p>Place: Bengaluru</p></section>',
+      title: 'Elevate Agri AI Pitch Day',
+    },
+  ];
+
+  for (const row of cases) {
+    const items = parseHtmlEventItems(row.html, {
+      source_url: 'https://example.com/events',
+      parser_key: row.parser_key,
+      categories: ['agritech'],
+    });
+    assert.equal(items.length, 1);
+    assert.equal(items[0].title, row.title);
+    assert.equal(items[0].category, 'agritech');
+  }
+});
+
+test('parseHtmlEventItems handles APEDA and CII-style table rows with date ranges', async () => {
+  const { parseHtmlEventItems } = await loadEventsModule();
+  const items = parseHtmlEventItems(`
+    <table>
+      <tr class="event row">
+        <td>National Agri AI Summit</td>
+        <td>Bengaluru, India</td>
+        <td>11th - 13th December 2026</td>
+      </tr>
+    </table>
+  `, {
+    source_url: 'https://www.cii.in/Events.aspx',
+    parser_key: 'cii_events',
+    categories: ['agri'],
+  });
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].title, 'National Agri AI Summit');
+  assert.equal(items[0].starts_at, '2026-12-11T09:00:00.000Z');
+  assert.equal(items[0].location, 'Bengaluru, India');
+});
+
+test('parseHtmlEventItems decodes numeric entities and dedupes JSON-LD plus HTML duplicates', async () => {
+  const { parseHtmlEventItems } = await loadEventsModule();
+  const items = parseHtmlEventItems(`
+    <script type="application/ld+json">
+      {"@context":"https://schema.org","@type":"Event","name":"Food &#038; Agri Startup Expo","startDate":"2026-09-10T09:00:00Z","url":"https://example.com/expo"}
+    </script>
+    <article class="event-card">
+      <a href="https://example.com/expo"><h3>Food &#038; Agri Startup Expo</h3></a>
+      <p>Date: 10 September 2026</p>
+    </article>
+  `, {
+    source_url: 'https://example.com/events',
+    parser_key: 'agri_trade_events',
+    categories: ['food export'],
+  });
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].title, 'Food & Agri Startup Expo');
+});
+
 test('parseHtmlEventItems handles ITPO, CEPCI, and IPGA parser keys', async () => {
   const { parseHtmlEventItems } = await loadEventsModule();
   const parserKeys = ['itpo_aahar_events', 'cepci_events', 'ipga_events'];
@@ -211,6 +319,26 @@ test('predefined agri source migration is idempotent and unique by source_url', 
   assert.match(sql, /WHERE NOT EXISTS/);
   assert.equal(new Set(urls).size, urls.length);
   assert.ok(urls.length >= 7);
+});
+
+test('expanded event source migration includes startup, AI, and AgriTech sources', () => {
+  const sql = readFileSync('sql/20260715_expand_event_intelligence_sources.sql', 'utf8');
+  const urls = Array.from(sql.matchAll(/'https:\/\/[^']+'/g)).map((match) => match[0]);
+  const requiredParserKeys = [
+    'startup_india_challenges',
+    'indiaai_events',
+    'karnataka_startup_events',
+    'cii_events',
+    'agri_trade_events',
+  ];
+
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS parser_key/);
+  assert.match(sql, /WHERE NOT EXISTS/);
+  assert.equal(new Set(urls).size, urls.length);
+  for (const parserKey of requiredParserKeys) assert.match(sql, new RegExp(parserKey));
+  assert.match(sql, /agritech/);
+  assert.match(sql, /startup/);
+  assert.match(sql, /ai/);
 });
 
 test('buildCountdownMeta labels future events', async () => {

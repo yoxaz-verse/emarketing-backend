@@ -155,8 +155,8 @@ export async function exchangeLinkedInCode(code: string, config: LinkedInOAuthAp
   return res.json();
 }
 
-function subjectUrnFromIdToken(idToken?: string | null): string | null {
-  const token = String(idToken ?? '').trim();
+function subjectUrnFromJwt(tokenInput?: string | null): string | null {
+  const token = String(tokenInput ?? '').trim();
   const payload = token.split('.')[1];
   if (!payload) return null;
 
@@ -185,11 +185,13 @@ async function fetchLinkedInOidcActorUrn(accessToken: string): Promise<string | 
 }
 
 async function fetchLinkedInLegacyActorUrn(accessToken: string): Promise<string> {
+  const linkedinVersion = process.env.LINKEDIN_API_VERSION || '202504';
   const res = await fetch('https://api.linkedin.com/v2/me', {
     method: 'GET',
     headers: {
       Authorization: `Bearer ${accessToken}`,
       'X-Restli-Protocol-Version': '2.0.0',
+      'LinkedIn-Version': linkedinVersion,
     },
   });
 
@@ -205,11 +207,14 @@ async function fetchLinkedInLegacyActorUrn(accessToken: string): Promise<string>
 }
 
 export async function fetchLinkedInActorUrn(accessToken: string, idToken?: string | null): Promise<string> {
-  const fromIdToken = subjectUrnFromIdToken(idToken);
+  const fromIdToken = subjectUrnFromJwt(idToken);
   if (fromIdToken) return fromIdToken;
 
   const fromUserInfo = await fetchLinkedInOidcActorUrn(accessToken);
   if (fromUserInfo) return fromUserInfo;
+
+  const fromAccessToken = subjectUrnFromJwt(accessToken);
+  if (fromAccessToken) return fromAccessToken;
 
   return fetchLinkedInLegacyActorUrn(accessToken);
 }

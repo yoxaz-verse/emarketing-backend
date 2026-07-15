@@ -87,6 +87,8 @@ function decodeXml(input: string): string {
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(Number.parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number.parseInt(code, 10)))
     .replace(/&#39;/g, "'")
     .replace(/&apos;/g, "'");
 }
@@ -161,7 +163,8 @@ function parseHumanEventDate(input: string, now = new Date()): string | null {
     .replace(/\s+/g, ' ');
   if (!text) return null;
 
-  const iso = parseOptionalIsoDate(text.match(/\d{4}-\d{2}-\d{2}/)?.[0] ?? text);
+  const isoToken = text.match(/\d{4}-\d{2}-\d{2}(?:[T\s]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:?\d{2})?)?/)?.[0];
+  const iso = isoToken ? parseOptionalIsoDate(isoToken) : null;
   if (iso) return iso;
 
   const numeric = text.match(/\b(\d{1,2})[./-](\d{1,2})[./-](20\d{2})\b/);
@@ -192,7 +195,7 @@ function parseHumanEventDate(input: string, now = new Date()): string | null {
 }
 
 function findHtmlDate(blockText: string): string | null {
-  const labelled = blockText.match(/\b(?:date|dates|event date|from)\s*[:\-]\s*([^|•\n]{4,80})/i)?.[1];
+  const labelled = blockText.match(/\b(?:date|dates|event date|from|deadline|last date|application deadline)\s*[:\-]\s*([^|•\n]{4,80})/i)?.[1];
   return parseHumanEventDate(labelled ?? blockText);
 }
 
@@ -201,13 +204,47 @@ function findHtmlLocation(blockText: string): string | null {
   return normalizeNullable(match?.[1]?.replace(/\b(?:date|event date)\b.*$/i, ''));
 }
 
+function htmlCellTexts(block: string): string[] {
+  return Array.from(block.matchAll(/<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi))
+    .map((match) => stripHtml(match[1] ?? ''))
+    .filter(Boolean);
+}
+
+function looksLikeEventDate(value: string): boolean {
+  return (
+    /\b\d{1,2}(?:st|nd|rd|th)?\s*(?:-|to|&)?\s*\d{0,2}\s*(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\b/i.test(value) ||
+    /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{1,2}/i.test(value) ||
+    /\b\d{1,2}[./-]\d{1,2}[./-]20\d{2}\b/.test(value) ||
+    /\b20\d{2}-\d{2}-\d{2}\b/.test(value)
+  ) && Boolean(parseHumanEventDate(value));
+}
+
 function findHtmlTitle(block: string, blockText: string): string {
   const heading = block.match(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/i)?.[1];
   if (heading) return stripHtml(heading).slice(0, 300);
   const titleAttr = htmlAttr(block, 'title');
   if (titleAttr) return titleAttr.slice(0, 300);
+  const cells = htmlCellTexts(block);
+  const cellTitle = cells.find((cell) => !looksLikeEventDate(cell) && !/^(sr\.?no|date|venue|location|month|officer)\b/i.test(cell));
+  if (cellTitle) return cellTitle.slice(0, 300);
   const lines = blockText.split(/\s{2,}|\n/).map((line) => line.trim()).filter(Boolean);
   return (lines.find((line) => !/^(date|venue|location|read more)\b/i.test(line)) ?? blockText).slice(0, 300);
+}
+
+function findHtmlLocationFromCells(block: string, blockText: string, title: string): string | null {
+  const labelled = findHtmlLocation(blockText);
+  if (labelled) return labelled;
+  const cells = htmlCellTexts(block);
+  return normalizeNullable(cells.find((cell) => {
+    const lower = cell.toLowerCase();
+    return cell !== title && !looksLikeEventDate(cell) && !/^(sr\.?no|date|month|officer|circular)\b/i.test(cell) && /,|india|uae|singapore|delhi|mumbai|bengaluru|bangalore|kochi|hyderabad|chennai|pune|dubai/i.test(lower);
+  }));
+}
+
+function findHtmlSourceUrl(block: string, baseUrl?: string | null): string | null {
+  const linkBlock = block.match(/<a\b[\s\S]*?<\/a>/i)?.[0] ?? block;
+  const href = htmlAttr(linkBlock, 'href');
+  return absoluteUrl(href, baseUrl);
 }
 
 function htmlBlocksForParser(html: string, parserKey: string): string[] {
@@ -217,6 +254,11 @@ function htmlBlocksForParser(html: string, parserKey: string): string[] {
     apeda_trade_fairs: ['event', 'trade', 'fair', 'exhibition', 'row'],
     spices_board_trade_fairs: ['event', 'trade', 'fair', 'views-row', 'row'],
     ksum_events: ['event', 'card', 'views-row', 'row'],
+    indiaai_events: ['event', 'hybrid', 'online', 'offline', 'card', 'row'],
+    startup_india_challenges: ['challenge', 'program', 'initiative', 'event', 'card', 'row'],
+    karnataka_startup_events: ['event', 'startup', 'elevate', 'challenge', 'program', 'row'],
+    cii_events: ['event', 'conference', 'summit', 'webinar', 'training', 'row'],
+    agri_trade_events: ['event', 'agri', 'agriculture', 'trade', 'expo', 'fair', 'row'],
     itpo_aahar_events: ['event', 'fair', 'exhibition', 'aahar', 'row'],
     cepci_events: ['event', 'fair', 'news', 'row'],
     ipga_events: ['event', 'conference', 'row', 'post'],
@@ -233,36 +275,112 @@ function htmlBlocksForParser(html: string, parserKey: string): string[] {
       blocks.push(block);
     }
   }
+  if (blocks.length === 0 && jsonLdBlocks(html).length > 0) return [];
   return blocks.length > 0 ? blocks : [html];
+}
+
+function jsonLdBlocks(html: string): unknown[] {
+  const values: unknown[] = [];
+  for (const match of html.matchAll(/<script\b[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
+    const raw = stripHtml(match[1] ?? '').trim();
+    if (!raw) continue;
+    try {
+      values.push(JSON.parse(raw));
+    } catch {
+      continue;
+    }
+  }
+  return values;
+}
+
+function collectJsonLdEvents(value: unknown, events: any[] = []): any[] {
+  if (!value) return events;
+  if (Array.isArray(value)) {
+    for (const item of value) collectJsonLdEvents(item, events);
+    return events;
+  }
+  if (typeof value !== 'object') return events;
+  const row = value as Record<string, unknown>;
+  const type = row['@type'];
+  const types = Array.isArray(type) ? type.map((item) => String(item).toLowerCase()) : [String(type ?? '').toLowerCase()];
+  if (types.includes('event')) events.push(row);
+  collectJsonLdEvents(row['@graph'], events);
+  return events;
+}
+
+function jsonLdLocationName(location: unknown): string | null {
+  if (!location) return null;
+  if (typeof location === 'string') return normalizeNullable(location);
+  if (typeof location !== 'object') return null;
+  const row = location as Record<string, any>;
+  const address = row.address;
+  const addressText = typeof address === 'string'
+    ? address
+    : address && typeof address === 'object'
+      ? [address.streetAddress, address.addressLocality, address.addressRegion, address.addressCountry].map(normalizeString).filter(Boolean).join(', ')
+      : '';
+  return normalizeNullable([row.name, addressText].map(normalizeString).filter(Boolean).join(', '));
+}
+
+function parseJsonLdEventItems(html: string, source: { source_url?: string | null; categories?: string[] | null }): ParsedEventItem[] {
+  return jsonLdBlocks(html)
+    .flatMap((block) => collectJsonLdEvents(block))
+    .map((event) => {
+      const title = normalizeString(event.name ?? event.headline ?? event.title);
+      const startsAt = parseOptionalIsoDate(event.startDate ?? event.start_date ?? event.date) ?? parseHumanEventDate(normalizeString(event.startDate ?? event.date));
+      if (!title || !startsAt) return null;
+      const url = absoluteUrl(normalizeString(event.url ?? event['@id']), source.source_url) ?? normalizeNullable(source.source_url);
+      return {
+        external_id: normalizeNullable(event['@id'] ?? event.identifier ?? url),
+        title: title.slice(0, 300),
+        description: stripHtml(normalizeString(event.description)).slice(0, 5000) || null,
+        starts_at: startsAt,
+        ends_at: parseOptionalIsoDate(event.endDate ?? event.end_date),
+        timezone: 'Asia/Kolkata',
+        location: jsonLdLocationName(event.location),
+        category: Array.isArray(source.categories) ? source.categories[0] ?? null : null,
+        source_url: url,
+        source_snapshot: { parser: 'json_ld' },
+      } satisfies ParsedEventItem;
+    })
+    .filter(Boolean) as ParsedEventItem[];
 }
 
 export function parseHtmlEventItems(html: string, source: { source_url?: string | null; parser_key?: string | null; categories?: string[] | null }): ParsedEventItem[] {
   const parserKey = normalizeString(source.parser_key) || 'generic_html_events';
   const items: ParsedEventItem[] = [];
   const seen = new Set<string>();
+  const pushUnique = (item: ParsedEventItem) => {
+    const key = `${item.title.toLowerCase()}|${item.starts_at}|${item.source_url ?? ''}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    items.push(item);
+  };
+
+  for (const item of parseJsonLdEventItems(html, source)) {
+    pushUnique({
+      ...item,
+      source_snapshot: { ...(item.source_snapshot ?? {}), parser_key: parserKey },
+    });
+  }
 
   for (const block of htmlBlocksForParser(html, parserKey)) {
     const blockText = stripHtml(block);
     const startsAt = findHtmlDate(blockText);
     if (!startsAt) continue;
 
-    const href = htmlAttr(block.match(/<a\b[\s\S]*?<\/a>/i)?.[0] ?? block, 'href');
-    const sourceUrl = absoluteUrl(href, source.source_url) ?? normalizeNullable(source.source_url);
+    const sourceUrl = findHtmlSourceUrl(block, source.source_url) ?? normalizeNullable(source.source_url);
     const title = findHtmlTitle(block, blockText);
     if (!title || /^\d{1,2}\s+[A-Za-z]{3,9}/.test(title)) continue;
 
-    const key = `${title.toLowerCase()}|${startsAt}|${sourceUrl ?? ''}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-
-    items.push({
-      external_id: sourceUrl ?? key,
+    pushUnique({
+      external_id: sourceUrl ?? `${title.toLowerCase()}|${startsAt}`,
       title,
       description: blockText.slice(0, 5000) || null,
       starts_at: startsAt,
       ends_at: null,
       timezone: 'Asia/Kolkata',
-      location: findHtmlLocation(blockText),
+      location: findHtmlLocationFromCells(block, blockText, title),
       category: Array.isArray(source.categories) ? source.categories[0] ?? null : null,
       source_url: sourceUrl,
       source_snapshot: { parser: 'html', parser_key: parserKey },

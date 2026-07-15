@@ -59,6 +59,17 @@ type OAuthAppRow = {
   active: boolean;
 };
 
+export type SocialOAuthCallbackContext = {
+  platform: string;
+  userId: string;
+  operatorId: string;
+};
+
+export type SocialOAuthCallbackResult = {
+  connection: unknown;
+  context: SocialOAuthCallbackContext;
+};
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -336,11 +347,49 @@ async function consumeOauthState(stateRaw: string, platform: string) {
   return data;
 }
 
+function oauthContextFromStateRow(stateRow: any, platform: string): SocialOAuthCallbackContext {
+  return {
+    platform,
+    userId: String(stateRow.user_id),
+    operatorId: String(stateRow.operator_id),
+  };
+}
+
+function attachOAuthContextToError(err: unknown, context?: SocialOAuthCallbackContext): never {
+  if (context && typeof err === 'object' && err !== null) {
+    (err as any).socialOAuthContext = context;
+  }
+  throw err;
+}
+
+export async function getPendingOAuthStateContext(params: {
+  platform: string;
+  state?: string | null;
+}): Promise<SocialOAuthCallbackContext | null> {
+  const normalized = String(params.platform || '').trim().toLowerCase();
+  const stateRaw = String(params.state ?? '').trim();
+  if (!OAUTH_PLATFORMS.has(normalized) || !stateRaw) return null;
+
+  const stateHash = stateDigest(stateRaw);
+  const { data, error } = await supabase
+    .from('social_oauth_states')
+    .select('platform_code,user_id,operator_id,expires_at')
+    .eq('state_hash', stateHash)
+    .eq('platform_code', normalized)
+    .maybeSingle();
+
+  if (error && error.code !== 'PGRST116') throw error;
+  if (!data) return null;
+  if (new Date(String(data.expires_at)).getTime() < Date.now()) return null;
+
+  return oauthContextFromStateRow(data, normalized);
+}
+
 export async function handlePlatformCallback(params: {
   platform: string;
   code?: string;
   state?: string;
-}) {
+}): Promise<SocialOAuthCallbackResult> {
   const { platform, code, state } = params;
   const normalized = String(platform || '').trim().toLowerCase();
   if (!OAUTH_PLATFORMS.has(normalized)) throw new Error(`Unsupported callback platform: ${normalized}`);
@@ -348,62 +397,71 @@ export async function handlePlatformCallback(params: {
   if (!state) throw new Error('Missing oauth state');
 
   const stateRow = await consumeOauthState(state, normalized);
-  const appConfig = await resolveOAuthAppConfig(normalized, String(stateRow.operator_id));
+  const context = oauthContextFromStateRow(stateRow, normalized);
 
-  if (normalized === 'linkedin') {
-    const token = await exchangeLinkedInCode(code, appConfig as LinkedInOAuthAppConfig);
-    const actorUrn = await fetchLinkedInActorUrn(token.access_token, token.id_token);
+  try {
+    const appConfig = await resolveOAuthAppConfig(normalized, context.operatorId);
 
-    return upsertConnection({
+    if (normalized === 'linkedin') {
+      const token = await exchangeLinkedInCode(code, appConfig as LinkedInOAuthAppConfig);
+      const actorUrn = await fetchLinkedInActorUrn(token.access_token, token.id_token);
+
+      const connection = await upsertConnection({
+        platform: normalized,
+        userId: context.userId,
+        operatorId: context.operatorId,
+        accessToken: token.access_token,
+        refreshToken: token.refresh_token,
+        expiresInSeconds: token.expires_in,
+        scopes: normalizeScopes(token.scope ? token.scope.split(' ') : appConfig.scopes, normalized),
+        metadata: {
+          actor_urn: actorUrn,
+          identity_source: token.id_token ? 'oidc_id_token' : 'linkedin_api',
+          refresh_token_expires_in: token.refresh_token_expires_in ?? null,
+        },
+      });
+      return { connection, context };
+    }
+
+    if (normalized === 'meta') {
+      const token = await exchangeMetaCode(code, appConfig);
+      const profile = await fetchMetaIdentity(token.access_token);
+
+      const connection = await upsertConnection({
+        platform: normalized,
+        userId: context.userId,
+        operatorId: context.operatorId,
+        accessToken: token.access_token,
+        expiresInSeconds: token.expires_in,
+        scopes: normalizeScopes(appConfig.scopes, normalized),
+        metadata: {
+          profile,
+        },
+      });
+      return { connection, context };
+    }
+
+    const token = await exchangeRedditCode(code, appConfig);
+    const userAgent = String(appConfig.metadata?.user_agent || 'obaol-social-connector/1.0').trim();
+    const profile = await fetchRedditIdentity(token.access_token, userAgent);
+
+    const connection = await upsertConnection({
       platform: normalized,
-      userId: String(stateRow.user_id),
-      operatorId: String(stateRow.operator_id),
+      userId: context.userId,
+      operatorId: context.operatorId,
       accessToken: token.access_token,
       refreshToken: token.refresh_token,
       expiresInSeconds: token.expires_in,
-      scopes: normalizeScopes(token.scope ? token.scope.split(' ') : appConfig.scopes, normalized),
-      metadata: {
-        actor_urn: actorUrn,
-        identity_source: token.id_token ? 'oidc_id_token' : 'linkedin_api',
-        refresh_token_expires_in: token.refresh_token_expires_in ?? null,
-      },
-    });
-  }
-
-  if (normalized === 'meta') {
-    const token = await exchangeMetaCode(code, appConfig);
-    const profile = await fetchMetaIdentity(token.access_token);
-
-    return upsertConnection({
-      platform: normalized,
-      userId: String(stateRow.user_id),
-      operatorId: String(stateRow.operator_id),
-      accessToken: token.access_token,
-      expiresInSeconds: token.expires_in,
-      scopes: normalizeScopes(appConfig.scopes, normalized),
+      scopes: normalizeScopes((token.scope ? token.scope.split(' ') : appConfig.scopes), normalized),
       metadata: {
         profile,
+        user_agent: userAgent,
       },
     });
+    return { connection, context };
+  } catch (err) {
+    attachOAuthContextToError(err, context);
   }
-
-  const token = await exchangeRedditCode(code, appConfig);
-  const userAgent = String(appConfig.metadata?.user_agent || 'obaol-social-connector/1.0').trim();
-  const profile = await fetchRedditIdentity(token.access_token, userAgent);
-
-  return upsertConnection({
-    platform: normalized,
-    userId: String(stateRow.user_id),
-    operatorId: String(stateRow.operator_id),
-    accessToken: token.access_token,
-    refreshToken: token.refresh_token,
-    expiresInSeconds: token.expires_in,
-    scopes: normalizeScopes((token.scope ? token.scope.split(' ') : appConfig.scopes), normalized),
-    metadata: {
-      profile,
-      user_agent: userAgent,
-    },
-  });
 }
 
 export async function disconnectPlatform(platform: string, userId?: string | null, operatorId?: string | null) {

@@ -60,6 +60,28 @@ test('social OAuth error URL can include a stable error code', () => {
   );
 });
 
+test('social OAuth success URL can preserve operator context', () => {
+  const env = {
+    SOCIAL_OAUTH_SUCCESS_REDIRECT: 'https://emarketing.obaol.com/dashboard/social-connectors',
+  } as NodeJS.ProcessEnv;
+
+  assert.equal(
+    socialOAuthSuccessUrl('linkedin', env, { operatorId: 'operator-123' }),
+    'https://emarketing.obaol.com/dashboard/social-connectors?social_connected=linkedin&operator_id=operator-123'
+  );
+});
+
+test('social OAuth error URL can preserve operator context with stable error code', () => {
+  const env = {
+    SOCIAL_OAUTH_SUCCESS_REDIRECT: 'https://emarketing.obaol.com/dashboard/social-connectors',
+  } as NodeJS.ProcessEnv;
+
+  assert.equal(
+    socialOAuthErrorUrl('LinkedIn profile fetch failed', env, 'provider_permission_denied', { operatorId: 'operator-123' }),
+    'https://emarketing.obaol.com/dashboard/social-connectors?social_connect_error=LinkedIn%20profile%20fetch%20failed&social_connect_error_code=provider_permission_denied&operator_id=operator-123'
+  );
+});
+
 test('social OAuth classifier treats LinkedIn 403 access denied as provider permission failure', () => {
   assert.equal(
     classifySocialOAuthError('LinkedIn profile fetch failed (403): {"code":"ACCESS_DENIED","message":"Not enough permissions"}'),

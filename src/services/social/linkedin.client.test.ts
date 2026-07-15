@@ -45,6 +45,28 @@ test('LinkedIn actor URN uses OIDC userinfo before legacy profile endpoint', asy
   }
 });
 
+test('LinkedIn actor URN uses JWT access token before failing on legacy profile permissions', async () => {
+  const { fetchLinkedInActorUrn } = await import('./linkedin.client.js');
+  const originalFetch = globalThis.fetch;
+  const urls: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    urls.push(url);
+    if (url === 'https://api.linkedin.com/v2/userinfo') {
+      return new Response(JSON.stringify({ message: 'missing OIDC product' }), { status: 403 });
+    }
+    throw new Error('legacy profile endpoint should not be called when access token contains sub');
+  }) as typeof fetch;
+
+  try {
+    const urn = await fetchLinkedInActorUrn(makeUnsignedJwt({ sub: 'access-token-member-id' }));
+    assert.equal(urn, 'urn:li:person:access-token-member-id');
+    assert.deepEqual(urls, ['https://api.linkedin.com/v2/userinfo']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('LinkedIn actor URN falls back to legacy profile endpoint', async () => {
   const { fetchLinkedInActorUrn } = await import('./linkedin.client.js');
   const originalFetch = globalThis.fetch;

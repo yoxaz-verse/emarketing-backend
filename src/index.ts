@@ -21,7 +21,7 @@ import newsletterRoutes from './routes/newsletter.routes';
 import marketplacesRoutes from './routes/marketplaces.routes';
 import socialRoutes from './routes/social.routes';
 import socialAuthRoutes from './routes/social.auth.routes';
-import { handlePlatformCallback } from './services/social/socialAuth.service';
+import { getPendingOAuthStateContext, handlePlatformCallback } from './services/social/socialAuth.service';
 import {
   classifySocialOAuthError,
   isSocialOAuthRedirectConfigured,
@@ -142,6 +142,7 @@ app.get('/ping', (_req, res) => {
 
 async function handlePublicSocialOAuthCallback(req: any, res: any, platformInput?: string) {
   const platform = String(platformInput ?? req.params?.platform ?? req.query?.platform ?? 'linkedin');
+  let callbackContext: { operatorId?: string | null } | null = null;
   const providerError =
     String(req.query?.error_message ?? '').trim() ||
     String(req.query?.error_description ?? '').trim() ||
@@ -149,20 +150,32 @@ async function handlePublicSocialOAuthCallback(req: any, res: any, platformInput
 
   try {
     if (providerError) {
-      throw new Error(providerError);
+      try {
+        callbackContext = await getPendingOAuthStateContext({
+          platform,
+          state: String(req.query?.state ?? ''),
+        });
+      } catch (contextErr: any) {
+        console.warn('[SOCIAL CONNECT CALLBACK CONTEXT LOOKUP WARN]', contextErr?.message ?? contextErr);
+      }
+      const err = new Error(providerError);
+      if (callbackContext) (err as any).socialOAuthContext = callbackContext;
+      throw err;
     }
 
-    await handlePlatformCallback({
+    const result = await handlePlatformCallback({
       platform,
       code: String(req.query?.code ?? ''),
       state: String(req.query?.state ?? ''),
     });
+    callbackContext = { operatorId: result.context.operatorId };
 
-    res.redirect(socialOAuthSuccessUrl(platform));
+    res.redirect(socialOAuthSuccessUrl(platform, process.env, callbackContext));
   } catch (err: any) {
     const message = err?.message ?? 'connect_failed';
+    const operatorId = String(err?.socialOAuthContext?.operatorId ?? callbackContext?.operatorId ?? '').trim();
     console.error('[SOCIAL CONNECT PUBLIC CALLBACK ERROR]', message);
-    res.redirect(socialOAuthErrorUrl(message, process.env, classifySocialOAuthError(message)));
+    res.redirect(socialOAuthErrorUrl(message, process.env, classifySocialOAuthError(message), { operatorId }));
   }
 }
 
