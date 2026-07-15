@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/requireAuth';
 import { requireWriteRole } from '../middleware/security';
+import { requireModuleAccess } from '../auth/moduleAccess';
 import {
   attachLeadsToCampaign,
   detachLeadsFromCampaign,
@@ -16,6 +17,7 @@ import { normalizePagination } from '../utils/pagination';
 
 const router = Router();
 router.use(requireAuth('viewer'));
+router.use(requireModuleAccess('marketing'));
 router.use(requireWriteRole);
 
 

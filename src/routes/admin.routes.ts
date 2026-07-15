@@ -14,6 +14,8 @@ import {
 import { requireAuth } from '../middleware/requireAuth.js';
 import { supabase } from '../supabase.js';
 import { encryptSocialSecret } from '../utils/socialIntegrationEncryption.js';
+import { checkLinkedInConnectionStatus, normalizeLinkedInActorUrn } from '../services/social/linkedin.client.js';
+import { socialOAuthRedirectBase } from '../services/social/oauthRedirect.js';
 
 const router = Router();
 type SocialPlatform = 'linkedin' | 'meta' | 'reddit' | 'telegram' | 'whatsapp';
@@ -114,6 +116,7 @@ router.get('/operators', async (req, res) => {
 
 const SOCIAL_PLATFORMS: SocialPlatform[] = ['linkedin', 'meta', 'reddit', 'telegram', 'whatsapp'];
 export const SOCIAL_APP_SECRET_PLACEHOLDER = '***';
+export const LINKEDIN_DEFAULT_SCOPES = ['w_member_social'];
 
 function isSocialPlatform(value: string): value is SocialPlatform {
   return SOCIAL_PLATFORMS.includes(value as SocialPlatform);
@@ -133,12 +136,13 @@ function extractConfig(platform: SocialPlatform, input: Record<string, unknown>)
     const scopes = Array.isArray(input.scopes)
       ? input.scopes.map((s) => String(s ?? '').trim()).filter(Boolean)
       : [];
+    const actorUrn = normalizeLinkedInActorUrn(trim(input.actor_urn));
     return {
       client_id: trim(input.client_id),
       secret: trim(input.client_secret),
       redirect_uri: trim(input.redirect_uri),
-      scopes: scopes.length > 0 ? scopes : ['w_member_social', 'openid', 'profile'],
-      metadata: {},
+      scopes: scopes.length > 0 ? scopes : LINKEDIN_DEFAULT_SCOPES,
+      metadata: actorUrn ? { actor_urn: actorUrn } : {},
     };
   }
 
@@ -232,6 +236,7 @@ export function nonSecretFields(platform: SocialPlatform, row: any, hasSecret: b
     fields.scopes = Array.isArray(row.scopes)
       ? row.scopes.map((scope: unknown) => String(scope ?? '').trim()).filter(Boolean).join(',')
       : '';
+    fields.actor_urn = String((metadata as any).actor_urn ?? '');
     return fields;
   }
 
@@ -375,6 +380,105 @@ async function handleGetSocialApp(req: any, res: any, platformRaw: string, opera
   }
 }
 
+async function getSocialAppRow(platform: SocialPlatform, operatorId: string, isGlobalScope: boolean) {
+  const query = isGlobalScope
+    ? supabase
+      .from('social_global_oauth_apps')
+      .select('*')
+      .eq('platform_code', platform)
+      .eq('active', true)
+    : supabase
+      .from('social_operator_oauth_apps')
+      .select('*')
+      .eq('operator_id', operatorId)
+      .eq('platform_code', platform)
+      .eq('active', true);
+
+  const { data, error } = await query.maybeSingle();
+  if (error && error.code !== 'PGRST116') throw error;
+  return data as any | null;
+}
+
+async function getEffectiveSocialAppRow(platform: SocialPlatform, operatorId: string) {
+  const [operatorRow, globalRow] = await Promise.all([
+    operatorId ? getSocialAppRow(platform, operatorId, false) : Promise.resolve(null),
+    getSocialAppRow(platform, '', true),
+  ]);
+
+  return {
+    row: operatorRow ?? globalRow,
+    source: operatorRow ? 'operator' : globalRow ? 'global' : 'missing',
+  };
+}
+
+async function handleGetLinkedInDiagnostics(req: any, res: any) {
+  try {
+    const operatorId = String(req.query?.operator_id ?? '').trim();
+    if (!operatorId) return res.status(400).json({ error: 'operator_id is required' });
+
+    const { row, source } = await getEffectiveSocialAppRow('linkedin', operatorId);
+    const fields = row ? nonSecretFields('linkedin', row, Boolean(String(row.client_secret_encrypted ?? '').trim())) : {};
+    const missingFields = row ? missingRequired('linkedin', fields) : requiredFieldsByPlatform('linkedin');
+    const scopes = Array.isArray(row?.scopes)
+      ? row.scopes.map((scope: unknown) => String(scope ?? '').trim()).filter(Boolean)
+      : LINKEDIN_DEFAULT_SCOPES;
+    const unsupportedIdentityScopes = scopes.filter((scope: string) => ['openid', 'profile'].includes(scope));
+    const redirectUri = String(row?.redirect_uri ?? '').trim();
+    const expectedCallbackUrl = `${process.env.LINKEDIN_REDIRECT_URI || 'https://emarketing-backend.infra.obaol.com/social/oauth2-credential/callback'}`;
+    const dashboardRedirectBase = socialOAuthRedirectBase(process.env);
+
+    const { data: connectionRow, error: connectionError } = await supabase
+      .from('social_oauth_connections')
+      .select('*')
+      .eq('platform_code', 'linkedin')
+      .eq('operator_id', operatorId)
+      .eq('user_id', req.auth?.user_id)
+      .maybeSingle();
+
+    if (connectionError && connectionError.code !== 'PGRST116') throw connectionError;
+
+    const connectionStatus = connectionRow
+      ? checkLinkedInConnectionStatus({
+        access_token_encrypted: String(connectionRow.access_token_encrypted ?? ''),
+        refresh_token_encrypted: connectionRow.refresh_token_encrypted ?? null,
+        expires_at: connectionRow.expires_at ?? null,
+        scopes: connectionRow.scopes ?? [],
+        metadata: connectionRow.metadata ?? {},
+      })
+      : { status: 'disconnected' as const, reason: 'No LinkedIn connection found' };
+
+    return res.json({
+      platform_code: 'linkedin',
+      operator_id: operatorId,
+      app_config_source: source,
+      configured: Boolean(row) && missingFields.length === 0,
+      missing_fields: missingFields,
+      redirect_uri: redirectUri,
+      expected_callback_url: expectedCallbackUrl,
+      redirect_uri_matches_expected: Boolean(redirectUri) && redirectUri === expectedCallbackUrl,
+      dashboard_redirect_base: dashboardRedirectBase,
+      scopes,
+      unsupported_identity_scopes: unsupportedIdentityScopes,
+      actor_urn_configured: Boolean(String((row?.metadata ?? {}).actor_urn ?? '').trim()),
+      connection_status: connectionStatus.status,
+      connection_reason: connectionStatus.reason ?? connectionRow?.last_error ?? null,
+      connected_scopes: connectionRow?.scopes ?? [],
+      connection_has_actor_urn: Boolean(String(connectionRow?.metadata?.actor_urn ?? '').trim()),
+      last_error: connectionRow?.last_error ?? null,
+      note: 'Client secret and access tokens are intentionally omitted.',
+    });
+  } catch (err: any) {
+    if (isSocialAppSchemaMismatch(err)) {
+      return res.status(500).json({ error: SOCIAL_APP_SCHEMA_ERROR });
+    }
+    console.error('[ADMIN_LINKEDIN_DIAGNOSTICS_ERROR]', {
+      role: req.auth?.role ?? null,
+      message: err?.message ?? 'Unknown error',
+    });
+    return res.status(500).json({ error: err?.message ?? 'Failed to read LinkedIn diagnostics' });
+  }
+}
+
 async function handlePutSocialApp(req: any, res: any, platformRaw: string, body: any, scopeRaw?: string) {
   try {
     const platform = String(platformRaw ?? '').trim().toLowerCase();
@@ -484,6 +588,10 @@ router.put('/social-apps/:platform', async (req, res) => {
 router.put('/social-apps', async (req, res) => {
   const platform = String(req.body?.platform ?? req.query?.platform ?? '');
   return handlePutSocialApp(req, res, platform, req.body, String(req.query?.scope ?? req.body?.scope ?? 'operator'));
+});
+
+router.get('/social-apps/linkedin/diagnostics', async (req, res) => {
+  return handleGetLinkedInDiagnostics(req, res);
 });
 
 router.get('/sending-limits', async (_req, res) => {

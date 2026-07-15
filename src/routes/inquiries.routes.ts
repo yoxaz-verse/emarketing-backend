@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/requireAuth';
+import { requireModuleAccess } from '../auth/moduleAccess';
 import {
   createQuoteDraft,
   createFetchRun,
@@ -51,6 +52,7 @@ router.post('/webhook/:sourceCode', rateLimit({ name: 'inquiry-webhook', windowM
 });
 
 router.use(requireAuth('viewer'));
+router.use(requireModuleAccess('inquiry'));
 router.use(requireWriteRole);
 
 router.get('/sources', async (_req, res) => {

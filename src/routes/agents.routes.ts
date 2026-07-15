@@ -2,6 +2,7 @@ import { Router } from 'express';
 import crypto from 'crypto';
 import { requireAuth } from '../middleware/requireAuth';
 import { requireWriteRole } from '../middleware/security';
+import { requireModuleAccess } from '../auth/moduleAccess';
 import {
   createAgent,
   deleteAgent,
@@ -54,6 +55,11 @@ router.use((req, res, next) => {
     || req.method === 'POST' && /^\/tasks\/[^/]+\/result$/.test(req.path);
   if (workerRoute) return next();
   return requireAuth('viewer')(req, res, next);
+});
+router.use((req, res, next) => {
+  const workerRoute = req.method === 'GET' && req.path === '/tasks/next'
+    || req.method === 'POST' && /^\/tasks\/[^/]+\/result$/.test(req.path);
+  return workerRoute ? next() : requireModuleAccess('openflow_ai')(req, res, next);
 });
 router.use((req, res, next) => {
   const workerRoute = req.method === 'GET' && req.path === '/tasks/next'

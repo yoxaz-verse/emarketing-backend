@@ -3,10 +3,10 @@ import { supabase } from '../../supabase';
 import { decryptSocialSecret, encryptSocialSecret } from '../../utils/socialIntegrationEncryption';
 import {
   exchangeLinkedInCode,
-  fetchLinkedInActorUrn,
   LinkedInOAuthAppConfig,
   linkedInAuthorizeUrl,
   checkLinkedInConnectionStatus,
+  tryFetchLinkedInActorUrn,
 } from './linkedin.client';
 import {
   checkConnectionStatus,
@@ -27,7 +27,7 @@ const STATE_TTL_MINUTES = 15;
 const OAUTH_PLATFORMS = new Set(['linkedin', 'meta', 'reddit']);
 const DIRECT_VALIDATE_PLATFORMS = new Set(['telegram', 'whatsapp']);
 const PLATFORM_SCOPES: Record<string, string[]> = {
-  linkedin: ['w_member_social', 'openid', 'profile'],
+  linkedin: ['w_member_social'],
   meta: ['pages_manage_posts', 'pages_read_engagement', 'business_management', 'instagram_basic'],
   reddit: ['identity', 'submit'],
   telegram: [],
@@ -320,7 +320,7 @@ export async function startPlatformConnect(platform: string, userId?: string | n
       });
     }
 
-    return socialOAuthSuccessUrl(normalized);
+    return socialOAuthSuccessUrl(normalized, process.env, { operatorId });
   }
 
   throw new Error(`Unsupported platform connect flow: ${normalized}`);
@@ -404,7 +404,21 @@ export async function handlePlatformCallback(params: {
 
     if (normalized === 'linkedin') {
       const token = await exchangeLinkedInCode(code, appConfig as LinkedInOAuthAppConfig);
-      const actorUrn = await fetchLinkedInActorUrn(token.access_token, token.id_token);
+      const actor = await tryFetchLinkedInActorUrn(
+        token.access_token,
+        token.id_token,
+        String(appConfig.metadata?.actor_urn ?? '')
+      );
+      const metadata: Record<string, unknown> = {
+        identity_source: actor.source,
+        refresh_token_expires_in: token.refresh_token_expires_in ?? null,
+      };
+      if (actor.actorUrn) {
+        metadata.actor_urn = actor.actorUrn;
+      } else {
+        metadata.actor_resolution_error = actor.error ?? 'Actor/member URN required';
+        metadata.actor_urn_required = true;
+      }
 
       const connection = await upsertConnection({
         platform: normalized,
@@ -414,11 +428,7 @@ export async function handlePlatformCallback(params: {
         refreshToken: token.refresh_token,
         expiresInSeconds: token.expires_in,
         scopes: normalizeScopes(token.scope ? token.scope.split(' ') : appConfig.scopes, normalized),
-        metadata: {
-          actor_urn: actorUrn,
-          identity_source: token.id_token ? 'oidc_id_token' : 'linkedin_api',
-          refresh_token_expires_in: token.refresh_token_expires_in ?? null,
-        },
+        metadata,
       });
       return { connection, context };
     }

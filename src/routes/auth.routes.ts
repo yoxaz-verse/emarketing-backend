@@ -10,6 +10,7 @@ import {
   resetPassword
 } from '../services/auth/passwordReset.service';
 import { rateLimit } from '../middleware/security';
+import { normalizeModuleAccessFlags } from '../auth/moduleAccess';
 
 const router = Router();
 
@@ -42,7 +43,7 @@ router.post('/login', rateLimit({ name: 'login', windowMs: 15 * 60_000, max: 10 
     // 2️⃣ Load app-level user
     const { data: user, error: userError } = await supabase
       .from('users')
-      .select('id, role, operator_id, active')
+      .select('id, role, operator_id, access_flags, active')
       .eq('auth_user_id', authUserId)
       .single();
 
@@ -63,6 +64,7 @@ router.post('/login', rateLimit({ name: 'login', windowMs: 15 * 60_000, max: 10 
       user_id: user.id,
       role: user.role,
       operator_id: user.operator_id,
+      access_flags: normalizeModuleAccessFlags(user.access_flags, user.role),
     });
 
     return res.json({
@@ -70,6 +72,7 @@ router.post('/login', rateLimit({ name: 'login', windowMs: 15 * 60_000, max: 10 
       user: {
         role: user.role,
         operator_id: user.operator_id,
+        access_flags: normalizeModuleAccessFlags(user.access_flags, user.role),
       },
     });
   } catch (err: any) {
@@ -129,6 +132,7 @@ export function assertAuth(
     role: any;
     user_id?: string;
     operator_id?: string | null;
+    access_flags?: Record<string, boolean>;
     api_key_id?: string;
   };
 } {
@@ -150,7 +154,7 @@ router.get('/me', requireAuthLite(), async (req, res) => {
 
   const { data: user, error } = await supabase
     .from('users')
-    .select('id, role, operator_id, email, active')
+    .select('id, role, operator_id, access_flags, email, active')
     .eq('id', userId)
     .single();
 
@@ -162,6 +166,7 @@ router.get('/me', requireAuthLite(), async (req, res) => {
     id: user.id,
     role: user.role,
     operator_id: user.operator_id,
+    access_flags: normalizeModuleAccessFlags(user.access_flags, user.role),
     email: user.email,
   });
 });

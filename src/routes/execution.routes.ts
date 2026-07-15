@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/requireAuth';
+import { requireModuleAccess } from '../auth/moduleAccess';
 import {
 
   handleBounce,
@@ -49,6 +50,7 @@ router.post('/unsubscribe', async (req, res) => {
 
 // All execution, diagnostics, recovery, and voice actions below require an app/service JWT.
 router.use(requireAuth('user'));
+router.use(requireModuleAccess('marketing'));
 
 
 // Campaign Step 6

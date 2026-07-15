@@ -1,11 +1,13 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/requireAuth';
 import { requireWriteRole } from '../middleware/security';
+import { requireModuleAccess } from '../auth/moduleAccess';
 import { supabase } from '../supabase';
 import { insertSystemEvent } from '../services/systemEvents.service';
 
 const router = Router();
 router.use(requireAuth('viewer'));
+router.use(requireModuleAccess('marketing'));
 router.use(requireWriteRole);
 
 function createHttpError(message: string, statusCode: number) {

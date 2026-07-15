@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/requireAuth';
 import { requireWriteRole } from '../middleware/security';
+import { requireModuleAccess } from '../auth/moduleAccess';
 import {
   createSocialPublishJobs,
   getSocialPublishJob,
@@ -14,6 +15,7 @@ import {
 
 const router = Router();
 router.use(requireAuth('viewer'));
+router.use(requireModuleAccess('social_media'));
 router.use(requireWriteRole);
 
 function resolveOperatorId(req: any): string | null {

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/requireAuth';
 import { requireWriteRole } from '../middleware/security';
+import { requireModuleAccess } from '../auth/moduleAccess';
 import {
   confirmNewsletterSubscription,
   createNewsletterIssue,
@@ -82,6 +83,7 @@ router.put('/preferences/:token', async (req, res) => {
 });
 
 router.use(requireAuth('viewer'));
+router.use(requireModuleAccess('newsletter'));
 router.use(requireWriteRole);
 
 router.post('/issues', async (req, res) => {

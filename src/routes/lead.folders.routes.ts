@@ -1,10 +1,12 @@
 import { Router } from 'express';
 import { supabase } from '../supabase';
 import { requireAuth } from '../middleware/requireAuth';
+import { requireModuleAccess } from '../auth/moduleAccess';
 import { requireWriteRole } from '../middleware/security';
 
 const router = Router();
 router.use(requireAuth('viewer'));
+router.use(requireModuleAccess('marketing'));
 router.use(requireWriteRole);
 
 router.get('/', async (_req, res) => {

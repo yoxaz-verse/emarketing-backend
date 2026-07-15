@@ -1,4 +1,5 @@
 import { Role, ROLE_HIERARCHY } from '../../auth/roles';
+import { normalizeModuleAccessFlags } from '../../auth/moduleAccess';
 import { supabase } from '../../supabase';
 import { supabaseAdmin } from '../../utils/supabaseAdmin';
 
@@ -26,6 +27,8 @@ export async function handleUserBeforeWrite(
   if (!isValidRole(payload.role)) {
     throw new Error('Invalid role');
   }
+
+  payload.access_flags = normalizeModuleAccessFlags(payload.access_flags, payload.role);
 
   /* ======================================================
      2️⃣ AUTH USER RESOLUTION (CREATE MODE ONLY)

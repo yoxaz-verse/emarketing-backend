@@ -1,9 +1,11 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/requireAuth';
+import { requireModuleAccess } from '../auth/moduleAccess';
 import { listCommunityBlogFeed } from '../services/blogs/blogs.service';
 
 const router = Router();
 router.use(requireAuth('viewer'));
+router.use(requireModuleAccess('social_media'));
 
 router.get('/:communityId/blog-feed', async (req, res) => {
   try {

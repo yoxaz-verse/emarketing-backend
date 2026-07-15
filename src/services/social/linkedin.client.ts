@@ -23,6 +23,7 @@ export type LinkedInOAuthAppConfig = {
   clientSecret: string;
   redirectUri: string;
   scopes: string[];
+  metadata?: Record<string, unknown>;
 };
 
 export type LinkedInTokenResponse = {
@@ -49,6 +50,13 @@ export function checkLinkedInConnectionStatus(conn: LinkedInConnection | null): 
   const scopes = new Set((conn.scopes ?? []).map((s) => s.trim()));
   if (!scopes.has('w_member_social')) {
     return { status: 'missing_scope', reason: 'Missing w_member_social scope' };
+  }
+
+  if (!String(conn.metadata?.actor_urn ?? '').trim()) {
+    return {
+      status: 'disconnected',
+      reason: 'LinkedIn actor/member URN required. Add Actor / Member URN in Configure, save, then reconnect LinkedIn.',
+    };
   }
 
   return { status: 'connected' };
@@ -117,7 +125,7 @@ export async function publishLinkedInTextLink(conn: LinkedInConnection, input: P
 }
 
 export function linkedInAuthorizeUrl(state: string, config: LinkedInOAuthAppConfig): string {
-  const scope = (config.scopes ?? []).join(' ').trim() || 'w_member_social openid profile';
+  const scope = (config.scopes ?? []).join(' ').trim() || 'w_member_social';
 
   const params = new URLSearchParams({
     response_type: 'code',
@@ -169,6 +177,14 @@ function subjectUrnFromJwt(tokenInput?: string | null): string | null {
   }
 }
 
+export function normalizeLinkedInActorUrn(value?: string | null): string | null {
+  const raw = String(value ?? '').trim();
+  if (!raw) return null;
+  if (/^urn:li:person:[A-Za-z0-9_-]+$/.test(raw)) return raw;
+  if (/^[A-Za-z0-9_-]+$/.test(raw)) return `urn:li:person:${raw}`;
+  return null;
+}
+
 async function fetchLinkedInOidcActorUrn(accessToken: string): Promise<string | null> {
   const res = await fetch('https://api.linkedin.com/v2/userinfo', {
     method: 'GET',
@@ -206,7 +222,14 @@ async function fetchLinkedInLegacyActorUrn(accessToken: string): Promise<string>
   return `urn:li:person:${id}`;
 }
 
-export async function fetchLinkedInActorUrn(accessToken: string, idToken?: string | null): Promise<string> {
+export async function fetchLinkedInActorUrn(
+  accessToken: string,
+  idToken?: string | null,
+  manualActorUrn?: string | null
+): Promise<string> {
+  const fromConfig = normalizeLinkedInActorUrn(manualActorUrn);
+  if (fromConfig) return fromConfig;
+
   const fromIdToken = subjectUrnFromJwt(idToken);
   if (fromIdToken) return fromIdToken;
 
@@ -216,5 +239,43 @@ export async function fetchLinkedInActorUrn(accessToken: string, idToken?: strin
   const fromAccessToken = subjectUrnFromJwt(accessToken);
   if (fromAccessToken) return fromAccessToken;
 
-  return fetchLinkedInLegacyActorUrn(accessToken);
+  try {
+    return await fetchLinkedInLegacyActorUrn(accessToken);
+  } catch (err: any) {
+    throw new Error(
+      `LinkedIn actor URN could not be resolved. Add Actor / Member URN in Configure, save, then reconnect LinkedIn. Technical detail: ${err?.message ?? err}`
+    );
+  }
+}
+
+export async function tryFetchLinkedInActorUrn(
+  accessToken: string,
+  idToken?: string | null,
+  manualActorUrn?: string | null
+): Promise<{
+  actorUrn: string | null;
+  source: 'manual_config' | 'oidc_id_token' | 'oidc_userinfo_or_token' | 'legacy_profile' | 'unresolved';
+  error?: string;
+}> {
+  const fromConfig = normalizeLinkedInActorUrn(manualActorUrn);
+  if (fromConfig) return { actorUrn: fromConfig, source: 'manual_config' };
+
+  const fromIdToken = subjectUrnFromJwt(idToken);
+  if (fromIdToken) return { actorUrn: fromIdToken, source: 'oidc_id_token' };
+
+  const fromUserInfo = await fetchLinkedInOidcActorUrn(accessToken);
+  if (fromUserInfo) return { actorUrn: fromUserInfo, source: 'oidc_userinfo_or_token' };
+
+  const fromAccessToken = subjectUrnFromJwt(accessToken);
+  if (fromAccessToken) return { actorUrn: fromAccessToken, source: 'oidc_userinfo_or_token' };
+
+  try {
+    return { actorUrn: await fetchLinkedInLegacyActorUrn(accessToken), source: 'legacy_profile' };
+  } catch (err: any) {
+    return {
+      actorUrn: null,
+      source: 'unresolved',
+      error: `Actor/member URN required. LinkedIn token was saved, but profile lookup was blocked. Add Actor / Member URN in Configure, save, then reconnect LinkedIn. Technical detail: ${err?.message ?? err}`,
+    };
+  }
 }

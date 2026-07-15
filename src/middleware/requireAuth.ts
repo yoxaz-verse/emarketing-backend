@@ -3,11 +3,13 @@ import crypto from 'crypto';
 import { supabase } from '../supabase.js';
 import { verifyToken } from '../utils/jwt';
 import { Role, hasPermission } from '../auth/roles.js';
+import { normalizeModuleAccessFlags } from '../auth/moduleAccess';
 
 type JwtPayload = {
   user_id: string;
   role: Role;
   operator_id?: string | null;
+  access_flags?: Record<string, boolean>;
 };
 
 function authMeta(req: Request) {
@@ -86,7 +88,7 @@ export function requireAuth(
       
         const { data: dbUser, error } = await supabase
           .from('users')
-          .select('id, role, operator_id, active')
+          .select('id, role, operator_id, access_flags, active')
           .eq('id', jwtUser.user_id)
           .maybeSingle();
       
@@ -127,6 +129,7 @@ export function requireAuth(
           user_id: dbUser.id,
           role: dbUser.role,
           operator_id: dbUser.operator_id ?? null,
+          access_flags: normalizeModuleAccessFlags(dbUser.access_flags, dbUser.role),
         };
 
         console.info('[AUTH_ALLOW] JWT auth accepted', { tokenSource, userId: dbUser.id, role: dbUser.role, ...authMeta(req) });
@@ -197,6 +200,7 @@ export function requireAuth(
           user_id: key.user_id,
           role: key.role as Role,
           operator_id: key.operator_id,
+          access_flags: normalizeModuleAccessFlags({}, key.role as Role),
         };
 
         console.info('[AUTH_ALLOW] API key accepted', { keyId: key.id, role: key.role });

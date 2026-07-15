@@ -190,6 +190,10 @@ export const TABLE_FIELD_MAP: Record<
       db: 'operator_id',
       behavior: 'plain',
     },
+    access_flags: {
+      db: 'access_flags',
+      behavior: 'plain',
+    },
     created_at: {
       db: 'created_at',
       behavior: 'readonly',

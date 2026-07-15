@@ -74,6 +74,7 @@ const app = express();
 const entrypoint = process.argv[1] ?? 'unknown';
 const runtimeMode = entrypoint.includes('/dist/') ? 'compiled-js' : 'typescript-source';
 const schemaGuardVersion = 'attach-schema-guard-v1';
+const socialOAuthContextVersion = 'operator-context-actor-urn-v2';
 const bootFingerprint = {
   startedAt: new Date().toISOString(),
   node: process.version,
@@ -84,6 +85,7 @@ const bootFingerprint = {
   authGuardMode: 'role-hierarchy-v1',
   operatorRouteGuard: "requireAuth('viewer')",
   socialOAuthRedirectConfigured: isSocialOAuthRedirectConfigured(),
+  socialOAuthContextVersion,
 };
 
 console.info('[BACKEND_RUNTIME]', {

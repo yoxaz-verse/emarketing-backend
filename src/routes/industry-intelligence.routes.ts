@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/requireAuth';
 import { requireWriteRole } from '../middleware/security';
+import { requireModuleAccess } from '../auth/moduleAccess';
 import {
   createIndustrySource,
   createIndustryFetchRun,
@@ -17,6 +18,7 @@ import {
 
 const router = Router();
 router.use(requireAuth('viewer'));
+router.use(requireModuleAccess('industry_intelligence'));
 router.use(requireWriteRole);
 
 router.get('/summary', async (_req, res) => {

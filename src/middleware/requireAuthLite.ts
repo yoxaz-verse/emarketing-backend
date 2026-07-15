@@ -2,11 +2,13 @@ import type { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { Role } from '../auth/roles';
 import { JWT_SECRET } from '../utils/jwt';
+import { normalizeModuleAccessFlags } from '../auth/moduleAccess';
 
 type JwtPayload = {
   user_id: string;
   role: Role;
   operator_id?: string | null;
+  access_flags?: Record<string, boolean>;
 };
 
 function authMeta(req: Request) {
@@ -58,7 +60,7 @@ export function requireAuthLite() {
 
       const { data: user, error } = await (await import('../supabase.js')).supabase
         .from('users')
-        .select('id,role,operator_id,active')
+        .select('id,role,operator_id,access_flags,active')
         .eq('id', payload.user_id)
         .maybeSingle();
       if (error || !user || user.active !== true) {
@@ -72,6 +74,7 @@ export function requireAuthLite() {
         role: user.role,
         user_id: user.id,
         operator_id: user.operator_id ?? null,
+        access_flags: normalizeModuleAccessFlags(user.access_flags, user.role),
       };
 
       next();

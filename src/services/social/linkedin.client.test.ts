@@ -67,6 +67,105 @@ test('LinkedIn actor URN uses JWT access token before failing on legacy profile 
   }
 });
 
+test('LinkedIn actor URN uses configured manual actor before legacy profile endpoint', async () => {
+  const { fetchLinkedInActorUrn } = await import('./linkedin.client.js');
+  const originalFetch = globalThis.fetch;
+  const urls: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    urls.push(url);
+    if (url === 'https://api.linkedin.com/v2/userinfo') {
+      return new Response(JSON.stringify({ message: 'missing OIDC product' }), { status: 403 });
+    }
+    throw new Error('legacy profile endpoint should not be called when manual actor is configured');
+  }) as typeof fetch;
+
+  try {
+    const urn = await fetchLinkedInActorUrn('access-token', null, 'urn:li:person:configured-member-id');
+    assert.equal(urn, 'urn:li:person:configured-member-id');
+    assert.deepEqual(urls, []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('LinkedIn actor URN normalizes configured raw member id', async () => {
+  const { fetchLinkedInActorUrn } = await import('./linkedin.client.js');
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    return new Response(JSON.stringify({ message: 'missing OIDC product' }), { status: 403 });
+  }) as typeof fetch;
+
+  try {
+    const urn = await fetchLinkedInActorUrn('access-token', null, 'raw-member-id_123');
+    assert.equal(urn, 'urn:li:person:raw-member-id_123');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('LinkedIn actor URN reports action when profile permissions block all identity paths', async () => {
+  const { fetchLinkedInActorUrn } = await import('./linkedin.client.js');
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url === 'https://api.linkedin.com/v2/userinfo') {
+      return new Response(JSON.stringify({ message: 'missing OIDC product' }), { status: 403 });
+    }
+    return new Response(
+      JSON.stringify({ status: 403, serviceErrorCode: 100, code: 'ACCESS_DENIED', message: 'Not enough permissions to access: me.GET.NO_VERSION' }),
+      { status: 403 }
+    );
+  }) as typeof fetch;
+
+  try {
+    await assert.rejects(
+      () => fetchLinkedInActorUrn('access-token'),
+      /Add Actor \/ Member URN in Configure/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('LinkedIn actor URN try helper returns actionable unresolved result instead of throwing', async () => {
+  const { tryFetchLinkedInActorUrn } = await import('./linkedin.client.js');
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url === 'https://api.linkedin.com/v2/userinfo') {
+      return new Response(JSON.stringify({ message: 'missing OIDC product' }), { status: 403 });
+    }
+    return new Response(
+      JSON.stringify({ code: 'ACCESS_DENIED', message: 'Not enough permissions to access: me.GET.NO_VERSION' }),
+      { status: 403 }
+    );
+  }) as typeof fetch;
+
+  try {
+    const result = await tryFetchLinkedInActorUrn('access-token');
+    assert.equal(result.actorUrn, null);
+    assert.equal(result.source, 'unresolved');
+    assert.match(result.error ?? '', /Actor\/member URN required/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('LinkedIn status rejects connected token without actor URN', async () => {
+  const { checkLinkedInConnectionStatus } = await import('./linkedin.client.js');
+  const status = checkLinkedInConnectionStatus({
+    access_token_encrypted: 'encrypted-token',
+    refresh_token_encrypted: null,
+    expires_at: null,
+    scopes: ['w_member_social'],
+    metadata: {},
+  });
+
+  assert.equal(status.status, 'disconnected');
+  assert.match(status.reason ?? '', /actor\/member URN required/i);
+});
+
 test('LinkedIn actor URN falls back to legacy profile endpoint', async () => {
   const { fetchLinkedInActorUrn } = await import('./linkedin.client.js');
   const originalFetch = globalThis.fetch;

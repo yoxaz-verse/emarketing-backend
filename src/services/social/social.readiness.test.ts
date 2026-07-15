@@ -34,7 +34,7 @@ function connection(overrides: Record<string, unknown> = {}): any {
     reason: null,
     scopes: ['w_member_social', 'r_liteprofile'],
     expires_at: null,
-    metadata: {},
+    metadata: { actor_urn: 'urn:li:person:test-member-id' },
     ...overrides,
   };
 }
@@ -102,4 +102,17 @@ test('readiness allows connected configured target', async () => {
   });
 
   assert.equal(result, null);
+});
+
+test('readiness rejects LinkedIn connection missing actor URN', async () => {
+  const { evaluateSocialTargetReadiness } = await loadReadinessModule();
+  const result = evaluateSocialTargetReadiness({
+    platform: 'linkedin',
+    connector: connector(),
+    connection: connection({ metadata: {} }),
+  });
+
+  assert.equal(result?.status, 'disconnected');
+  assert.deepEqual(result?.missing_fields, ['actor_urn']);
+  assert.match(result?.reason ?? '', /actor\/member URN/i);
 });

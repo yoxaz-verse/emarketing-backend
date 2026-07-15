@@ -157,6 +157,15 @@ export function evaluateSocialTargetReadiness(params: {
     };
   }
 
+  if (platform === 'linkedin' && !String(connection.metadata?.actor_urn ?? '').trim()) {
+    return {
+      platform_code: platform,
+      status: 'disconnected',
+      reason: 'LinkedIn actor/member URN required for publishing. Add Actor / Member URN in Configure, save, then reconnect LinkedIn.',
+      missing_fields: ['actor_urn'],
+    };
+  }
+
   return null;
 }
 

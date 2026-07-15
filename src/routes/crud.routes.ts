@@ -5,6 +5,7 @@ import { deleteRow, deleteRowsBulk, insertRow, listRows, updateRow } from '../se
 import { listRowsPage } from '../services/paginatedCrud.service';
 import { requireAuth } from '../middleware/requireAuth';
 import { requireWriteRole } from '../middleware/security';
+import { hasModuleAccess, type ModuleAccessKey } from '../auth/moduleAccess';
 
 const router = Router();
 
@@ -14,9 +15,33 @@ router.use(requireWriteRole);
 const ADMIN_ONLY_TABLES = new Set<string>([
   'users',
   'api_keys',
+  'inboxes',
+  'sending_domains',
+  'smtp_accounts',
+  'voice_agents',
+  'campaign_voice_agents',
+  'voice_calls',
   'system_events',
   'password_reset_tokens',
 ]);
+
+const TABLE_MODULE_ACCESS: Partial<Record<string, ModuleAccessKey>> = {
+  campaigns: 'marketing',
+  campaign_leads: 'marketing',
+  campaign_inboxes: 'marketing',
+  leads: 'marketing',
+  sequences: 'marketing',
+  sequence_steps: 'marketing',
+  sequence_analytics: 'marketing',
+  sequence_runs: 'marketing',
+  sequence_run_steps: 'marketing',
+  newsletter_subscribers: 'newsletter',
+  newsletter_preferences: 'newsletter',
+  newsletter_issues: 'newsletter',
+  newsletter_send_jobs: 'newsletter',
+  newsletter_send_logs: 'newsletter',
+  unsubscribe_tokens: 'newsletter',
+};
 
 function validateTable(table: string) {
   if (!ALLOWED_TABLES.includes(table as any)) {
@@ -30,6 +55,12 @@ function assertTablePermission(req: any, table: string) {
   const isAdmin = role === 'admin' || role === 'superadmin';
   if (ADMIN_ONLY_TABLES.has(table) && !isAdmin) {
     throw new Error('Insufficient permissions');
+  }
+  const requiredModule = TABLE_MODULE_ACCESS[table];
+  if (requiredModule && !hasModuleAccess(role, req?.auth?.access_flags, requiredModule)) {
+    const err = new Error('Module access required') as Error & { statusCode?: number };
+    err.statusCode = 403;
+    throw err;
   }
 }
 
