@@ -152,7 +152,7 @@ test('LinkedIn actor URN try helper returns actionable unresolved result instead
   }
 });
 
-test('LinkedIn status rejects connected token without actor URN', async () => {
+test('LinkedIn status reports identity required for connected token without actor URN', async () => {
   const { checkLinkedInConnectionStatus } = await import('./linkedin.client.js');
   const status = checkLinkedInConnectionStatus({
     access_token_encrypted: 'encrypted-token',
@@ -162,8 +162,31 @@ test('LinkedIn status rejects connected token without actor URN', async () => {
     metadata: {},
   });
 
-  assert.equal(status.status, 'disconnected');
+  assert.equal(status.status, 'identity_required');
   assert.match(status.reason ?? '', /member identity was not resolved/i);
+});
+
+test('LinkedIn connection metadata stores configured manual actor URN', async () => {
+  const { buildLinkedInConnectionMetadata } = await import('./linkedin.client.js');
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    throw new Error('fetch should not be called when manual actor is configured');
+  }) as typeof fetch;
+
+  try {
+    const metadata = await buildLinkedInConnectionMetadata({
+      accessToken: 'access-token',
+      manualActorUrn: 'configured-member-id',
+      refreshTokenExpiresIn: 1234,
+    });
+
+    assert.equal(metadata.actor_urn, 'urn:li:person:configured-member-id');
+    assert.equal(metadata.identity_source, 'manual_config');
+    assert.equal(metadata.refresh_token_expires_in, 1234);
+    assert.equal(metadata.actor_urn_required, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('LinkedIn actor URN falls back to legacy profile endpoint', async () => {

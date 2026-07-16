@@ -20,7 +20,7 @@ import { getConnectionStatuses, getOperatorPlatformConnection, hasOAuthAppConfig
 
 type SocialConnectionReadiness = {
   platform_code: string;
-  status: 'connected' | 'expired' | 'missing_scope' | 'disconnected';
+  status: 'connected' | 'expired' | 'missing_scope' | 'identity_required' | 'disconnected';
   reason: string | null;
   scopes: string[];
   expires_at: string | null;
@@ -29,7 +29,7 @@ type SocialConnectionReadiness = {
 
 export type SocialTargetReadinessDetail = {
   platform_code: string;
-  status: 'ready' | 'unknown_platform' | 'not_schedulable' | 'not_publishable' | 'unconfigured' | 'disconnected' | 'expired' | 'missing_scope';
+  status: 'ready' | 'unknown_platform' | 'not_schedulable' | 'not_publishable' | 'unconfigured' | 'disconnected' | 'expired' | 'missing_scope' | 'identity_required';
   reason: string;
   missing_fields: string[];
 };

@@ -6,7 +6,7 @@ import {
   LinkedInOAuthAppConfig,
   linkedInAuthorizeUrl,
   checkLinkedInConnectionStatus,
-  tryFetchLinkedInActorUrn,
+  buildLinkedInConnectionMetadata,
 } from './linkedin.client';
 import {
   checkConnectionStatus,
@@ -404,21 +404,12 @@ export async function handlePlatformCallback(params: {
 
     if (normalized === 'linkedin') {
       const token = await exchangeLinkedInCode(code, appConfig as LinkedInOAuthAppConfig);
-      const actor = await tryFetchLinkedInActorUrn(
-        token.access_token,
-        token.id_token,
-        String(appConfig.metadata?.actor_urn ?? '')
-      );
-      const metadata: Record<string, unknown> = {
-        identity_source: actor.source,
-        refresh_token_expires_in: token.refresh_token_expires_in ?? null,
-      };
-      if (actor.actorUrn) {
-        metadata.actor_urn = actor.actorUrn;
-      } else {
-        metadata.actor_resolution_error = actor.error ?? 'Actor/member URN required';
-        metadata.actor_urn_required = true;
-      }
+      const metadata = await buildLinkedInConnectionMetadata({
+        accessToken: token.access_token,
+        idToken: token.id_token,
+        manualActorUrn: String(appConfig.metadata?.actor_urn ?? ''),
+        refreshTokenExpiresIn: token.refresh_token_expires_in ?? null,
+      });
 
       const connection = await upsertConnection({
         platform: normalized,

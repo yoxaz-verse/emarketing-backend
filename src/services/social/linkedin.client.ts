@@ -41,7 +41,7 @@ function isExpired(expiresAt?: string | null): boolean {
 }
 
 export function checkLinkedInConnectionStatus(conn: LinkedInConnection | null): {
-  status: 'connected' | 'expired' | 'missing_scope' | 'disconnected';
+  status: 'connected' | 'expired' | 'missing_scope' | 'identity_required' | 'disconnected';
   reason?: string;
 } {
   if (!conn) return { status: 'disconnected', reason: 'No LinkedIn connection found' };
@@ -54,8 +54,8 @@ export function checkLinkedInConnectionStatus(conn: LinkedInConnection | null): 
 
   if (!String(conn.metadata?.actor_urn ?? '').trim()) {
     return {
-      status: 'disconnected',
-      reason: 'LinkedIn connected, but member identity was not resolved. Reconnect after confirming LinkedIn callback/scopes, or use the advanced Member URN fallback only if diagnostics asks for it.',
+      status: 'identity_required',
+      reason: 'LinkedIn token is saved, but member identity was not resolved. Enter the LinkedIn Member URN fallback, save, then reconnect LinkedIn.',
     };
   }
 
@@ -278,4 +278,30 @@ export async function tryFetchLinkedInActorUrn(
       error: `LinkedIn token was saved, but member identity could not be resolved automatically. Confirm LinkedIn callback/scopes and reconnect; use the advanced Member URN fallback only if diagnostics asks for it. Technical detail: ${err?.message ?? err}`,
     };
   }
+}
+
+export async function buildLinkedInConnectionMetadata(params: {
+  accessToken: string;
+  idToken?: string | null;
+  manualActorUrn?: string | null;
+  refreshTokenExpiresIn?: number | null;
+}): Promise<Record<string, unknown>> {
+  const actor = await tryFetchLinkedInActorUrn(
+    params.accessToken,
+    params.idToken,
+    params.manualActorUrn
+  );
+  const metadata: Record<string, unknown> = {
+    identity_source: actor.source,
+    refresh_token_expires_in: params.refreshTokenExpiresIn ?? null,
+  };
+
+  if (actor.actorUrn) {
+    metadata.actor_urn = actor.actorUrn;
+  } else {
+    metadata.actor_resolution_error = actor.error ?? 'Actor/member URN required';
+    metadata.actor_urn_required = true;
+  }
+
+  return metadata;
 }

@@ -105,11 +105,13 @@ test('LinkedIn redirect diagnostics supports legacy paths but recommends canonic
   const legacy = linkedInCallbackStatus('https://emarketing-backend.infra.obaol.com/rest/oauth2-credential/callback', env);
   assert.equal(legacy.redirect_uri_supported, true);
   assert.equal(legacy.redirect_uri_recommended, false);
+  assert.equal(legacy.redirect_uri_exact, false);
   assert.equal(legacy.canonical_callback_url, 'https://emarketing-backend.infra.obaol.com/social/oauth2-credential/callback');
 
   const canonical = linkedInCallbackStatus('https://emarketing-backend.infra.obaol.com/social/oauth2-credential/callback', env);
   assert.equal(canonical.redirect_uri_supported, true);
   assert.equal(canonical.redirect_uri_recommended, true);
+  assert.equal(canonical.redirect_uri_exact, true);
 });
 
 test('social OAuth schema migration is idempotent and creates required tables', () => {

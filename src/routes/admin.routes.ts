@@ -177,11 +177,13 @@ export function linkedInCallbackStatus(redirectUri: string, env: NodeJS.ProcessE
   const saved = String(redirectUri ?? '').trim();
   const canonical = linkedInCanonicalCallbackUrl(env);
   const accepted = linkedInAcceptedCallbackUrls(env);
+  const exact = Boolean(saved) && saved === canonical;
   return {
     canonical_callback_url: canonical,
     accepted_callback_urls: accepted,
     redirect_uri_supported: Boolean(saved) && accepted.includes(saved),
-    redirect_uri_recommended: Boolean(saved) && saved === canonical,
+    redirect_uri_recommended: exact,
+    redirect_uri_exact: exact,
   };
 }
 
@@ -521,6 +523,7 @@ async function handleGetLinkedInDiagnostics(req: any, res: any) {
       : {};
     const actorUrnConfigured = Boolean(String((row?.metadata ?? {}).actor_urn ?? '').trim());
     const connectionHasActorUrn = Boolean(String(connectionMetadata?.actor_urn ?? '').trim());
+    const connectionHasToken = Boolean(String(connectionRow?.access_token_encrypted ?? '').trim());
     const actorResolutionStatus = connectionHasActorUrn || actorUrnConfigured
       ? 'resolved'
       : connectionMetadata?.actor_urn_required
@@ -542,6 +545,7 @@ async function handleGetLinkedInDiagnostics(req: any, res: any) {
       accepted_callback_urls: callbackStatus.accepted_callback_urls,
       redirect_uri_supported: callbackStatus.redirect_uri_supported,
       redirect_uri_recommended: callbackStatus.redirect_uri_recommended,
+      redirect_uri_exact: callbackStatus.redirect_uri_exact,
       redirect_uri_matches_expected: callbackStatus.redirect_uri_recommended,
       dashboard_redirect_base: dashboardRedirectBase,
       scopes,
@@ -551,6 +555,7 @@ async function handleGetLinkedInDiagnostics(req: any, res: any) {
       connection_status: connectionStatus.status,
       connection_reason: connectionStatus.reason ?? connectionRow?.last_error ?? null,
       connected_scopes: connectionRow?.scopes ?? [],
+      connection_has_token: connectionHasToken,
       connection_has_actor_urn: connectionHasActorUrn,
       last_error: connectionRow?.last_error ?? null,
       note: 'Client secret and access tokens are intentionally omitted.',
