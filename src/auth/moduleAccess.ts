@@ -14,6 +14,31 @@ export type ModuleAccessFlags = Record<ModuleAccessKey, boolean>;
 
 const MODULE_ACCESS_SET = new Set<string>(MODULE_ACCESS_KEYS);
 
+function parseRawAccessFlags(raw: unknown): Record<string, unknown> | null {
+  if (!raw) return null;
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      return parseRawAccessFlags(parsed);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof raw === 'object' && !Array.isArray(raw)) {
+    return raw as Record<string, unknown>;
+  }
+  return null;
+}
+
+function parseAccessBoolean(value: unknown): boolean {
+  if (value === true || value === 1) return true;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    return normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on';
+  }
+  return false;
+}
+
 export function isAdminRole(role?: string | null): boolean {
   const normalized = String(role ?? '').toLowerCase();
   return normalized === 'admin' || normalized === 'superadmin';
@@ -41,14 +66,15 @@ export function normalizeModuleAccessFlags(
     return fullModuleAccess();
   }
 
+  const parsed = parseRawAccessFlags(raw);
   const normalized = emptyModuleAccess();
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+  if (!parsed) {
     return normalized;
   }
 
-  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+  for (const [key, value] of Object.entries(parsed)) {
     if (MODULE_ACCESS_SET.has(key)) {
-      normalized[key as ModuleAccessKey] = value === true;
+      normalized[key as ModuleAccessKey] = parseAccessBoolean(value);
     }
   }
 
@@ -76,4 +102,3 @@ export function requireModuleAccess(module: ModuleAccessKey) {
     });
   };
 }
-

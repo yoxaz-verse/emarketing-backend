@@ -55,7 +55,7 @@ export function checkLinkedInConnectionStatus(conn: LinkedInConnection | null): 
   if (!String(conn.metadata?.actor_urn ?? '').trim()) {
     return {
       status: 'disconnected',
-      reason: 'LinkedIn actor/member URN required. Add Actor / Member URN in Configure, save, then reconnect LinkedIn.',
+      reason: 'LinkedIn connected, but member identity was not resolved. Reconnect after confirming LinkedIn callback/scopes, or use the advanced Member URN fallback only if diagnostics asks for it.',
     };
   }
 
@@ -243,7 +243,7 @@ export async function fetchLinkedInActorUrn(
     return await fetchLinkedInLegacyActorUrn(accessToken);
   } catch (err: any) {
     throw new Error(
-      `LinkedIn actor URN could not be resolved. Add Actor / Member URN in Configure, save, then reconnect LinkedIn. Technical detail: ${err?.message ?? err}`
+      `LinkedIn member identity could not be resolved automatically. Confirm LinkedIn callback/scopes and reconnect; use the advanced Member URN fallback only if diagnostics asks for it. Technical detail: ${err?.message ?? err}`
     );
   }
 }
@@ -275,7 +275,7 @@ export async function tryFetchLinkedInActorUrn(
     return {
       actorUrn: null,
       source: 'unresolved',
-      error: `Actor/member URN required. LinkedIn token was saved, but profile lookup was blocked. Add Actor / Member URN in Configure, save, then reconnect LinkedIn. Technical detail: ${err?.message ?? err}`,
+      error: `LinkedIn token was saved, but member identity could not be resolved automatically. Confirm LinkedIn callback/scopes and reconnect; use the advanced Member URN fallback only if diagnostics asks for it. Technical detail: ${err?.message ?? err}`,
     };
   }
 }

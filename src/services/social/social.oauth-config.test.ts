@@ -85,6 +85,33 @@ test('social app read fields return LinkedIn scopes and keep client secret maske
   assert.equal(fields.actor_urn, 'urn:li:person:configured-member-id');
 });
 
+test('LinkedIn actor URN validator accepts URNs and raw member ids, rejects profile URLs', async () => {
+  const { validateLinkedInActorUrnInput } = await import('../../routes/admin.routes.js');
+
+  assert.equal(validateLinkedInActorUrnInput('urn:li:person:abc123'), null);
+  assert.equal(validateLinkedInActorUrnInput('abc123'), null);
+  assert.match(
+    validateLinkedInActorUrnInput('https://www.linkedin.com/in/some-profile') ?? '',
+    /Do not paste a LinkedIn profile URL/
+  );
+});
+
+test('LinkedIn redirect diagnostics supports legacy paths but recommends canonical callback', async () => {
+  const { linkedInCallbackStatus } = await import('../../routes/admin.routes.js');
+  const env = {
+    LINKEDIN_PUBLIC_BASE_URL: 'https://emarketing-backend.infra.obaol.com',
+  } as NodeJS.ProcessEnv;
+
+  const legacy = linkedInCallbackStatus('https://emarketing-backend.infra.obaol.com/rest/oauth2-credential/callback', env);
+  assert.equal(legacy.redirect_uri_supported, true);
+  assert.equal(legacy.redirect_uri_recommended, false);
+  assert.equal(legacy.canonical_callback_url, 'https://emarketing-backend.infra.obaol.com/social/oauth2-credential/callback');
+
+  const canonical = linkedInCallbackStatus('https://emarketing-backend.infra.obaol.com/social/oauth2-credential/callback', env);
+  assert.equal(canonical.redirect_uri_supported, true);
+  assert.equal(canonical.redirect_uri_recommended, true);
+});
+
 test('social OAuth schema migration is idempotent and creates required tables', () => {
   const sql = readFileSync('sql/20260618_fix_social_app_oauth_schema.sql', 'utf8');
 
@@ -93,6 +120,9 @@ test('social OAuth schema migration is idempotent and creates required tables', 
   assert.match(sql, /CREATE TABLE IF NOT EXISTS public\.social_oauth_connections/i);
   assert.match(sql, /CREATE UNIQUE INDEX IF NOT EXISTS social_operator_oauth_apps_operator_platform_uidx/i);
   assert.match(sql, /CREATE UNIQUE INDEX IF NOT EXISTS social_oauth_connections_platform_user_operator_uidx/i);
+  assert.match(sql, /ALTER TABLE public\.social_oauth_states ADD COLUMN IF NOT EXISTS state text/i);
+  assert.match(sql, /ALTER TABLE public\.social_oauth_states ADD COLUMN IF NOT EXISTS operator_id uuid/i);
+  assert.match(sql, /ALTER TABLE public\.social_oauth_connections ADD COLUMN IF NOT EXISTS platform_code text/i);
   assert.match(sql, /ADD COLUMN IF NOT EXISTS metadata jsonb/i);
   assert.match(sql, /social_oauth_connections_status_check/i);
 });

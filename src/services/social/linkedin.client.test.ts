@@ -121,7 +121,7 @@ test('LinkedIn actor URN reports action when profile permissions block all ident
   try {
     await assert.rejects(
       () => fetchLinkedInActorUrn('access-token'),
-      /Add Actor \/ Member URN in Configure/
+      /advanced Member URN fallback/
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -146,7 +146,7 @@ test('LinkedIn actor URN try helper returns actionable unresolved result instead
     const result = await tryFetchLinkedInActorUrn('access-token');
     assert.equal(result.actorUrn, null);
     assert.equal(result.source, 'unresolved');
-    assert.match(result.error ?? '', /Actor\/member URN required/);
+    assert.match(result.error ?? '', /member identity could not be resolved automatically/);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -163,7 +163,7 @@ test('LinkedIn status rejects connected token without actor URN', async () => {
   });
 
   assert.equal(status.status, 'disconnected');
-  assert.match(status.reason ?? '', /actor\/member URN required/i);
+  assert.match(status.reason ?? '', /member identity was not resolved/i);
 });
 
 test('LinkedIn actor URN falls back to legacy profile endpoint', async () => {

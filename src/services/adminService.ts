@@ -97,6 +97,11 @@ export async function enableSequence(sequenceId: string) {
 
 
 export async function listOperators() {
+  const fetchAllOperators = () => supabase
+    .from('operators')
+    .select('id, name, region')
+    .order('name', { ascending: true });
+
   const { data: activeUsers, error: activeUsersError } = await supabase
     .from('users')
     .select('operator_id')
@@ -116,7 +121,8 @@ export async function listOperators() {
   );
 
   if (operatorIds.length === 0) {
-    return { data: [], error: null };
+    const { data, error } = await fetchAllOperators();
+    return { data: data ?? [], error };
   }
 
   const { data, error } = await supabase
@@ -124,6 +130,11 @@ export async function listOperators() {
     .select('id, name, region')
     .in('id', operatorIds)
     .order('name', { ascending: true });
+
+  if (!error && (!Array.isArray(data) || data.length === 0)) {
+    const fallback = await fetchAllOperators();
+    return { data: fallback.data ?? [], error: fallback.error };
+  }
 
   return { data: data ?? [], error };
 }

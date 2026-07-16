@@ -161,7 +161,7 @@ export function evaluateSocialTargetReadiness(params: {
     return {
       platform_code: platform,
       status: 'disconnected',
-      reason: 'LinkedIn actor/member URN required for publishing. Add Actor / Member URN in Configure, save, then reconnect LinkedIn.',
+      reason: 'LinkedIn connected, but member identity was not resolved. Open Configure, check diagnostics and the saved callback URL, then reconnect. Use the advanced Member URN fallback only if diagnostics asks for it.',
       missing_fields: ['actor_urn'],
     };
   }

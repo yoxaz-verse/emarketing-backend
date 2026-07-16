@@ -114,5 +114,5 @@ test('readiness rejects LinkedIn connection missing actor URN', async () => {
 
   assert.equal(result?.status, 'disconnected');
   assert.deepEqual(result?.missing_fields, ['actor_urn']);
-  assert.match(result?.reason ?? '', /actor\/member URN/i);
+  assert.match(result?.reason ?? '', /member identity was not resolved/i);
 });

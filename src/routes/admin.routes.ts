@@ -117,6 +117,15 @@ router.get('/operators', async (req, res) => {
 const SOCIAL_PLATFORMS: SocialPlatform[] = ['linkedin', 'meta', 'reddit', 'telegram', 'whatsapp'];
 export const SOCIAL_APP_SECRET_PLACEHOLDER = '***';
 export const LINKEDIN_DEFAULT_SCOPES = ['w_member_social'];
+export const LINKEDIN_CANONICAL_CALLBACK_PATH = '/social/oauth2-credential/callback';
+export const LINKEDIN_SUPPORTED_CALLBACK_PATHS = [
+  LINKEDIN_CANONICAL_CALLBACK_PATH,
+  '/oauth2-credential/callback',
+  '/rest/oauth2-credential/callback',
+  '/social/callback/linkedin',
+];
+export const LINKEDIN_ACTOR_URN_HELP =
+  'LinkedIn Member URN must be urn:li:person:<id> or a raw member id. Do not paste a LinkedIn profile URL.';
 
 function isSocialPlatform(value: string): value is SocialPlatform {
   return SOCIAL_PLATFORMS.includes(value as SocialPlatform);
@@ -130,12 +139,73 @@ function requiredFieldsByPlatform(platform: SocialPlatform): string[] {
   return ['phone_number_id', 'business_account_id', 'access_token'];
 }
 
+function normalizeCallbackBaseUrl(value?: string | null): string {
+  const raw = String(value ?? '').trim();
+  if (!raw) return 'https://emarketing-backend.infra.obaol.com';
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return 'https://emarketing-backend.infra.obaol.com';
+    }
+    return parsed.toString().replace(/\/+$/, '');
+  } catch {
+    return 'https://emarketing-backend.infra.obaol.com';
+  }
+}
+
+export function linkedInCanonicalCallbackUrl(env: NodeJS.ProcessEnv = process.env): string {
+  const configured = String(env.LINKEDIN_REDIRECT_URI ?? '').trim();
+  if (configured) {
+    try {
+      const parsed = new URL(configured);
+      return `${parsed.origin}${LINKEDIN_CANONICAL_CALLBACK_PATH}`;
+    } catch {
+      // Fall through to the public base URL.
+    }
+  }
+  const base = normalizeCallbackBaseUrl(env.LINKEDIN_PUBLIC_BASE_URL || env.PUBLIC_BACKEND_URL || 'https://emarketing-backend.infra.obaol.com');
+  return `${base}${LINKEDIN_CANONICAL_CALLBACK_PATH}`;
+}
+
+export function linkedInAcceptedCallbackUrls(env: NodeJS.ProcessEnv = process.env): string[] {
+  const canonical = linkedInCanonicalCallbackUrl(env);
+  const origin = new URL(canonical).origin;
+  return LINKEDIN_SUPPORTED_CALLBACK_PATHS.map((path) => `${origin}${path}`);
+}
+
+export function linkedInCallbackStatus(redirectUri: string, env: NodeJS.ProcessEnv = process.env) {
+  const saved = String(redirectUri ?? '').trim();
+  const canonical = linkedInCanonicalCallbackUrl(env);
+  const accepted = linkedInAcceptedCallbackUrls(env);
+  return {
+    canonical_callback_url: canonical,
+    accepted_callback_urls: accepted,
+    redirect_uri_supported: Boolean(saved) && accepted.includes(saved),
+    redirect_uri_recommended: Boolean(saved) && saved === canonical,
+  };
+}
+
+export function validateLinkedInActorUrnInput(value: unknown): string | null {
+  const raw = String(value ?? '').trim();
+  if (!raw || isSocialAppSecretPlaceholder(raw)) return null;
+  if (/^https?:\/\//i.test(raw) || /linkedin\.com\/in\//i.test(raw)) {
+    return LINKEDIN_ACTOR_URN_HELP;
+  }
+  return normalizeLinkedInActorUrn(raw) ? null : LINKEDIN_ACTOR_URN_HELP;
+}
+
 function extractConfig(platform: SocialPlatform, input: Record<string, unknown>) {
   const trim = (v: unknown) => String(v ?? '').trim();
   if (platform === 'linkedin') {
     const scopes = Array.isArray(input.scopes)
       ? input.scopes.map((s) => String(s ?? '').trim()).filter(Boolean)
       : [];
+    const actorValidationError = validateLinkedInActorUrnInput(input.actor_urn);
+    if (actorValidationError) {
+      const err: any = new Error(actorValidationError);
+      err.statusCode = 400;
+      throw err;
+    }
     const actorUrn = normalizeLinkedInActorUrn(trim(input.actor_urn));
     return {
       client_id: trim(input.client_id),
@@ -424,7 +494,7 @@ async function handleGetLinkedInDiagnostics(req: any, res: any) {
       : LINKEDIN_DEFAULT_SCOPES;
     const unsupportedIdentityScopes = scopes.filter((scope: string) => ['openid', 'profile'].includes(scope));
     const redirectUri = String(row?.redirect_uri ?? '').trim();
-    const expectedCallbackUrl = `${process.env.LINKEDIN_REDIRECT_URI || 'https://emarketing-backend.infra.obaol.com/social/oauth2-credential/callback'}`;
+    const callbackStatus = linkedInCallbackStatus(redirectUri, process.env);
     const dashboardRedirectBase = socialOAuthRedirectBase(process.env);
 
     const { data: connectionRow, error: connectionError } = await supabase
@@ -446,24 +516,42 @@ async function handleGetLinkedInDiagnostics(req: any, res: any) {
         metadata: connectionRow.metadata ?? {},
       })
       : { status: 'disconnected' as const, reason: 'No LinkedIn connection found' };
+    const connectionMetadata = (connectionRow?.metadata && typeof connectionRow.metadata === 'object')
+      ? connectionRow.metadata
+      : {};
+    const actorUrnConfigured = Boolean(String((row?.metadata ?? {}).actor_urn ?? '').trim());
+    const connectionHasActorUrn = Boolean(String(connectionMetadata?.actor_urn ?? '').trim());
+    const actorResolutionStatus = connectionHasActorUrn || actorUrnConfigured
+      ? 'resolved'
+      : connectionMetadata?.actor_urn_required
+        ? 'advanced_fallback_required'
+        : connectionRow
+          ? 'auto_resolution_unresolved'
+          : 'pending_connect';
 
     return res.json({
       platform_code: 'linkedin',
       operator_id: operatorId,
+      selected_connection_operator_id: operatorId,
       app_config_source: source,
       configured: Boolean(row) && missingFields.length === 0,
       missing_fields: missingFields,
       redirect_uri: redirectUri,
-      expected_callback_url: expectedCallbackUrl,
-      redirect_uri_matches_expected: Boolean(redirectUri) && redirectUri === expectedCallbackUrl,
+      canonical_callback_url: callbackStatus.canonical_callback_url,
+      expected_callback_url: callbackStatus.canonical_callback_url,
+      accepted_callback_urls: callbackStatus.accepted_callback_urls,
+      redirect_uri_supported: callbackStatus.redirect_uri_supported,
+      redirect_uri_recommended: callbackStatus.redirect_uri_recommended,
+      redirect_uri_matches_expected: callbackStatus.redirect_uri_recommended,
       dashboard_redirect_base: dashboardRedirectBase,
       scopes,
       unsupported_identity_scopes: unsupportedIdentityScopes,
-      actor_urn_configured: Boolean(String((row?.metadata ?? {}).actor_urn ?? '').trim()),
+      actor_urn_configured: actorUrnConfigured,
+      actor_resolution_status: actorResolutionStatus,
       connection_status: connectionStatus.status,
       connection_reason: connectionStatus.reason ?? connectionRow?.last_error ?? null,
       connected_scopes: connectionRow?.scopes ?? [],
-      connection_has_actor_urn: Boolean(String(connectionRow?.metadata?.actor_urn ?? '').trim()),
+      connection_has_actor_urn: connectionHasActorUrn,
       last_error: connectionRow?.last_error ?? null,
       note: 'Client secret and access tokens are intentionally omitted.',
     });
@@ -553,9 +641,14 @@ async function handlePutSocialApp(req: any, res: any, platformRaw: string, body:
       platform: platformRaw ?? null,
       message: err?.message ?? 'Unknown error',
     });
-    return res.status(500).json({ error: err?.message ?? 'Failed to save social app config' });
+    const statusCode = Number(err?.statusCode ?? 500);
+    return res.status(statusCode >= 400 && statusCode < 600 ? statusCode : 500).json({ error: err?.message ?? 'Failed to save social app config' });
   }
 }
+
+router.get('/social-apps/linkedin/diagnostics', async (req, res) => {
+  return handleGetLinkedInDiagnostics(req, res);
+});
 
 // canonical endpoint
 router.get('/social-apps/:platform', async (req, res) => {
@@ -588,10 +681,6 @@ router.put('/social-apps/:platform', async (req, res) => {
 router.put('/social-apps', async (req, res) => {
   const platform = String(req.body?.platform ?? req.query?.platform ?? '');
   return handlePutSocialApp(req, res, platform, req.body, String(req.query?.scope ?? req.body?.scope ?? 'operator'));
-});
-
-router.get('/social-apps/linkedin/diagnostics', async (req, res) => {
-  return handleGetLinkedInDiagnostics(req, res);
 });
 
 router.get('/sending-limits', async (_req, res) => {
