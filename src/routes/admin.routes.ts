@@ -196,6 +196,30 @@ export function validateLinkedInActorUrnInput(value: unknown): string | null {
   return normalizeLinkedInActorUrn(raw) ? null : LINKEDIN_ACTOR_URN_HELP;
 }
 
+function normalizeScopeList(values: unknown): string[] {
+  const list = Array.isArray(values) ? values : [values];
+  return list
+    .flatMap((scope) => String(scope ?? '').split(/[,\s]+/))
+    .map((scope) => scope.trim())
+    .filter(Boolean);
+}
+
+export function linkedInScopeDiagnostics(params: {
+  configuredScopes: unknown;
+  connectedScopes: unknown;
+  connectionHasToken: boolean;
+}) {
+  const configuredScopes = normalizeScopeList(params.configuredScopes);
+  const connectedScopes = normalizeScopeList(params.connectedScopes);
+  return {
+    configuredScopes,
+    connectedScopes,
+    reconnectRequiredForPostingScope: configuredScopes.includes('w_member_social') &&
+      params.connectionHasToken &&
+      !connectedScopes.includes('w_member_social'),
+  };
+}
+
 function extractConfig(platform: SocialPlatform, input: Record<string, unknown>) {
   const trim = (v: unknown) => String(v ?? '').trim();
   if (platform === 'linkedin') {
@@ -491,9 +515,7 @@ async function handleGetLinkedInDiagnostics(req: any, res: any) {
     const { row, source } = await getEffectiveSocialAppRow('linkedin', operatorId);
     const fields = row ? nonSecretFields('linkedin', row, Boolean(String(row.client_secret_encrypted ?? '').trim())) : {};
     const missingFields = row ? missingRequired('linkedin', fields) : requiredFieldsByPlatform('linkedin');
-    const scopes = Array.isArray(row?.scopes)
-      ? row.scopes.map((scope: unknown) => String(scope ?? '').trim()).filter(Boolean)
-      : LINKEDIN_DEFAULT_SCOPES;
+    const scopes = row ? normalizeScopeList(row.scopes) : LINKEDIN_DEFAULT_SCOPES;
     const unsupportedIdentityScopes = scopes.filter((scope: string) => ['openid', 'profile'].includes(scope));
     const redirectUri = String(row?.redirect_uri ?? '').trim();
     const callbackStatus = linkedInCallbackStatus(redirectUri, process.env);
@@ -521,9 +543,16 @@ async function handleGetLinkedInDiagnostics(req: any, res: any) {
     const connectionMetadata = (connectionRow?.metadata && typeof connectionRow.metadata === 'object')
       ? connectionRow.metadata
       : {};
+    const connectionHasToken = Boolean(String(connectionRow?.access_token_encrypted ?? '').trim());
+    const scopeDiagnostics = linkedInScopeDiagnostics({
+      configuredScopes: scopes,
+      connectedScopes: connectionRow?.scopes ?? [],
+      connectionHasToken,
+    });
+    const connectedScopes = scopeDiagnostics.connectedScopes;
+    const reconnectRequiredForPostingScope = scopeDiagnostics.reconnectRequiredForPostingScope;
     const actorUrnConfigured = Boolean(String((row?.metadata ?? {}).actor_urn ?? '').trim());
     const connectionHasActorUrn = Boolean(String(connectionMetadata?.actor_urn ?? '').trim());
-    const connectionHasToken = Boolean(String(connectionRow?.access_token_encrypted ?? '').trim());
     const actorResolutionStatus = connectionHasActorUrn || actorUrnConfigured
       ? 'resolved'
       : connectionMetadata?.actor_urn_required
@@ -553,8 +582,12 @@ async function handleGetLinkedInDiagnostics(req: any, res: any) {
       actor_urn_configured: actorUrnConfigured,
       actor_resolution_status: actorResolutionStatus,
       connection_status: connectionStatus.status,
-      connection_reason: connectionStatus.reason ?? connectionRow?.last_error ?? null,
-      connected_scopes: connectionRow?.scopes ?? [],
+      connection_reason: reconnectRequiredForPostingScope
+        ? 'Reconnect required: saved token is missing the posting scope.'
+        : connectionStatus.reason ?? connectionRow?.last_error ?? null,
+      configured_scopes: scopes,
+      connected_scopes: connectedScopes,
+      reconnect_required_for_posting_scope: reconnectRequiredForPostingScope,
       connection_has_token: connectionHasToken,
       connection_has_actor_urn: connectionHasActorUrn,
       last_error: connectionRow?.last_error ?? null,

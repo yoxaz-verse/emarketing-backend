@@ -34,6 +34,44 @@ test('LinkedIn authorize URL defaults to publishing scope for new configs', asyn
   assert.equal(parsed.searchParams.get('scope'), 'w_member_social');
 });
 
+test('LinkedIn token scopes normalize comma and space separated responses', async () => {
+  const { normalizeLinkedInTokenScopes } = await import('./socialAuth.service.js');
+
+  assert.deepEqual(
+    normalizeLinkedInTokenScopes('w_member_social r_profile_basicinfo', ['w_member_social']),
+    ['w_member_social', 'r_profile_basicinfo']
+  );
+  assert.deepEqual(
+    normalizeLinkedInTokenScopes('w_member_social,r_profile_basicinfo', ['w_member_social']),
+    ['w_member_social', 'r_profile_basicinfo']
+  );
+  assert.deepEqual(
+    normalizeLinkedInTokenScopes(undefined, ['w_member_social', 'r_profile_basicinfo']),
+    ['w_member_social', 'r_profile_basicinfo']
+  );
+});
+
+test('LinkedIn diagnostics identify stale connected token scopes', async () => {
+  const { linkedInScopeDiagnostics } = await import('../../routes/admin.routes.js');
+
+  const stale = linkedInScopeDiagnostics({
+    configuredScopes: ['w_member_social', 'r_profile_basicinfo'],
+    connectedScopes: ['r_profile_basicinfo'],
+    connectionHasToken: true,
+  });
+  assert.equal(stale.reconnectRequiredForPostingScope, true);
+  assert.deepEqual(stale.configuredScopes, ['w_member_social', 'r_profile_basicinfo']);
+  assert.deepEqual(stale.connectedScopes, ['r_profile_basicinfo']);
+
+  const commaStored = linkedInScopeDiagnostics({
+    configuredScopes: ['w_member_social', 'r_profile_basicinfo'],
+    connectedScopes: ['w_member_social,r_profile_basicinfo'],
+    connectionHasToken: true,
+  });
+  assert.equal(commaStored.reconnectRequiredForPostingScope, false);
+  assert.deepEqual(commaStored.connectedScopes, ['w_member_social', 'r_profile_basicinfo']);
+});
+
 test('social app upsert payload preserves existing secret when form submits placeholder', async () => {
   const { buildSocialAppUpsertPayload, SOCIAL_APP_SECRET_PLACEHOLDER } = await import('../../routes/admin.routes.js');
   const existingSecretEncrypted = 'already-encrypted-client-secret';

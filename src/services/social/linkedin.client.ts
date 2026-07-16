@@ -47,7 +47,10 @@ export function checkLinkedInConnectionStatus(conn: LinkedInConnection | null): 
   if (!conn) return { status: 'disconnected', reason: 'No LinkedIn connection found' };
   if (isExpired(conn.expires_at)) return { status: 'expired', reason: 'LinkedIn token expired' };
 
-  const scopes = new Set((conn.scopes ?? []).map((s) => s.trim()));
+  const scopes = new Set((conn.scopes ?? [])
+    .flatMap((s) => String(s ?? '').split(/[,\s]+/))
+    .map((s) => s.trim())
+    .filter(Boolean));
   if (!scopes.has('w_member_social')) {
     return { status: 'missing_scope', reason: 'Missing w_member_social scope' };
   }

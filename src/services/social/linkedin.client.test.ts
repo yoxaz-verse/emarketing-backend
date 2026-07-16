@@ -166,6 +166,19 @@ test('LinkedIn status reports identity required for connected token without acto
   assert.match(status.reason ?? '', /member identity was not resolved/i);
 });
 
+test('LinkedIn status accepts comma-joined stored token scopes', async () => {
+  const { checkLinkedInConnectionStatus } = await import('./linkedin.client.js');
+  const status = checkLinkedInConnectionStatus({
+    access_token_encrypted: 'encrypted-token',
+    refresh_token_encrypted: null,
+    expires_at: null,
+    scopes: ['w_member_social,r_profile_basicinfo'],
+    metadata: { actor_urn: 'urn:li:person:member-id' },
+  });
+
+  assert.equal(status.status, 'connected');
+});
+
 test('LinkedIn connection metadata stores configured manual actor URN', async () => {
   const { buildLinkedInConnectionMetadata } = await import('./linkedin.client.js');
   const originalFetch = globalThis.fetch;

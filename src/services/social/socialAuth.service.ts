@@ -82,11 +82,21 @@ function stateExpiryIso(): string {
   return new Date(Date.now() + STATE_TTL_MINUTES * 60 * 1000).toISOString();
 }
 
-function normalizeScopes(scopes: string[] | null | undefined, platform: string): string[] {
+export function normalizeScopes(scopes: string[] | null | undefined, platform: string): string[] {
   const out = (scopes ?? [])
-    .map((s) => String(s || '').trim())
+    .flatMap((s) => String(s || '').split(/[,\s]+/))
+    .map((s) => s.trim())
     .filter(Boolean);
   return out.length > 0 ? out : (PLATFORM_SCOPES[platform] ?? []);
+}
+
+export function normalizeLinkedInTokenScopes(tokenScope: string | null | undefined, configuredScopes: string[] | null | undefined): string[] {
+  const fromToken = String(tokenScope ?? '')
+    .split(/[,\s]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (fromToken.length > 0) return fromToken;
+  return normalizeScopes(configuredScopes, 'linkedin');
 }
 
 async function getOperatorOAuthAppRow(platform: string, operatorId?: string | null): Promise<OAuthAppRow | null> {
@@ -418,7 +428,7 @@ export async function handlePlatformCallback(params: {
         accessToken: token.access_token,
         refreshToken: token.refresh_token,
         expiresInSeconds: token.expires_in,
-        scopes: normalizeScopes(token.scope ? token.scope.split(' ') : appConfig.scopes, normalized),
+        scopes: normalizeLinkedInTokenScopes(token.scope, appConfig.scopes),
         metadata,
       });
       return { connection, context };
