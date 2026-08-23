@@ -14,6 +14,22 @@ import { normalizeModuleAccessFlags } from '../auth/moduleAccess';
 
 const router = Router();
 
+function isAuthServiceUnavailable(error: any): boolean {
+  const status = Number(error?.status ?? 0);
+  const message = String(error?.message ?? '').toLowerCase();
+  const code = String(error?.code ?? '').toLowerCase();
+  return (
+    status === 0 ||
+    status >= 500 ||
+    code.includes('fetch') ||
+    message.includes('fetch failed') ||
+    message.includes('network') ||
+    message.includes('timeout') ||
+    message.includes('enotfound') ||
+    message.includes('econnrefused')
+  );
+}
+
 router.post('/login', rateLimit({ name: 'login', windowMs: 15 * 60_000, max: 10 }), async (req, res) => {
   try {
     const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
@@ -29,6 +45,16 @@ router.post('/login', rateLimit({ name: 'login', windowMs: 15 * 60_000, max: 10 
     });
 
     if (error || !data.user) {
+      if (error && isAuthServiceUnavailable(error)) {
+        console.error('[AUTH_LOGIN_SERVICE_UNAVAILABLE]', {
+          email,
+          code: error?.code ?? 'unknown',
+          message: error?.message ?? 'unknown',
+          status: error?.status ?? null,
+        });
+        return res.status(503).json({ error: 'Authentication service unavailable', code: 'AUTH_SERVICE_UNAVAILABLE' });
+      }
+
       console.warn('[AUTH_LOGIN_INVALID_CREDENTIALS]', {
         email,
         code: error?.code ?? 'unknown',

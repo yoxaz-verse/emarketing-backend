@@ -260,6 +260,23 @@ async function assertAttachLeadSchema() {
 
   const message = String(error?.message ?? '');
   const code = String(error?.code ?? '');
+  const isSchemaDrift =
+    code === '42P01' ||
+    code === '42703' ||
+    code === 'PGRST205' ||
+    message.toLowerCase().includes('does not exist') ||
+    message.toLowerCase().includes('schema cache') ||
+    message.toLowerCase().includes('column');
+
+  if (!isSchemaDrift) {
+    console.warn('[ATTACH_SCHEMA_CHECK_WARN]', {
+      code,
+      message,
+      note: 'Backend will continue booting so health checks can report service availability.',
+    });
+    return;
+  }
+
   throw new Error(
     `Attach schema guard failed: leads table missing required validation/suppression columns. Apply 20260629_separate_lead_suppression_from_validation.sql. code=${code} message=${message}`
   );
