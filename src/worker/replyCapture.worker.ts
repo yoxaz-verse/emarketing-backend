@@ -1,6 +1,7 @@
 import { supabase } from '../supabase.js';
 import { decryptSecret } from '../utils/sendEncryption.js';
 import { ingestInboundReply } from '../services/replyIngestService.js';
+import { formatUnknownError } from '../utils/errorFormat.js';
 
 type InboxPollTarget = {
   inbox_id: string;
@@ -299,11 +300,11 @@ export function startReplyCaptureWorker() {
   health.running = true;
   health.started_at = new Date().toISOString();
   runPollCycle().catch((err) => {
-    console.error('[REPLY_CAPTURE_WORKER_BOOT_ERROR]', err);
+    console.error('[REPLY_CAPTURE_WORKER_BOOT_ERROR]', formatUnknownError(err));
   });
   timer = setInterval(() => {
     runPollCycle().catch((err) => {
-      console.error('[REPLY_CAPTURE_WORKER_POLL_ERROR]', err);
+      console.error('[REPLY_CAPTURE_WORKER_POLL_ERROR]', formatUnknownError(err));
     });
   }, POLL_INTERVAL_MS);
 }

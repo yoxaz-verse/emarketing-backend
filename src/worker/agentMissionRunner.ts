@@ -1,4 +1,5 @@
 import { dispatchDueMissions } from '../services/agents/agentMissions.service';
+import { formatUnknownError } from '../utils/errorFormat';
 
 const AGENT_MISSION_RUNNER_ENABLED = String(process.env.AGENT_MISSION_RUNNER_ENABLED ?? 'true') !== 'false';
 const AGENT_MISSION_TICK_MS = Number(process.env.AGENT_MISSION_TICK_MS ?? 30000);
@@ -12,8 +13,7 @@ async function tick() {
   try {
     await dispatchDueMissions(25);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error('[AGENT_MISSION_RUNNER_TICK_ERROR]', message);
+    console.error('[AGENT_MISSION_RUNNER_TICK_ERROR]', formatUnknownError(error));
   } finally {
     running = false;
   }
@@ -32,4 +32,3 @@ export function startAgentMissionRunner() {
     void tick();
   }, Math.max(5000, AGENT_MISSION_TICK_MS));
 }
-

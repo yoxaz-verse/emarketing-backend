@@ -1,4 +1,5 @@
 import { createIndustryFetchRun, listIndustrySources } from '../services/industry-intelligence/industryIntelligence.service';
+import { formatUnknownError } from '../utils/errorFormat';
 
 const RUNNER_ENABLED = String(process.env.INDUSTRY_INTELLIGENCE_RUNNER_ENABLED ?? 'true') !== 'false';
 const TICK_MS = Number(process.env.INDUSTRY_INTELLIGENCE_TICK_MS ?? 6 * 60 * 60 * 1000);
@@ -32,8 +33,8 @@ async function runOnce() {
       deduped: result.summary.deduped_count,
       failed: result.summary.failed_count,
     });
-  } catch (error: any) {
-    console.error('[INDUSTRY_INTELLIGENCE_RUNNER_TICK_ERROR]', error?.message ?? error);
+  } catch (error) {
+    console.error('[INDUSTRY_INTELLIGENCE_RUNNER_TICK_ERROR]', formatUnknownError(error));
   } finally {
     running = false;
   }

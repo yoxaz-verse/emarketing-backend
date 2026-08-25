@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import dns from 'dns/promises';
 import statsRoutes from './routes/stats.routes';
 import adminRoutes from './routes/admin.routes';
 import replyRoutes from './routes/reply.routes';
@@ -45,7 +46,9 @@ import {
   startEmailValidationQueueWorker,
 } from './worker/email/eligibility.bullmq.worker';
 import { supabase } from './supabase';
+import { supabaseAdmin } from './utils/supabaseAdmin';
 import { securityHeaders } from './middleware/security';
+import { formatUnknownError, isConnectivityError, isSchemaDriftError, isSupabaseAuthConfigError } from './utils/errorFormat';
 
 dotenv.config();
 
@@ -140,6 +143,80 @@ app.get('/ping', (_req, res) => {
     pid: process.pid,
     socialOAuthRedirectConfigured: isSocialOAuthRedirectConfigured(),
   });
+});
+
+async function getSupabaseAuthReadiness() {
+  const projectRef = maskSupabaseProjectRef(process.env.SUPABASE_URL);
+  const startedAt = performance.now();
+
+  if (projectRef === 'missing' || projectRef === 'invalid') {
+    return {
+      ok: false,
+      status: 'misconfigured',
+      code: 'SUPABASE_URL_INVALID',
+      projectRef,
+      durationMs: Math.round(performance.now() - startedAt),
+    };
+  }
+
+  try {
+    const { error } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1 });
+    if (!error) {
+      return {
+        ok: true,
+        status: 'ready',
+        code: null,
+        projectRef,
+        durationMs: Math.round(performance.now() - startedAt),
+      };
+    }
+
+    const formatted = formatUnknownError(error);
+    const misconfigured = isSupabaseAuthConfigError(error);
+    const unavailable = isConnectivityError(error) || Number(formatted.status ?? 0) >= 500;
+    return {
+      ok: false,
+      status: misconfigured ? 'misconfigured' : unavailable ? 'unavailable' : 'failed',
+      code: misconfigured
+        ? 'AUTH_SERVICE_MISCONFIGURED'
+        : unavailable
+          ? 'AUTH_SERVICE_UNAVAILABLE'
+          : 'AUTH_READINESS_FAILED',
+      projectRef,
+      durationMs: Math.round(performance.now() - startedAt),
+      error: {
+        message: misconfigured
+          ? 'Supabase rejected the backend API key or project configuration.'
+          : unavailable
+            ? 'Supabase auth service is unreachable or unavailable.'
+            : formatted.message,
+        code: formatted.code,
+        status: formatted.status,
+      },
+    };
+  } catch (error) {
+    const formatted = formatUnknownError(error);
+    const misconfigured = isSupabaseAuthConfigError(error);
+    return {
+      ok: false,
+      status: misconfigured ? 'misconfigured' : 'unavailable',
+      code: misconfigured ? 'AUTH_SERVICE_MISCONFIGURED' : 'AUTH_SERVICE_UNAVAILABLE',
+      projectRef,
+      durationMs: Math.round(performance.now() - startedAt),
+      error: {
+        message: misconfigured
+          ? 'Supabase rejected the backend API key or project configuration.'
+          : 'Supabase auth readiness check failed.',
+        code: formatted.code,
+        status: formatted.status,
+      },
+    };
+  }
+}
+
+app.get('/ping/auth-readiness', async (_req, res) => {
+  const readiness = await getSupabaseAuthReadiness();
+  res.status(readiness.ok ? 200 : 503).json(readiness);
 });
 
 async function handlePublicSocialOAuthCallback(req: any, res: any, platformInput?: string) {
@@ -250,6 +327,42 @@ app.get('/ping/routes', (_req, res) => {
 
 const PORT = Number(process.env.PORT) || 3000;
 
+async function checkSupabaseConnectivity() {
+  const rawUrl = String(process.env.SUPABASE_URL ?? '').trim();
+  if (!rawUrl) {
+    console.error('[SUPABASE_CONNECTIVITY_CHECK_FAILED]', {
+      message: 'SUPABASE_URL is missing',
+    });
+    return;
+  }
+
+  let hostname: string;
+  try {
+    hostname = new URL(rawUrl).hostname;
+  } catch (error) {
+    console.error('[SUPABASE_CONNECTIVITY_CHECK_FAILED]', {
+      message: 'SUPABASE_URL is not a valid URL',
+      error: formatUnknownError(error),
+    });
+    return;
+  }
+
+  try {
+    const addresses = await dns.lookup(hostname, { all: true });
+    console.info('[SUPABASE_CONNECTIVITY_CHECK_OK]', {
+      hostname,
+      addressCount: addresses.length,
+      families: [...new Set(addresses.map((address) => address.family))],
+    });
+  } catch (error) {
+    console.error('[SUPABASE_CONNECTIVITY_CHECK_FAILED]', {
+      hostname,
+      error: formatUnknownError(error),
+      note: 'Backend will continue booting so /ping can report service availability.',
+    });
+  }
+}
+
 async function assertAttachLeadSchema() {
   const { error } = await supabase
     .from('leads')
@@ -258,27 +371,16 @@ async function assertAttachLeadSchema() {
 
   if (!error) return;
 
-  const message = String(error?.message ?? '');
-  const code = String(error?.code ?? '');
-  const isSchemaDrift =
-    code === '42P01' ||
-    code === '42703' ||
-    code === 'PGRST205' ||
-    message.toLowerCase().includes('does not exist') ||
-    message.toLowerCase().includes('schema cache') ||
-    message.toLowerCase().includes('column');
-
-  if (!isSchemaDrift) {
+  if (!isSchemaDriftError(error)) {
     console.warn('[ATTACH_SCHEMA_CHECK_WARN]', {
-      code,
-      message,
+      error: formatUnknownError(error),
       note: 'Backend will continue booting so health checks can report service availability.',
     });
     return;
   }
 
   throw new Error(
-    `Attach schema guard failed: leads table missing required validation/suppression columns. Apply 20260629_separate_lead_suppression_from_validation.sql. code=${code} message=${message}`
+    `Attach schema guard failed: leads table missing required validation/suppression columns. Apply 20260629_separate_lead_suppression_from_validation.sql. code=${error?.code ?? ''} message=${error?.message ?? ''}`
   );
 }
 
@@ -573,6 +675,7 @@ async function checkReplyTrackingSchemaReadiness() {
 }
 
 async function boot() {
+  await checkSupabaseConnectivity();
   await assertAttachLeadSchema();
   await checkSendingLimitsScheduleSchema();
   await checkOperatorsSchemaReadiness();
@@ -620,44 +723,44 @@ async function boot() {
 }
 
 void boot().catch((error) => {
-  console.error('[BACKEND_BOOT_FATAL]', error);
+  console.error('[BACKEND_BOOT_FATAL]', formatUnknownError(error));
   process.exit(1);
 });
 
 try {
   startSequenceRunner();
 } catch (error) {
-  console.error('[SEQUENCE_RUNNER_BOOT_ERROR]', error);
+  console.error('[SEQUENCE_RUNNER_BOOT_ERROR]', formatUnknownError(error));
 }
 
 try {
   startAgentMissionRunner();
 } catch (error) {
-  console.error('[AGENT_MISSION_RUNNER_BOOT_ERROR]', error);
+  console.error('[AGENT_MISSION_RUNNER_BOOT_ERROR]', formatUnknownError(error));
 }
 
 try {
   startSocialPublishRunner();
 } catch (error) {
-  console.error('[SOCIAL_PUBLISH_RUNNER_BOOT_ERROR]', error);
+  console.error('[SOCIAL_PUBLISH_RUNNER_BOOT_ERROR]', formatUnknownError(error));
 }
 
 try {
   startEventIngestionRunner();
 } catch (error) {
-  console.error('[EVENT_INGESTION_RUNNER_BOOT_ERROR]', error);
+  console.error('[EVENT_INGESTION_RUNNER_BOOT_ERROR]', formatUnknownError(error));
 }
 
 try {
   startIndustryIntelligenceRunner();
 } catch (error) {
-  console.error('[INDUSTRY_INTELLIGENCE_RUNNER_BOOT_ERROR]', error);
+  console.error('[INDUSTRY_INTELLIGENCE_RUNNER_BOOT_ERROR]', formatUnknownError(error));
 }
 
 try {
   startReplyCaptureWorker();
 } catch (error) {
-  console.error('[REPLY_CAPTURE_WORKER_BOOT_ERROR]', error);
+  console.error('[REPLY_CAPTURE_WORKER_BOOT_ERROR]', formatUnknownError(error));
 }
 
 try {
@@ -668,5 +771,5 @@ try {
     workerHealth: getEmailValidationWorkerHealth(),
   });
 } catch (error) {
-  console.error('[EMAIL_VALIDATION_WORKER_BOOT_ERROR]', error);
+  console.error('[EMAIL_VALIDATION_WORKER_BOOT_ERROR]', formatUnknownError(error));
 }

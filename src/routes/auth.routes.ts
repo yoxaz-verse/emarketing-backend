@@ -11,23 +11,13 @@ import {
 } from '../services/auth/passwordReset.service';
 import { rateLimit } from '../middleware/security';
 import { normalizeModuleAccessFlags } from '../auth/moduleAccess';
+import { formatUnknownError, isConnectivityError, isSupabaseAuthConfigError } from '../utils/errorFormat';
 
 const router = Router();
 
 function isAuthServiceUnavailable(error: any): boolean {
   const status = Number(error?.status ?? 0);
-  const message = String(error?.message ?? '').toLowerCase();
-  const code = String(error?.code ?? '').toLowerCase();
-  return (
-    status === 0 ||
-    status >= 500 ||
-    code.includes('fetch') ||
-    message.includes('fetch failed') ||
-    message.includes('network') ||
-    message.includes('timeout') ||
-    message.includes('enotfound') ||
-    message.includes('econnrefused')
-  );
+  return status === 0 || status >= 500 || isConnectivityError(error);
 }
 
 router.post('/login', rateLimit({ name: 'login', windowMs: 15 * 60_000, max: 10 }), async (req, res) => {
@@ -45,12 +35,21 @@ router.post('/login', rateLimit({ name: 'login', windowMs: 15 * 60_000, max: 10 
     });
 
     if (error || !data.user) {
+      if (error && isSupabaseAuthConfigError(error)) {
+        console.error('[AUTH_LOGIN_MISCONFIGURED]', {
+          email,
+          error: formatUnknownError(error),
+        });
+        return res.status(503).json({
+          error: 'Authentication service is misconfigured. Verify Supabase URL and service role key.',
+          code: 'AUTH_SERVICE_MISCONFIGURED',
+        });
+      }
+
       if (error && isAuthServiceUnavailable(error)) {
         console.error('[AUTH_LOGIN_SERVICE_UNAVAILABLE]', {
           email,
-          code: error?.code ?? 'unknown',
-          message: error?.message ?? 'unknown',
-          status: error?.status ?? null,
+          error: formatUnknownError(error),
         });
         return res.status(503).json({ error: 'Authentication service unavailable', code: 'AUTH_SERVICE_UNAVAILABLE' });
       }

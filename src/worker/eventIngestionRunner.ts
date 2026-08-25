@@ -1,4 +1,5 @@
 import { runEventIngestion } from '../services/events.service';
+import { formatUnknownError } from '../utils/errorFormat';
 
 const EVENT_INGESTION_RUNNER_ENABLED = String(process.env.EVENT_INGESTION_RUNNER_ENABLED ?? 'true') !== 'false';
 const EVENT_INGESTION_TICK_MS = Number(process.env.EVENT_INGESTION_TICK_MS ?? 60 * 60 * 1000);
@@ -20,8 +21,7 @@ async function tick() {
       });
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error('[EVENT_INGESTION_RUNNER_TICK_ERROR]', message);
+    console.error('[EVENT_INGESTION_RUNNER_TICK_ERROR]', formatUnknownError(error));
   } finally {
     running = false;
   }

@@ -1,4 +1,5 @@
 import { processDueSocialPublishJobs } from '../services/social/social.service';
+import { formatUnknownError } from '../utils/errorFormat';
 
 const SOCIAL_PUBLISH_RUNNER_ENABLED = String(process.env.SOCIAL_PUBLISH_RUNNER_ENABLED ?? 'true') !== 'false';
 const SOCIAL_PUBLISH_TICK_MS = Number(process.env.SOCIAL_PUBLISH_TICK_MS ?? 30000);
@@ -15,8 +16,7 @@ async function tick() {
       console.info('[SOCIAL_PUBLISH_RUNNER_TICK_OK]', { processed: result.processed });
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error('[SOCIAL_PUBLISH_RUNNER_TICK_ERROR]', message);
+    console.error('[SOCIAL_PUBLISH_RUNNER_TICK_ERROR]', formatUnknownError(error));
   } finally {
     running = false;
   }
