@@ -116,3 +116,44 @@ test('readiness rejects LinkedIn connection missing actor URN', async () => {
   assert.deepEqual(result?.missing_fields, ['actor_urn']);
   assert.match(result?.reason ?? '', /member identity was not resolved/i);
 });
+
+test('readiness rejects Meta connection without selected page', async () => {
+  const { evaluateSocialTargetReadiness } = await loadReadinessModule();
+  const result = evaluateSocialTargetReadiness({
+    platform: 'meta',
+    connector: connector({ code: 'meta', name: 'Meta' }),
+    connection: {
+      platform_code: 'meta',
+      status: 'connected',
+      reason: null,
+      scopes: ['pages_show_list', 'pages_manage_posts'],
+      expires_at: null,
+      metadata: {},
+    },
+  });
+
+  assert.equal(result?.status, 'identity_required');
+  assert.deepEqual(result?.missing_fields, ['selected_page_id']);
+});
+
+test('optimizer produces per-platform overrides and warnings', async () => {
+  const { optimizeSocialPostInput, resolvePlatformPostInput } = await import('./connectors.js');
+  const optimized = optimizeSocialPostInput({
+    content: 'Launch update',
+    media: ['http://example.com/image.jpg'],
+    cta_url: 'https://obaol.com',
+    hashtags: ['Launch', '#Launch', 'B2B Marketing'],
+    timezone: 'Asia/Kolkata',
+    scheduled_at: new Date(Date.now() + 3600_000).toISOString(),
+  }, ['linkedin', 'meta']);
+
+  assert.equal(optimized.validation_errors.length, 0);
+  assert.match(optimized.platform_overrides.linkedin?.content ?? '', /#Launch/);
+  assert.match(optimized.platform_overrides.linkedin?.content ?? '', /#B2BMarketing/);
+  assert.equal(optimized.platform_overrides.linkedin?.hashtags?.length, 2);
+  assert.match(optimized.warnings.linkedin.join(' '), /media URLs are retained/i);
+
+  const linkedinInput = resolvePlatformPostInput('linkedin', optimized.post_input);
+  assert.match(linkedinInput.content, /Launch update/);
+  assert.deepEqual(linkedinInput.hashtags, ['#Launch', '#B2BMarketing']);
+});

@@ -117,6 +117,8 @@ router.get('/operators', async (req, res) => {
 const SOCIAL_PLATFORMS: SocialPlatform[] = ['linkedin', 'meta', 'reddit', 'telegram', 'whatsapp'];
 export const SOCIAL_APP_SECRET_PLACEHOLDER = '***';
 export const LINKEDIN_DEFAULT_SCOPES = ['w_member_social'];
+export const META_DEFAULT_SCOPES = ['pages_show_list', 'pages_manage_posts', 'pages_read_engagement', 'business_management', 'instagram_basic', 'instagram_content_publish'];
+export const REDDIT_DEFAULT_SCOPES = ['identity', 'submit'];
 export const LINKEDIN_CANONICAL_CALLBACK_PATH = '/social/oauth2-credential/callback';
 export const LINKEDIN_SUPPORTED_CALLBACK_PATHS = [
   LINKEDIN_CANONICAL_CALLBACK_PATH,
@@ -247,7 +249,7 @@ function extractConfig(platform: SocialPlatform, input: Record<string, unknown>)
       client_id: trim(input.app_id),
       secret: trim(input.app_secret),
       redirect_uri: trim(input.redirect_uri),
-      scopes: [],
+      scopes: META_DEFAULT_SCOPES,
       metadata: {
         page_access_token: trim(input.page_access_token),
         business_account_id: trim(input.business_account_id),
@@ -260,7 +262,7 @@ function extractConfig(platform: SocialPlatform, input: Record<string, unknown>)
       client_id: trim(input.client_id),
       secret: trim(input.client_secret),
       redirect_uri: trim(input.redirect_uri),
-      scopes: [],
+      scopes: REDDIT_DEFAULT_SCOPES,
       metadata: {
         user_agent: trim(input.user_agent),
       },

@@ -160,9 +160,13 @@ test('social OAuth schema migration is idempotent and creates required tables', 
   assert.match(sql, /CREATE TABLE IF NOT EXISTS public\.social_oauth_connections/i);
   assert.match(sql, /CREATE UNIQUE INDEX IF NOT EXISTS social_operator_oauth_apps_operator_platform_uidx/i);
   assert.match(sql, /CREATE UNIQUE INDEX IF NOT EXISTS social_oauth_connections_platform_user_operator_uidx/i);
-  assert.match(sql, /ALTER TABLE public\.social_oauth_states ADD COLUMN IF NOT EXISTS state text/i);
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS public\.social_connectors/i);
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS public\.social_publish_requests/i);
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS public\.social_publish_jobs/i);
+  assert.match(sql, /ALTER TABLE public\.social_oauth_states ADD COLUMN IF NOT EXISTS state_hash text/i);
   assert.match(sql, /ALTER TABLE public\.social_oauth_states ADD COLUMN IF NOT EXISTS operator_id uuid/i);
   assert.match(sql, /ALTER TABLE public\.social_oauth_connections ADD COLUMN IF NOT EXISTS platform_code text/i);
   assert.match(sql, /ADD COLUMN IF NOT EXISTS metadata jsonb/i);
+  assert.match(sql, /social_oauth_states_state_hash_uidx/i);
   assert.match(sql, /social_oauth_connections_status_check/i);
 });

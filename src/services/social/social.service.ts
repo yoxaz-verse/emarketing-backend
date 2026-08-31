@@ -12,10 +12,13 @@ import {
 import {
   manualFallback,
   normalizeProviderError,
+  optimizeSocialPostInput,
   publishedResult,
+  resolvePlatformPostInput,
   validateSocialPostInput,
 } from './connectors';
 import { publishLinkedInTextLink } from './linkedin.client';
+import { publishMetaFacebookPagePost, publishMetaInstagramPost } from './platformAuth.client';
 import { getConnectionStatuses, getOperatorPlatformConnection, hasOAuthAppConfig, markConnectionFailure } from './socialAuth.service';
 
 type SocialConnectionReadiness = {
@@ -163,6 +166,15 @@ export function evaluateSocialTargetReadiness(params: {
       status: 'disconnected',
       reason: 'LinkedIn connected, but member identity was not resolved. Open Configure, check diagnostics and the saved callback URL, then reconnect. Use the advanced Member URN fallback only if diagnostics asks for it.',
       missing_fields: ['actor_urn'],
+    };
+  }
+
+  if (platform === 'meta' && !String(connection.metadata?.selected_page_id ?? '').trim()) {
+    return {
+      platform_code: platform,
+      status: 'identity_required',
+      reason: 'Meta connected, but no Facebook Page was selected or discovered. Reconnect Meta with pages_show_list and pages_manage_posts permissions.',
+      missing_fields: ['selected_page_id'],
     };
   }
 
@@ -530,10 +542,76 @@ async function executeLinkedInApiFlow(job: any, connector: SocialConnectorCapabi
   }
 }
 
+async function executeMetaApiFlow(job: any, connector: SocialConnectorCapability, input: SocialPostInput, userId?: string | null, operatorId?: string | null) {
+  const timeline = Array.isArray(job.timeline) ? [...job.timeline] : [];
+  timeline.push(makeEvent('AUTH_CHECK', 'approval_pending', 'Checking Meta OAuth credentials'));
+
+  const conn = await getOperatorPlatformConnection('meta', userId, operatorId);
+  if (!conn) {
+    timeline.push(makeEvent('PUBLISH', 'manual_action_required', 'Meta not connected, manual fallback generated'));
+    const fallback = manualFallback(connector, input);
+    return patchJob(job.id, {
+      status: 'manual_action_required',
+      phase: 'PUBLISH',
+      manual_task: fallback.manual_task ?? null,
+      timeline,
+    });
+  }
+
+  try {
+    timeline.push(makeEvent('PAYLOAD_BUILD', 'approval_pending', 'Meta and Instagram payload prepared'));
+    const media = Array.isArray(input.media) ? input.media.filter(Boolean) : [];
+    const results = [];
+
+    if (media.length > 0 && String((conn as any).metadata?.selected_instagram_account_id ?? '').trim()) {
+      timeline.push(makeEvent('API_SUBMIT', 'approval_pending', 'Submitting Instagram media publish'));
+      results.push(await publishMetaInstagramPost(conn as any, {
+        content: input.content,
+        media,
+      }));
+    }
+
+    timeline.push(makeEvent('API_SUBMIT', 'approval_pending', 'Submitting Facebook Page publish'));
+    results.push(await publishMetaFacebookPagePost(conn as any, {
+      content: input.content,
+      media,
+      cta_url: input.cta_url,
+    }));
+
+    const primary = results[0];
+    timeline.push(makeEvent('API_CONFIRMED', 'published', 'Meta API confirmed publish'));
+    return patchJob(job.id, {
+      status: 'published',
+      phase: 'PUBLISH',
+      external_post_id: primary?.external_post_id ?? null,
+      external_post_url: primary?.external_post_url ?? null,
+      provider_error_code: null,
+      provider_error_message: null,
+      error_code: null,
+      error_message: null,
+      timeline,
+    });
+  } catch (err: unknown) {
+    const norm = normalizeProviderError(err);
+    timeline.push(makeEvent('PUBLISH', 'failed', norm.message, norm.code));
+    await markConnectionFailure('meta', userId, operatorId, norm.message);
+    return patchJob(job.id, {
+      status: 'failed',
+      phase: 'PUBLISH',
+      error_code: norm.code,
+      error_message: norm.message,
+      provider_error_code: norm.code,
+      provider_error_message: norm.message,
+      timeline,
+    });
+  }
+}
+
 async function executeFlow(job: any, connector: SocialConnectorCapability, input: SocialPostInput, userId?: string | null, operatorId?: string | null) {
   const timeline = Array.isArray(job.timeline) ? [...job.timeline] : [];
-  const validationErrors = validateSocialPostInput(input).filter((error) => {
-    return !(isDueSchedule(input) && error === 'scheduled_at must be in the future');
+  const platformInput = resolvePlatformPostInput(connector.code, input);
+  const validationErrors = validateSocialPostInput(platformInput).filter((error) => {
+    return !(isDueSchedule(platformInput) && error === 'scheduled_at must be in the future');
   });
 
   if (validationErrors.length > 0) {
@@ -553,10 +631,14 @@ async function executeFlow(job: any, connector: SocialConnectorCapability, input
   timeline.push(makeEvent('APPROVAL_PENDING', 'approval_pending', 'Post prepared and waiting for approval'));
 
   if (connector.code === 'linkedin') {
-    return executeLinkedInApiFlow(job, connector, input, userId, operatorId);
+    return executeLinkedInApiFlow(job, connector, platformInput, userId, operatorId);
   }
 
-  const fallback = manualFallback(connector, input);
+  if (connector.code === 'meta') {
+    return executeMetaApiFlow(job, connector, platformInput, userId, operatorId);
+  }
+
+  const fallback = manualFallback(connector, platformInput);
   timeline.push(makeEvent('PUBLISH', 'manual_action_required', 'Manual-assisted publish task generated'));
   return patchJob(job.id, {
     status: 'manual_action_required',
@@ -564,6 +646,38 @@ async function executeFlow(job: any, connector: SocialConnectorCapability, input
     manual_task: fallback.manual_task ?? null,
     timeline,
   });
+}
+
+export async function optimizeSocialPublishInput(input: CreateSocialPublishRequestInput, userId?: string | null, operatorId?: string | null) {
+  const targets = Array.from(new Set((input.targets ?? []).map((t) => String(t).trim().toLowerCase()).filter(Boolean))) as SocialPlatformCode[];
+  if (targets.length === 0) throw new Error('At least one target platform is required');
+  const [connectors, connections] = await Promise.all([
+    listSocialConnectors(userId, operatorId),
+    getConnectionStatuses(userId, operatorId),
+  ]);
+  const connectorMap = new Map<string, SocialConnectorCapability>();
+  for (const connector of connectors) connectorMap.set(connector.code, connector);
+  const connectionMap = new Map<string, SocialConnectionReadiness>();
+  for (const connection of connections) connectionMap.set(connection.platform_code, connection as SocialConnectionReadiness);
+  const readiness = targets.map((target) => {
+    const issue = evaluateSocialTargetReadiness({
+      platform: target,
+      connector: connectorMap.get(target) ?? null,
+      connection: connectionMap.get(target) ?? null,
+    });
+    return issue ?? {
+      platform_code: target,
+      status: 'ready' as const,
+      reason: `${platformLabel(target)} connected and ready.`,
+      missing_fields: [],
+    };
+  });
+  const optimized = optimizeSocialPostInput(input.post_input, targets);
+  return {
+    targets,
+    readiness,
+    ...optimized,
+  };
 }
 
 export async function createSocialPublishJobs(input: CreateSocialPublishRequestInput, userId?: string | null, operatorId?: string | null) {

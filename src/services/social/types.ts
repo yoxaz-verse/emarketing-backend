@@ -3,7 +3,7 @@ export type SocialPlatformCode = 'meta' | 'linkedin' | 'reddit' | 'telegram' | '
 export type SocialConnectorStatus = 'manual_assisted' | 'api_enabled';
 export type SocialAuthType = 'none' | 'oauth2';
 
-export type SocialConnectionStatus = 'connected' | 'expired' | 'missing_scope' | 'disconnected';
+export type SocialConnectionStatus = 'connected' | 'expired' | 'missing_scope' | 'identity_required' | 'disconnected';
 export type PublishCapability = 'text_link' | 'image' | 'multi_media';
 
 export type SocialConnectorCapability = {
@@ -25,6 +25,12 @@ export type SocialPostInput = {
   hashtags: string[];
   timezone?: string;
   scheduled_at?: string | null;
+  platform_overrides?: Partial<Record<SocialPlatformCode, {
+    content?: string;
+    media?: string[];
+    cta_url?: string;
+    hashtags?: string[];
+  }>>;
 };
 
 export type CreateSocialPublishRequestInput = {

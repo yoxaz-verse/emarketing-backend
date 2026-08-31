@@ -12,6 +12,7 @@ import {
   checkConnectionStatus,
   exchangeMetaCode,
   exchangeRedditCode,
+  fetchMetaPublishingAccounts,
   fetchMetaIdentity,
   fetchRedditIdentity,
   metaAuthorizeUrl,
@@ -28,7 +29,7 @@ const OAUTH_PLATFORMS = new Set(['linkedin', 'meta', 'reddit']);
 const DIRECT_VALIDATE_PLATFORMS = new Set(['telegram', 'whatsapp']);
 const PLATFORM_SCOPES: Record<string, string[]> = {
   linkedin: ['w_member_social'],
-  meta: ['pages_manage_posts', 'pages_read_engagement', 'business_management', 'instagram_basic'],
+  meta: ['pages_show_list', 'pages_manage_posts', 'pages_read_engagement', 'business_management', 'instagram_basic', 'instagram_content_publish'],
   reddit: ['identity', 'submit'],
   telegram: [],
   whatsapp: [],
@@ -300,9 +301,10 @@ export async function startPlatformConnect(platform: string, userId?: string | n
 
   if (DIRECT_VALIDATE_PLATFORMS.has(normalized)) {
     if (normalized === 'telegram') {
+      const row = await getOperatorOAuthAppRow(normalized, operatorId) || await getGlobalOAuthAppRow(normalized);
       const identity = await validateTelegramBot(
-        String((await getOperatorOAuthAppRow(normalized, operatorId) || await getGlobalOAuthAppRow(normalized))?.client_secret_encrypted || ''),
-        (await getOperatorOAuthAppRow(normalized, operatorId) || await getGlobalOAuthAppRow(normalized))?.metadata as Record<string, unknown> || {}
+        appConfig.clientSecret,
+        (row?.metadata as Record<string, unknown>) || {}
       );
 
       await upsertConnection({
@@ -318,7 +320,7 @@ export async function startPlatformConnect(platform: string, userId?: string | n
     if (normalized === 'whatsapp') {
       const row = await getOperatorOAuthAppRow(normalized, operatorId) || await getGlobalOAuthAppRow(normalized);
       if (!row) throw new Error('WhatsApp app credentials missing');
-      const identity = await validateWhatsappAccess(String(row.client_secret_encrypted || ''), (row.metadata ?? {}) as Record<string, unknown>);
+      const identity = await validateWhatsappAccess(appConfig.clientSecret, (row.metadata ?? {}) as Record<string, unknown>);
 
       await upsertConnection({
         platform: normalized,
@@ -436,7 +438,16 @@ export async function handlePlatformCallback(params: {
 
     if (normalized === 'meta') {
       const token = await exchangeMetaCode(code, appConfig);
-      const profile = await fetchMetaIdentity(token.access_token);
+      const [profile, publishingAccounts] = await Promise.all([
+        fetchMetaIdentity(token.access_token),
+        fetchMetaPublishingAccounts(token.access_token).catch((err) => ({
+          data: [],
+          discovery_error: err instanceof Error ? err.message : String(err),
+        })),
+      ]);
+      const pages = Array.isArray((publishingAccounts as any)?.data) ? (publishingAccounts as any).data : [];
+      const selectedPage = pages.find((page: any) => String(page?.id ?? '').trim()) ?? null;
+      const selectedInstagram = selectedPage?.instagram_business_account ?? null;
 
       const connection = await upsertConnection({
         platform: normalized,
@@ -447,6 +458,17 @@ export async function handlePlatformCallback(params: {
         scopes: normalizeScopes(appConfig.scopes, normalized),
         metadata: {
           profile,
+          pages: pages.map((page: any) => ({
+            id: page.id,
+            name: page.name ?? null,
+            instagram_business_account: page.instagram_business_account ?? null,
+          })),
+          selected_page_id: selectedPage?.id ?? null,
+          selected_page_name: selectedPage?.name ?? null,
+          selected_instagram_account_id: selectedInstagram?.id ?? null,
+          selected_instagram_username: selectedInstagram?.username ?? selectedInstagram?.name ?? null,
+          selected_page_access_token_encrypted: selectedPage?.access_token ? encryptSocialSecret(String(selectedPage.access_token)) : null,
+          account_discovery_error: (publishingAccounts as any)?.discovery_error ?? null,
         },
       });
       return { connection, context };

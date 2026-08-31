@@ -8,6 +8,7 @@ import {
   listSocialPublishJobs,
   processDueSocialPublishJobs,
   listSocialConnectors,
+  optimizeSocialPublishInput,
   retrySocialPublishJob,
   SocialTargetReadinessError,
   updateSocialPublishRequestJobs,
@@ -36,6 +37,29 @@ router.get('/connectors', async (req, res) => {
   } catch (err: any) {
     console.error('[SOCIAL CONNECTORS ERROR]', err?.message ?? err);
     res.status(500).json({ error: err?.message ?? 'Failed to list social connectors' });
+  }
+});
+
+router.post('/optimize', async (req, res) => {
+  try {
+    const operatorId = resolveOperatorId(req);
+    const role = String(req.auth?.role ?? '').toLowerCase();
+    if ((role === 'admin' || role === 'superadmin') && !operatorId) {
+      return res.status(400).json({ error: 'operator_id is required for admin optimization' });
+    }
+    const data = await optimizeSocialPublishInput(
+      {
+        targets: req.body?.targets,
+        post_input: req.body?.post_input,
+        idempotency_key: req.body?.idempotency_key,
+      },
+      req.auth?.user_id,
+      operatorId
+    );
+    res.json(data);
+  } catch (err: any) {
+    console.error('[SOCIAL OPTIMIZE ERROR]', err?.message ?? err);
+    res.status(400).json({ error: err?.message ?? 'Failed to optimize social post' });
   }
 });
 

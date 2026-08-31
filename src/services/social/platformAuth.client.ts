@@ -82,6 +82,124 @@ export async function fetchMetaIdentity(accessToken: string): Promise<Record<str
   return res.json();
 }
 
+export async function fetchMetaPublishingAccounts(accessToken: string): Promise<Record<string, unknown>> {
+  const params = new URLSearchParams({
+    fields: 'id,name,access_token,instagram_business_account{id,username,name}',
+    limit: '25',
+  });
+  const res = await fetch(`https://graph.facebook.com/v22.0/me/accounts?${params.toString()}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  if (!res.ok) {
+    const raw = await res.text().catch(() => '');
+    throw new Error(`Meta account discovery failed (${res.status}): ${raw}`);
+  }
+
+  return res.json();
+}
+
+function firstMetaPage(metadata: Record<string, any>): Record<string, any> | null {
+  const pages = Array.isArray(metadata?.pages) ? metadata.pages : [];
+  return pages.find((page) => String(page?.id ?? '').trim()) ?? null;
+}
+
+function selectedMetaAccessToken(conn: { access_token_encrypted: string; metadata?: Record<string, any> }): string {
+  const encryptedPageToken = String(conn.metadata?.selected_page_access_token_encrypted ?? '').trim();
+  if (encryptedPageToken) return decryptSocialSecret(encryptedPageToken);
+  return decryptSocialSecret(conn.access_token_encrypted);
+}
+
+export async function publishMetaFacebookPagePost(
+  conn: { access_token_encrypted: string; metadata?: Record<string, any> },
+  input: { content: string; media?: string[]; cta_url?: string }
+): Promise<{ external_post_id: string; external_post_url: string }> {
+  const metadata = conn.metadata ?? {};
+  const page = firstMetaPage(metadata);
+  const pageId = String(metadata.selected_page_id ?? page?.id ?? '').trim();
+  if (!pageId) throw new Error('Meta page is not selected for this connection. Reconnect Meta and choose a page.');
+
+  const accessToken = selectedMetaAccessToken(conn);
+  const media = Array.isArray(input.media) ? input.media.filter(Boolean) : [];
+  const message = [input.content, input.cta_url].map((v) => String(v ?? '').trim()).filter(Boolean).join('\n\n');
+  const path = media.length > 0 ? `${pageId}/photos` : `${pageId}/feed`;
+  const body = new URLSearchParams(media.length > 0
+    ? { url: media[0], caption: message, access_token: accessToken }
+    : { message, access_token: accessToken });
+
+  const res = await fetch(`https://graph.facebook.com/v22.0/${path}`, {
+    method: 'POST',
+    body,
+  });
+  if (!res.ok) {
+    const raw = await res.text().catch(() => '');
+    const err = new Error(`Meta Facebook publish failed (${res.status}): ${raw}`);
+    (err as any).httpStatus = res.status;
+    throw err;
+  }
+
+  const json = await res.json();
+  const id = String(json?.post_id ?? json?.id ?? '').trim();
+  return {
+    external_post_id: id || `meta-page-post-${Date.now()}`,
+    external_post_url: `https://www.facebook.com/${pageId}`,
+  };
+}
+
+export async function publishMetaInstagramPost(
+  conn: { access_token_encrypted: string; metadata?: Record<string, any> },
+  input: { content: string; media?: string[] }
+): Promise<{ external_post_id: string; external_post_url: string }> {
+  const metadata = conn.metadata ?? {};
+  const page = firstMetaPage(metadata);
+  const instagramId = String(metadata.selected_instagram_account_id ?? page?.instagram_business_account?.id ?? '').trim();
+  if (!instagramId) throw new Error('Instagram professional account is not linked to the selected Meta page.');
+
+  const media = Array.isArray(input.media) ? input.media.filter(Boolean) : [];
+  if (media.length === 0) throw new Error('Instagram publishing requires at least one public image or video URL.');
+
+  const accessToken = selectedMetaAccessToken(conn);
+  const createBody = new URLSearchParams({
+    image_url: media[0],
+    caption: input.content,
+    access_token: accessToken,
+  });
+  const create = await fetch(`https://graph.facebook.com/v22.0/${instagramId}/media`, {
+    method: 'POST',
+    body: createBody,
+  });
+  if (!create.ok) {
+    const raw = await create.text().catch(() => '');
+    const err = new Error(`Instagram media container creation failed (${create.status}): ${raw}`);
+    (err as any).httpStatus = create.status;
+    throw err;
+  }
+  const container = await create.json();
+  const creationId = String(container?.id ?? '').trim();
+  if (!creationId) throw new Error('Instagram media container response did not include an id.');
+
+  const publishBody = new URLSearchParams({
+    creation_id: creationId,
+    access_token: accessToken,
+  });
+  const publish = await fetch(`https://graph.facebook.com/v22.0/${instagramId}/media_publish`, {
+    method: 'POST',
+    body: publishBody,
+  });
+  if (!publish.ok) {
+    const raw = await publish.text().catch(() => '');
+    const err = new Error(`Instagram publish failed (${publish.status}): ${raw}`);
+    (err as any).httpStatus = publish.status;
+    throw err;
+  }
+  const json = await publish.json();
+  const id = String(json?.id ?? '').trim();
+  return {
+    external_post_id: id || creationId,
+    external_post_url: `https://www.instagram.com/`,
+  };
+}
+
 export function redditAuthorizeUrl(state: string, config: OAuthAppConfig): string {
   const params = new URLSearchParams({
     client_id: config.clientId,
@@ -139,8 +257,7 @@ export async function fetchRedditIdentity(accessToken: string, userAgent: string
   return res.json();
 }
 
-export async function validateTelegramBot(secretEncrypted: string, metadata: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const botToken = decryptSocialSecret(secretEncrypted);
+export async function validateTelegramBot(botToken: string, metadata: Record<string, unknown>): Promise<Record<string, unknown>> {
   const chatId = String(metadata?.chat_id ?? '').trim();
   if (!chatId) throw new Error('Telegram chat_id missing');
 
@@ -159,8 +276,7 @@ export async function validateTelegramBot(secretEncrypted: string, metadata: Rec
   };
 }
 
-export async function validateWhatsappAccess(secretEncrypted: string, metadata: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const accessToken = decryptSocialSecret(secretEncrypted);
+export async function validateWhatsappAccess(accessToken: string, metadata: Record<string, unknown>): Promise<Record<string, unknown>> {
   const businessAccountId = String(metadata?.business_account_id ?? '').trim();
   const phoneNumberId = String(metadata?.phone_number_id ?? '').trim();
 
