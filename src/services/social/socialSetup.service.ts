@@ -165,7 +165,7 @@ function safeFields(platform: SocialPlatform, row: any | null): Record<string, s
       app_id: String(row.client_id ?? ''),
       app_secret: secret,
       redirect_uri: String(row.redirect_uri ?? ''),
-      page_access_token: String(metadata.page_access_token ?? ''),
+      page_access_token: metadata.page_access_token ? SECRET_PLACEHOLDER : '',
       business_account_id: String(metadata.business_account_id ?? ''),
     };
   }
@@ -243,6 +243,16 @@ export async function saveOperatorSocialCredentials(params: {
   const missing = missingRequired(platform, check);
   if (missing.length > 0) throw new Error(`Missing required fields: ${missing.join(', ')}`);
 
+  const metadata = { ...(extracted.metadata ?? {}) };
+  if (
+    platform === 'meta' &&
+    String((metadata as any).page_access_token ?? '').trim() === SECRET_PLACEHOLDER &&
+    existing?.metadata &&
+    typeof existing.metadata === 'object'
+  ) {
+    (metadata as any).page_access_token = String(existing.metadata.page_access_token ?? '');
+  }
+
   const payload = {
     platform_code: platform,
     operator_id: operatorId,
@@ -252,7 +262,7 @@ export async function saveOperatorSocialCredentials(params: {
       : encryptSocialSecret(String(extracted.secret ?? '').trim()),
     redirect_uri: extracted.redirect_uri || null,
     scopes: extracted.scopes,
-    metadata: extracted.metadata,
+    metadata,
     active: true,
     updated_at: nowIso(),
   };
