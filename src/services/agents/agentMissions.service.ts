@@ -591,3 +591,88 @@ export async function bootstrapEmployeeTeam(auth: AuthCtx) {
 
   return summary;
 }
+
+export async function bootstrapSocialPublishingAutomation(
+  auth: AuthCtx,
+  options: { timezone?: string } = {}
+) {
+  const template = getMissionTemplates().find((item) => item.role_key === 'social_post_creator');
+  if (!template) throw new Error('Social publishing mission template is not configured');
+
+  const existingAgents = await listAgents();
+  const existingMissions = await listMissions();
+  let agent = existingAgents.find((item: any) => String(item.role_key ?? '').trim() === template.role_key);
+  let agentCreated = false;
+
+  if (!agent) {
+    agent = await createAgent({
+      name: 'Social Post Creator',
+      provider: 'openclaw',
+      provider_type: 'custom',
+      role_key: template.role_key,
+      default_model: 'gpt-5.4',
+      status: 'active',
+    } as any);
+    agentCreated = true;
+  }
+
+  const operatorId = String(auth.operatorId ?? '').trim();
+  const existingMission = existingMissions.find(
+    (mission: any) =>
+      String(mission.agent_id) === String(agent.id) &&
+      String(mission.role_key) === template.role_key &&
+      String(mission.task_type) === template.task_type &&
+      String(mission.operator_id ?? '') === operatorId
+  );
+
+  let mission = existingMission;
+  let missionCreated = false;
+  if (!mission) {
+    mission = await createMission(
+      {
+        agent_id: String(agent.id),
+        name: template.name,
+        role_key: template.role_key,
+        task_type: template.task_type,
+        mission_goal: template.mission_goal,
+        instructions:
+          'Create approval-ready social post variants for the connected operator channels. Optimize clarity, CTA, and platform fit for LinkedIn and Meta/Instagram when connected. Do not publish directly; send outputs to approval and scheduling.',
+        cadence_type: template.cadence_type,
+        cadence_value: template.cadence_value,
+        timezone: options.timezone || template.timezone,
+        next_run_at: new Date(Date.now() + 60 * 1000).toISOString(),
+        active: true,
+        execution_policy: 'scheduled',
+        output_policy: 'approval_required',
+        priority: template.priority,
+        metadata: {
+          bootstrap: 'social_engine_v1',
+          approval_required: true,
+          scheduler_surface: '/dashboard/social-scheduling',
+        },
+      },
+      auth
+    );
+    missionCreated = true;
+  } else if (!mission.active) {
+    mission = await updateMission(String(mission.id), {
+      active: true,
+      timezone: options.timezone || template.timezone,
+      metadata: {
+        ...(asObject(mission.metadata)),
+        bootstrap: 'social_engine_v1',
+        approval_required: true,
+        scheduler_surface: '/dashboard/social-scheduling',
+      },
+    });
+  }
+
+  return {
+    agents_created: agentCreated ? 1 : 0,
+    agents_reused: agentCreated ? 0 : 1,
+    missions_created: missionCreated ? 1 : 0,
+    missions_reused: missionCreated ? 0 : 1,
+    agent_id: String(agent.id),
+    mission_id: String(mission.id),
+  };
+}

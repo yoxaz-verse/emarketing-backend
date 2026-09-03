@@ -13,6 +13,13 @@ import {
   SocialTargetReadinessError,
   updateSocialPublishRequestJobs,
 } from '../services/social/social.service';
+import {
+  enableSocialAutomation,
+  getSocialSetupStatus,
+  saveMetaAccountSelection,
+  saveOperatorSocialCredentials,
+  startSocialSetupConnect,
+} from '../services/social/socialSetup.service';
 
 const router = Router();
 router.use(requireAuth('viewer'));
@@ -37,6 +44,90 @@ router.get('/connectors', async (req, res) => {
   } catch (err: any) {
     console.error('[SOCIAL CONNECTORS ERROR]', err?.message ?? err);
     res.status(500).json({ error: err?.message ?? 'Failed to list social connectors' });
+  }
+});
+
+router.get('/setup/status', async (req, res) => {
+  try {
+    const operatorId = resolveOperatorId(req);
+    const role = String(req.auth?.role ?? '').toLowerCase();
+    if ((role === 'admin' || role === 'superadmin') && !operatorId) {
+      return res.json(await getSocialSetupStatus(req.auth?.user_id, null));
+    }
+    const data = await getSocialSetupStatus(req.auth?.user_id, operatorId);
+    res.json(data);
+  } catch (err: any) {
+    console.error('[SOCIAL SETUP STATUS ERROR]', err?.message ?? err);
+    res.status(500).json({ error: err?.message ?? 'Failed to read social setup status' });
+  }
+});
+
+router.post('/setup/credentials', async (req, res) => {
+  try {
+    const operatorId = resolveOperatorId(req);
+    const data = await saveOperatorSocialCredentials({
+      platform: req.body?.platform,
+      operatorId,
+      input: req.body?.fields ?? req.body ?? {},
+    });
+    res.json(data);
+  } catch (err: any) {
+    console.error('[SOCIAL SETUP CREDENTIALS ERROR]', err?.message ?? err);
+    const statusCode = Number(err?.statusCode ?? 400);
+    res.status(statusCode >= 400 && statusCode < 600 ? statusCode : 400).json({
+      error: err?.message ?? 'Failed to save social credentials',
+      details: err?.details,
+    });
+  }
+});
+
+router.post('/setup/start', async (req, res) => {
+  try {
+    const operatorId = resolveOperatorId(req);
+    const data = await startSocialSetupConnect({
+      platform: req.body?.platform,
+      userId: req.auth?.user_id,
+      operatorId,
+    });
+    res.json(data);
+  } catch (err: any) {
+    console.error('[SOCIAL SETUP START ERROR]', err?.message ?? err);
+    const statusCode = Number(err?.statusCode ?? 400);
+    res.status(statusCode >= 400 && statusCode < 600 ? statusCode : 400).json({
+      error: err?.message ?? 'Failed to start social setup',
+      details: err?.details,
+    });
+  }
+});
+
+router.post('/setup/account-selection', async (req, res) => {
+  try {
+    const operatorId = resolveOperatorId(req);
+    const data = await saveMetaAccountSelection({
+      userId: req.auth?.user_id,
+      operatorId,
+      pageId: req.body?.selected_page_id,
+      instagramAccountId: req.body?.selected_instagram_account_id,
+    });
+    res.json(data);
+  } catch (err: any) {
+    console.error('[SOCIAL SETUP ACCOUNT SELECTION ERROR]', err?.message ?? err);
+    res.status(400).json({ error: err?.message ?? 'Failed to save social account selection' });
+  }
+});
+
+router.post('/setup/automation', async (req, res) => {
+  try {
+    const operatorId = resolveOperatorId(req);
+    const data = await enableSocialAutomation({
+      userId: req.auth?.user_id,
+      operatorId,
+      timezone: req.body?.timezone,
+    });
+    res.json(data);
+  } catch (err: any) {
+    console.error('[SOCIAL SETUP AUTOMATION ERROR]', err?.message ?? err);
+    res.status(400).json({ error: err?.message ?? 'Failed to enable social automation' });
   }
 });
 

@@ -462,6 +462,7 @@ export async function handlePlatformCallback(params: {
             id: page.id,
             name: page.name ?? null,
             instagram_business_account: page.instagram_business_account ?? null,
+            access_token_encrypted: page.access_token ? encryptSocialSecret(String(page.access_token)) : null,
           })),
           selected_page_id: selectedPage?.id ?? null,
           selected_page_name: selectedPage?.name ?? null,
