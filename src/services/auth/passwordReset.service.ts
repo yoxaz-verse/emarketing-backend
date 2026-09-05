@@ -1,9 +1,35 @@
-import { supabase } from "../../supabase";
-import { supabaseAdmin } from "../../utils/supabaseAdmin";
 import { hashPassword, verifyPassword } from "../../utils/password";
-import { decryptSecret } from "../../utils/sendEncryption";
-import { createSmtpTransport } from "../email/smtpTransport";
+import { createSmtpTransport, getSniCandidates } from "../email/smtpTransport";
 import crypto from "crypto";
+
+const GENERIC_RESET_MESSAGE = 'Verification code sent if account exists.';
+
+export class PasswordResetEmailServiceError extends Error {
+    constructor(message = 'Reset email service unavailable') {
+        super(message);
+        this.name = 'PasswordResetEmailServiceError';
+    }
+}
+
+type PasswordResetSmtpConfig = {
+    provider?: string | null;
+    host: string;
+    port: number;
+    username: string;
+    password: string;
+    encryption?: string | null;
+    fromName: string;
+    fromEmail: string;
+};
+
+type PasswordResetDeps = {
+    db: any;
+    env?: NodeJS.ProcessEnv;
+    hashPasswordFn?: typeof hashPassword;
+    generateOtpFn?: () => string;
+    createTransportFn?: typeof createSmtpTransport;
+    logger?: Pick<typeof console, 'error' | 'warn' | 'info'>;
+};
 
 /**
  * Generate a 6-digit numeric OTP
@@ -20,6 +46,113 @@ function hashResetGrant(value: string) {
     return crypto.createHash('sha256').update(value).digest('hex');
 }
 
+async function getSupabaseClient() {
+    const mod = await import("../../supabase.js");
+    return mod.supabase;
+}
+
+async function getSupabaseAdminClient() {
+    const mod = await import("../../utils/supabaseAdmin.js");
+    return mod.supabaseAdmin;
+}
+
+function requireEnvValue(env: NodeJS.ProcessEnv, name: string): string {
+    const value = String(env[name] ?? '').trim();
+    if (!value) throw new PasswordResetEmailServiceError(`Missing ${name}`);
+    return value;
+}
+
+function getPasswordResetSmtpConfig(env: NodeJS.ProcessEnv = process.env): PasswordResetSmtpConfig {
+    const host = requireEnvValue(env, 'PASSWORD_RESET_SMTP_HOST');
+    const portRaw = requireEnvValue(env, 'PASSWORD_RESET_SMTP_PORT');
+    const port = Number(portRaw);
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+        throw new PasswordResetEmailServiceError('Invalid PASSWORD_RESET_SMTP_PORT');
+    }
+
+    const username = requireEnvValue(env, 'PASSWORD_RESET_SMTP_USERNAME');
+    const password = requireEnvValue(env, 'PASSWORD_RESET_SMTP_PASSWORD');
+    const encryption = requireEnvValue(env, 'PASSWORD_RESET_SMTP_ENCRYPTION').toLowerCase();
+    if (encryption !== 'ssl' && encryption !== 'tls') {
+        throw new PasswordResetEmailServiceError('Invalid PASSWORD_RESET_SMTP_ENCRYPTION');
+    }
+
+    return {
+        provider: String(env.PASSWORD_RESET_SMTP_PROVIDER ?? '').trim() || null,
+        host,
+        port,
+        username,
+        password,
+        encryption,
+        fromName: String(env.PASSWORD_RESET_FROM_NAME ?? '').trim() || 'OBAOL Security',
+        fromEmail: String(env.PASSWORD_RESET_FROM_EMAIL ?? '').trim() || username,
+    };
+}
+
+function isTlsHostnameMismatch(error: any): boolean {
+    const message = String(error?.message ?? '').toLowerCase();
+    const code = String(error?.code ?? '').toUpperCase();
+    return (
+        code === 'ERR_TLS_CERT_ALTNAME_INVALID' ||
+        message.includes("does not match certificate's altnames") ||
+        message.includes('hostname/ip does not match certificate') ||
+        message.includes('altname')
+    );
+}
+
+async function sendPasswordResetEmail(input: {
+    email: string;
+    otp: string;
+    smtp: PasswordResetSmtpConfig;
+    createTransportFn: typeof createSmtpTransport;
+    logger: Pick<typeof console, 'warn'>;
+}) {
+    const candidates = getSniCandidates(input.smtp);
+    const errors: any[] = [];
+    const mail = {
+        from: `"${input.smtp.fromName}" <${input.smtp.fromEmail}>`,
+        to: input.email,
+        subject: 'Your Password Reset Verification Code',
+        html: `
+                <div style="font-family: sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #eee; border-radius: 12px; border: 1px solid #e5e7eb;">
+                    <h2 style="color: #111827; font-size: 24px; font-weight: 600;">Reset Your Password</h2>
+                    <p style="color: #4b5563; line-height: 1.5;">You requested to reset your password for your OBAOL account. Use the code below to proceed:</p>
+                    <div style="background: #f9fafb; padding: 24px; text-align: center; font-size: 32px; font-weight: 800; letter-spacing: 0.2em; color: #111827; border-radius: 8px; margin: 24px 0; border: 1px solid #f3f4f6;">
+                        ${input.otp}
+                    </div>
+                    <p style="color: #6b7280; font-size: 14px;">This code expires in 10 minutes. If you did not request a password reset, you can safely ignore this email.</p>
+                    <hr style="border: none; border-top: 1px solid #f3f4f6; margin: 24px 0;" />
+                    <p style="color: #9ca3af; font-size: 12px; text-align: center;">© ${new Date().getFullYear()} OBAOL · OUTBOUND INFRASTRUCTURE</p>
+                </div>
+            `,
+    };
+
+    for (let index = 0; index < candidates.length; index += 1) {
+        const servername = candidates[index];
+        try {
+            const transporter = input.createTransportFn(input.smtp, servername);
+            await transporter.sendMail(mail);
+            if (index > 0) {
+                input.logger.warn('[PASSWORD_RESET_SMTP_SNI_FALLBACK_USED]', {
+                    host: input.smtp.host,
+                    provider: input.smtp.provider,
+                    servername,
+                });
+            }
+            return;
+        } catch (err: any) {
+            errors.push(err);
+            const shouldTryFallback =
+                index === 0 &&
+                String(input.smtp.provider ?? '').trim().toLowerCase() === 'mxroute' &&
+                isTlsHostnameMismatch(err);
+            if (!shouldTryFallback) break;
+        }
+    }
+
+    throw new PasswordResetEmailServiceError(errors[0]?.message ?? 'Reset email delivery failed');
+}
+
 /**
  * 1. Request Password Reset
  * - Validates user exists
@@ -27,10 +160,15 @@ function hashResetGrant(value: string) {
  * - Hashes OTP and sets expiry (10 min)
  * - Sends email to user
  */
-export async function requestPasswordReset(email: string) {
+export async function requestPasswordResetWithDeps(email: string, deps: PasswordResetDeps) {
     email = normalizeEmail(email);
+    const db = deps.db;
+    const logger = deps.logger ?? console;
+    const hashPasswordFn = deps.hashPasswordFn ?? hashPassword;
+    const createTransportFn = deps.createTransportFn ?? createSmtpTransport;
+
     // 1. Check if user exists
-    const { data: user } = await supabase
+    const { data: user } = await db
         .from('users')
         .select('id')
         .eq('email', email)
@@ -38,17 +176,28 @@ export async function requestPasswordReset(email: string) {
 
     if (!user) {
         // Return generic success to prevent email enumeration
-        return { success: true, message: 'Verification code sent if account exists.' };
+        return { success: true, message: GENERIC_RESET_MESSAGE };
     }
 
+    const smtpConfig = getPasswordResetSmtpConfig(deps.env ?? process.env);
+
     // 2. Generate OTP
-    const otp = generateOTP();
-    const otpHash = await hashPassword(otp);
+    const otpValue = deps.generateOtpFn ? deps.generateOtpFn() : generateOTP();
+    const otpHash = await hashPasswordFn(otpValue);
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
-    // 3. Store in DB
-    await supabase.from('password_reset_tokens').delete().eq('email', email);
-    const { error } = await supabase.from('password_reset_tokens').insert({
+    // 3. Send email before storing the OTP so users never receive a success state for an unusable code.
+    await sendPasswordResetEmail({
+        email,
+        otp: otpValue,
+        smtp: smtpConfig,
+        createTransportFn,
+        logger,
+    });
+
+    // 4. Store in DB
+    await db.from('password_reset_tokens').delete().eq('email', email);
+    const { error } = await db.from('password_reset_tokens').insert({
         email,
         otp_hash: otpHash,
         expires_at: expiresAt.toISOString(),
@@ -60,51 +209,11 @@ export async function requestPasswordReset(email: string) {
 
     if (error) throw error;
 
-    // 4. Send Email via existing SMTP infrastructure
-    const { data: smtp } = await supabase
-        .from('smtp_accounts')
-        .select('*')
-        .eq('is_valid', true)
-        .limit(1)
-        .single();
+    return { success: true, message: GENERIC_RESET_MESSAGE };
+}
 
-    if (!smtp) {
-        console.error('[AUTH ERROR] No valid SMTP account found for password reset emails');
-        return { success: true, message: 'Verification code sent if account exists.' };
-    }
-
-    try {
-        const transporter = createSmtpTransport({
-            provider: smtp.provider,
-            host: smtp.host,
-            port: smtp.port,
-            username: smtp.username,
-            password: decryptSecret(smtp.password),
-            encryption: smtp.encryption,
-        });
-
-        await transporter.sendMail({
-            from: `"OBAOL Security" <${smtp.username}>`,
-            to: email,
-            subject: 'Your Password Reset Verification Code',
-            html: `
-                <div style="font-family: sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #eee; border-radius: 12px; border: 1px solid #e5e7eb;">
-                    <h2 style="color: #111827; font-size: 24px; font-weight: 600;">Reset Your Password</h2>
-                    <p style="color: #4b5563; line-height: 1.5;">You requested to reset your password for your OBAOL account. Use the code below to proceed:</p>
-                    <div style="background: #f9fafb; padding: 24px; text-align: center; font-size: 32px; font-weight: 800; letter-spacing: 0.2em; color: #111827; border-radius: 8px; margin: 24px 0; border: 1px solid #f3f4f6;">
-                        ${otp}
-                    </div>
-                    <p style="color: #6b7280; font-size: 14px;">This code expires in 10 minutes. If you did not request a password reset, you can safely ignore this email.</p>
-                    <hr style="border: none; border-top: 1px solid #f3f4f6; margin: 24px 0;" />
-                    <p style="color: #9ca3af; font-size: 12px; text-align: center;">© ${new Date().getFullYear()} OBAOL · OUTBOUND INFRASTRUCTURE</p>
-                </div>
-            `
-        });
-    } catch (mailError) {
-        console.error('[AUTH ERROR] Failed to send password reset email:', mailError);
-    }
-
-    return { success: true, message: 'Verification code sent if account exists.' };
+export async function requestPasswordReset(email: string) {
+    return requestPasswordResetWithDeps(email, { db: await getSupabaseClient() });
 }
 
 /**
@@ -116,7 +225,8 @@ export async function requestPasswordReset(email: string) {
 export async function verifyResetOTP(email: string, otp: string) {
     email = normalizeEmail(email);
     if (!/^\d{6}$/.test(String(otp ?? ''))) throw new Error('Invalid verification code');
-    const { data: tokens, error } = await supabase
+    const db = await getSupabaseClient();
+    const { data: tokens, error } = await db
         .from('password_reset_tokens')
         .select('id,email,otp_hash,expires_at,verified,attempt_count')
         .eq('email', email)
@@ -134,12 +244,12 @@ export async function verifyResetOTP(email: string, otp: string) {
     const isMatch = await verifyPassword(otp, candidate.otp_hash);
 
     if (!isMatch) {
-        await supabase.from('password_reset_tokens').update({ attempt_count: attempts + 1 }).eq('id', candidate.id);
+        await db.from('password_reset_tokens').update({ attempt_count: attempts + 1 }).eq('id', candidate.id);
         throw new Error('Invalid verification code');
     }
 
     const resetToken = crypto.randomBytes(32).toString('base64url');
-    await supabase
+    await db
         .from('password_reset_tokens')
         .update({ verified: true, reset_token_hash: hashResetGrant(resetToken), verified_at: new Date().toISOString() })
         .eq('id', candidate.id);
@@ -157,8 +267,10 @@ export async function resetPassword(email: string, newPassword: string, resetTok
     email = normalizeEmail(email);
     if (newPassword.length < 12) throw new Error('Password must be at least 12 characters');
     if (!resetToken) throw new Error('Reset authorization is required');
+    const db = await getSupabaseClient();
+    const admin = await getSupabaseAdminClient();
     // 1. Verify verified token exists
-    const { data: token, error } = await supabase
+    const { data: token, error } = await db
         .from('password_reset_tokens')
         .select('id,email,expires_at,reset_token_hash,consumed_at')
         .eq('email', email)
@@ -173,7 +285,7 @@ export async function resetPassword(email: string, newPassword: string, resetTok
     }
 
     // 2. Resolve User
-    const { data: user } = await supabase
+    const { data: user } = await db
         .from('users')
         .select('id, auth_user_id')
         .eq('email', email)
@@ -184,7 +296,7 @@ export async function resetPassword(email: string, newPassword: string, resetTok
     }
 
     // 3. Consume the grant before changing credentials so concurrent replays lose.
-    const { data: consumed, error: consumeError } = await supabase
+    const { data: consumed, error: consumeError } = await db
         .from('password_reset_tokens')
         .update({ consumed_at: new Date().toISOString() })
         .eq('id', token.id)
@@ -194,7 +306,7 @@ export async function resetPassword(email: string, newPassword: string, resetTok
     if (consumeError || !consumed) throw new Error('Reset authorization has already been used');
 
     // 4. Update Supabase Auth password
-    const { error: authError } = await supabaseAdmin.auth.admin.updateUserById(user.auth_user_id, {
+    const { error: authError } = await admin.auth.admin.updateUserById(user.auth_user_id, {
         password: newPassword
     });
 
@@ -202,12 +314,12 @@ export async function resetPassword(email: string, newPassword: string, resetTok
 
     // 5. Update local password hash for sync
     const password_hash = await hashPassword(newPassword);
-    await supabase
+    await db
         .from('users')
         .update({ password_hash })
         .eq('id', user.id);
 
-    await supabase.from('password_reset_tokens').delete().eq('email', email).neq('id', token.id);
+    await db.from('password_reset_tokens').delete().eq('email', email).neq('id', token.id);
 
     return { success: true };
 }

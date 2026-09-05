@@ -363,6 +363,98 @@ async function checkSupabaseConnectivity() {
   }
 }
 
+function listenForRequests(bootState: 'ready' | 'degraded_auth'): Promise<void> {
+  return new Promise((resolve) => {
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`Server running on port ${PORT}`);
+      console.info('[BACKEND_BOOT_OK]', {
+        port: PORT,
+        bindHost: '0.0.0.0',
+        expectedApiBase: process.env.NEXT_PUBLIC_API_BASE_URL ?? 'unset',
+        runtimeMode,
+        entrypoint,
+        schemaGuardVersion,
+        bootState,
+      });
+      console.info('[INQUIRY_ROUTE_HEALTH]', {
+        fetchRunsEndpoint: '/inquiries/fetch-runs',
+        sourcesEndpoint: '/inquiries/sources',
+        connectorRunsEndpoint: '/inquiries/connector-runs',
+        quotesEndpoint: '/quotes',
+        note: 'If UI shows Cannot POST /inquiries/fetch-runs, verify this process is the active runtime and restarted after deploy.',
+      });
+      console.info('[INDUSTRY_INTELLIGENCE_ROUTE_HEALTH]', {
+        sourcesEndpoint: '/industry-intelligence/sources',
+        summaryEndpoint: '/industry-intelligence/summary',
+        fetchRunsEndpoint: '/industry-intelligence/fetch-runs',
+        opportunitiesEndpoint: '/industry-intelligence/opportunities',
+        exportEndpoint: '/industry-intelligence/export',
+      });
+      console.info('[SOCIAL_APPS_ROUTE_HEALTH]', {
+        getCanonical: '/admin/social-apps/:platform?operator_id=...',
+        putCanonical: '/admin/social-apps/:platform',
+        getCompatAlias: '/admin/social-apps?platform=...&operator_id=...',
+        putCompatAlias: '/admin/social-apps with body.platform',
+      });
+      console.info('[EVENTS_ROUTE_HEALTH]', {
+        eventsEndpoint: '/events',
+        sourcesEndpoint: '/events/sources',
+        ingestEndpoint: '/events/ingest/run',
+      });
+      resolve();
+    });
+  });
+}
+
+function startBackgroundRunners() {
+  try {
+    startSequenceRunner();
+  } catch (error) {
+    console.error('[SEQUENCE_RUNNER_BOOT_ERROR]', formatUnknownError(error));
+  }
+
+  try {
+    startAgentMissionRunner();
+  } catch (error) {
+    console.error('[AGENT_MISSION_RUNNER_BOOT_ERROR]', formatUnknownError(error));
+  }
+
+  try {
+    startSocialPublishRunner();
+  } catch (error) {
+    console.error('[SOCIAL_PUBLISH_RUNNER_BOOT_ERROR]', formatUnknownError(error));
+  }
+
+  try {
+    startEventIngestionRunner();
+  } catch (error) {
+    console.error('[EVENT_INGESTION_RUNNER_BOOT_ERROR]', formatUnknownError(error));
+  }
+
+  try {
+    startIndustryIntelligenceRunner();
+  } catch (error) {
+    console.error('[INDUSTRY_INTELLIGENCE_RUNNER_BOOT_ERROR]', formatUnknownError(error));
+  }
+
+  try {
+    startReplyCaptureWorker();
+  } catch (error) {
+    console.error('[REPLY_CAPTURE_WORKER_BOOT_ERROR]', formatUnknownError(error));
+  }
+
+  try {
+    startEmailValidationQueueWorker();
+    console.info('[EMAIL_VALIDATION_WORKER_BOOT]', {
+      queueMode: process.env.EMAIL_VALIDATION_QUEUE_MODE ?? 'legacy',
+      redisConfigured: Boolean(process.env.REDIS_URL),
+      workerHealth: getEmailValidationWorkerHealth(),
+    });
+  } catch (error) {
+    console.error('[EMAIL_VALIDATION_WORKER_BOOT_ERROR]', formatUnknownError(error));
+  }
+}
+
 async function assertAttachLeadSchema() {
   const { error } = await supabase
     .from('leads')
@@ -676,6 +768,21 @@ async function checkReplyTrackingSchemaReadiness() {
 
 async function boot() {
   await checkSupabaseConnectivity();
+  const authReadiness = await getSupabaseAuthReadiness();
+  if (!authReadiness.ok) {
+    console.error('[BACKEND_BOOT_AUTH_NOT_READY]', {
+      code: authReadiness.code,
+      status: authReadiness.status,
+      projectRef: authReadiness.projectRef,
+      durationMs: authReadiness.durationMs,
+      error: authReadiness.error ?? null,
+      workersStarted: false,
+      note: 'HTTP health endpoints remain available; scheduled workers are disabled until Supabase auth configuration is fixed and the backend is restarted.',
+    });
+    await listenForRequests('degraded_auth');
+    return;
+  }
+
   await assertAttachLeadSchema();
   await checkSendingLimitsScheduleSchema();
   await checkOperatorsSchemaReadiness();
@@ -684,92 +791,11 @@ async function boot() {
   await checkIndustryIntelligenceSchemaReadiness();
   await checkReplyTrackingSchemaReadiness();
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on port ${PORT}`);
-    console.info('[BACKEND_BOOT_OK]', {
-      port: PORT,
-      bindHost: '0.0.0.0',
-      expectedApiBase: process.env.NEXT_PUBLIC_API_BASE_URL ?? 'unset',
-      runtimeMode,
-      entrypoint,
-      schemaGuardVersion,
-    });
-    console.info('[INQUIRY_ROUTE_HEALTH]', {
-      fetchRunsEndpoint: '/inquiries/fetch-runs',
-      sourcesEndpoint: '/inquiries/sources',
-      connectorRunsEndpoint: '/inquiries/connector-runs',
-      quotesEndpoint: '/quotes',
-      note: 'If UI shows Cannot POST /inquiries/fetch-runs, verify this process is the active runtime and restarted after deploy.',
-    });
-    console.info('[INDUSTRY_INTELLIGENCE_ROUTE_HEALTH]', {
-      sourcesEndpoint: '/industry-intelligence/sources',
-      summaryEndpoint: '/industry-intelligence/summary',
-      fetchRunsEndpoint: '/industry-intelligence/fetch-runs',
-      opportunitiesEndpoint: '/industry-intelligence/opportunities',
-      exportEndpoint: '/industry-intelligence/export',
-    });
-    console.info('[SOCIAL_APPS_ROUTE_HEALTH]', {
-      getCanonical: '/admin/social-apps/:platform?operator_id=...',
-      putCanonical: '/admin/social-apps/:platform',
-      getCompatAlias: '/admin/social-apps?platform=...&operator_id=...',
-      putCompatAlias: '/admin/social-apps with body.platform',
-    });
-    console.info('[EVENTS_ROUTE_HEALTH]', {
-      eventsEndpoint: '/events',
-      sourcesEndpoint: '/events/sources',
-      ingestEndpoint: '/events/ingest/run',
-    });
-  });
+  await listenForRequests('ready');
+  startBackgroundRunners();
 }
 
 void boot().catch((error) => {
   console.error('[BACKEND_BOOT_FATAL]', formatUnknownError(error));
   process.exit(1);
 });
-
-try {
-  startSequenceRunner();
-} catch (error) {
-  console.error('[SEQUENCE_RUNNER_BOOT_ERROR]', formatUnknownError(error));
-}
-
-try {
-  startAgentMissionRunner();
-} catch (error) {
-  console.error('[AGENT_MISSION_RUNNER_BOOT_ERROR]', formatUnknownError(error));
-}
-
-try {
-  startSocialPublishRunner();
-} catch (error) {
-  console.error('[SOCIAL_PUBLISH_RUNNER_BOOT_ERROR]', formatUnknownError(error));
-}
-
-try {
-  startEventIngestionRunner();
-} catch (error) {
-  console.error('[EVENT_INGESTION_RUNNER_BOOT_ERROR]', formatUnknownError(error));
-}
-
-try {
-  startIndustryIntelligenceRunner();
-} catch (error) {
-  console.error('[INDUSTRY_INTELLIGENCE_RUNNER_BOOT_ERROR]', formatUnknownError(error));
-}
-
-try {
-  startReplyCaptureWorker();
-} catch (error) {
-  console.error('[REPLY_CAPTURE_WORKER_BOOT_ERROR]', formatUnknownError(error));
-}
-
-try {
-  startEmailValidationQueueWorker();
-  console.info('[EMAIL_VALIDATION_WORKER_BOOT]', {
-    queueMode: process.env.EMAIL_VALIDATION_QUEUE_MODE ?? 'legacy',
-    redisConfigured: Boolean(process.env.REDIS_URL),
-    workerHealth: getEmailValidationWorkerHealth(),
-  });
-} catch (error) {
-  console.error('[EMAIL_VALIDATION_WORKER_BOOT_ERROR]', formatUnknownError(error));
-}

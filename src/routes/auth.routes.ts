@@ -5,6 +5,7 @@ import { supabaseAdmin } from '../utils/supabaseAdmin.js';
 import { requireAuthLite } from '../middleware/requireAuthLite.js';
 import type { Request, Response } from 'express';
 import {
+  PasswordResetEmailServiceError,
   requestPasswordReset,
   verifyResetOTP,
   resetPassword
@@ -118,6 +119,12 @@ router.post('/forgot-password', rateLimit({ name: 'forgot-password', windowMs: 1
     return res.json(result);
   } catch (err: any) {
     console.error('FORGOT PASSWORD ERROR:', err);
+    if (err instanceof PasswordResetEmailServiceError) {
+      return res.status(503).json({
+        error: 'Reset email service unavailable. Please try again shortly.',
+        code: 'RESET_EMAIL_SERVICE_UNAVAILABLE',
+      });
+    }
     return res.status(500).json({ error: 'Failed to process request' });
   }
 });
