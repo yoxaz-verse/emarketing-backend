@@ -5,6 +5,7 @@ import { getConnectionStatuses, startPlatformConnect } from './socialAuth.servic
 import { listSocialConnectors } from './social.service';
 
 type SocialPlatform = 'linkedin' | 'meta' | 'reddit' | 'telegram' | 'whatsapp';
+type CredentialSource = 'operator' | 'global' | 'env' | 'missing';
 
 const SOCIAL_PLATFORMS: SocialPlatform[] = ['linkedin', 'meta', 'reddit', 'telegram', 'whatsapp'];
 const SECRET_PLACEHOLDER = '***';
@@ -216,6 +217,59 @@ function metaAccountSelection(connection: any | null) {
   };
 }
 
+function envCredentialRow(platform: SocialPlatform) {
+  if (platform !== 'linkedin') return null;
+
+  const clientId = String(process.env.LINKEDIN_CLIENT_ID ?? '').trim();
+  const clientSecret = String(process.env.LINKEDIN_CLIENT_SECRET ?? '').trim();
+  const redirectUri = String(process.env.LINKEDIN_REDIRECT_URI ?? '').trim();
+  if (!clientId || !clientSecret || !redirectUri) return null;
+
+  return {
+    platform_code: platform,
+    client_id: clientId,
+    client_secret_encrypted: 'env-configured',
+    redirect_uri: redirectUri,
+    scopes: normalizeScopes(process.env.LINKEDIN_SCOPES, platform),
+    metadata: {},
+    active: true,
+  };
+}
+
+function resolveEffectiveCredential(params: {
+  platform: SocialPlatform;
+  operatorRow?: any | null;
+  globalRow?: any | null;
+}): { row: any | null; source: CredentialSource } {
+  if (params.operatorRow) return { row: params.operatorRow, source: 'operator' };
+  if (params.globalRow) return { row: params.globalRow, source: 'global' };
+
+  const envRow = envCredentialRow(params.platform);
+  if (envRow) return { row: envRow, source: 'env' };
+
+  return { row: null, source: 'missing' };
+}
+
+export function summarizePlatformCredential(params: {
+  platform: SocialPlatform;
+  operatorRow?: any | null;
+  globalRow?: any | null;
+}) {
+  const { row, source } = resolveEffectiveCredential(params);
+  const fields = safeFields(params.platform, row);
+  const missing = missingRequired(params.platform, credentialCheckMap(params.platform, row));
+  const configured = Boolean(row) && missing.length === 0;
+
+  return {
+    row,
+    source: configured ? source : 'missing',
+    fields,
+    missing: configured ? [] : missing,
+    configured,
+    oneClickAvailable: params.platform === 'linkedin' && configured,
+  };
+}
+
 export async function saveOperatorSocialCredentials(params: {
   platform: unknown;
   operatorId?: string | null;
@@ -292,13 +346,17 @@ export async function getSocialSetupStatus(userId?: string | null, operatorId?: 
     };
   }
 
-  const [connectors, connections, credentialRows, missions] = await Promise.all([
+  const [connectors, connections, operatorCredentialRows, globalCredentialRows, missions] = await Promise.all([
     listSocialConnectors(userId, operatorId),
     getConnectionStatuses(userId, operatorId),
     supabase
       .from('social_operator_oauth_apps')
       .select('*')
       .eq('operator_id', operatorId)
+      .eq('active', true),
+    supabase
+      .from('social_global_oauth_apps')
+      .select('*')
       .eq('active', true),
     supabase
       .from('agent_missions')
@@ -310,12 +368,17 @@ export async function getSocialSetupStatus(userId?: string | null, operatorId?: 
       .maybeSingle(),
   ]);
 
-  if (credentialRows.error && credentialRows.error.code !== 'PGRST205' && credentialRows.error.code !== '42P01') throw credentialRows.error;
+  if (operatorCredentialRows.error && operatorCredentialRows.error.code !== 'PGRST205' && operatorCredentialRows.error.code !== '42P01') throw operatorCredentialRows.error;
+  if (globalCredentialRows.error && globalCredentialRows.error.code !== 'PGRST205' && globalCredentialRows.error.code !== '42P01') throw globalCredentialRows.error;
   if (missions.error && missions.error.code !== 'PGRST116' && missions.error.code !== 'PGRST205' && missions.error.code !== '42P01') throw missions.error;
 
-  const credentialByPlatform = new Map<string, any>();
-  for (const row of credentialRows.data ?? []) {
-    credentialByPlatform.set(String((row as any).platform_code ?? '').toLowerCase(), row);
+  const operatorCredentialByPlatform = new Map<string, any>();
+  for (const row of operatorCredentialRows.data ?? []) {
+    operatorCredentialByPlatform.set(String((row as any).platform_code ?? '').toLowerCase(), row);
+  }
+  const globalCredentialByPlatform = new Map<string, any>();
+  for (const row of globalCredentialRows.data ?? []) {
+    globalCredentialByPlatform.set(String((row as any).platform_code ?? '').toLowerCase(), row);
   }
   const connectionByPlatform = new Map<string, any>();
   for (const connection of connections as any[]) {
@@ -327,12 +390,15 @@ export async function getSocialSetupStatus(userId?: string | null, operatorId?: 
   }
 
   const platforms = SOCIAL_PLATFORMS.map((platform) => {
-    const credential = credentialByPlatform.get(platform) ?? null;
+    const credentialSummary = summarizePlatformCredential({
+      platform,
+      operatorRow: operatorCredentialByPlatform.get(platform) ?? null,
+      globalRow: globalCredentialByPlatform.get(platform) ?? null,
+    });
+    const credential = credentialSummary.row;
     const connection = connectionByPlatform.get(platform) ?? null;
     const connector = connectorByPlatform.get(platform) ?? null;
-    const fields = safeFields(platform, credential);
-    const missing = missingRequired(platform, credentialCheckMap(platform, credential));
-    const credentialConfigured = Boolean(credential) && missing.length === 0;
+    const credentialConfigured = credentialSummary.configured;
     const connected = connection?.status === 'connected';
     const accountSelection = platform === 'meta' ? metaAccountSelection(connection) : null;
     const needsAccountSelection = platform === 'meta' && connected && !String(accountSelection?.selected_page_id ?? '').trim();
@@ -341,8 +407,10 @@ export async function getSocialSetupStatus(userId?: string | null, operatorId?: 
       platform_code: platform,
       label: connector?.name ?? platform,
       credential_configured: credentialConfigured,
-      credential_missing_fields: credentialConfigured ? [] : missing,
-      credential_fields: fields,
+      credential_missing_fields: credentialSummary.missing,
+      credential_source: credentialSummary.source,
+      one_click_available: credentialSummary.oneClickAvailable,
+      credential_fields: credentialSummary.fields,
       connection_status: connection?.status ?? 'disconnected',
       connection_reason: connection?.reason ?? null,
       connected,
@@ -363,17 +431,22 @@ export async function getSocialSetupStatus(userId?: string | null, operatorId?: 
   const connectedPlatforms = platforms.filter((platform) => platform.setup_ready);
   const mission = missions.data as any | null;
   const automationEnabled = Boolean(mission?.id && mission?.active);
+  const oneClickConnectable = platforms.find((platform) => platform.one_click_available && !platform.connected);
+  const anyConnectable = platforms.find((platform) => platform.credential_configured && !platform.connected);
+  const anyUnconfigured = platforms.some((platform) => !platform.credential_configured);
 
   return {
     operator_id: operatorId,
     ready: connectedPlatforms.length > 0 && automationEnabled,
-    next_action: platforms.some((platform) => !platform.credential_configured)
-      ? 'configure_credentials'
-      : connectedPlatforms.length === 0
+    next_action: connectedPlatforms.length > 0
+      ? automationEnabled
+        ? 'ready'
+        : 'enable_automation'
+      : oneClickConnectable || anyConnectable
         ? 'connect_account'
-        : automationEnabled
-          ? 'ready'
-          : 'enable_automation',
+        : anyUnconfigured
+          ? 'configure_credentials'
+          : 'connect_account',
     automation: {
       enabled: automationEnabled,
       agent_id: mission?.agent_id ?? null,
@@ -392,12 +465,30 @@ export async function startSocialSetupConnect(params: {
   const operatorId = String(params.operatorId ?? '').trim();
   if (!operatorId) throw new Error('operator_id is required');
 
-  const credential = await getOperatorCredentialRow(platform, operatorId);
-  const missing = missingRequired(platform, credentialCheckMap(platform, credential));
-  if (!credential || missing.length > 0) {
-    const err: any = new Error(`Operator-owned ${platform} credentials are required before connect`);
+  const [operatorCredential, globalCredentialResult] = await Promise.all([
+    getOperatorCredentialRow(platform, operatorId),
+    supabase
+      .from('social_global_oauth_apps')
+      .select('*')
+      .eq('platform_code', platform)
+      .eq('active', true)
+      .maybeSingle(),
+  ]);
+  if (globalCredentialResult.error && globalCredentialResult.error.code !== 'PGRST116') throw globalCredentialResult.error;
+
+  const credentialSummary = summarizePlatformCredential({
+    platform,
+    operatorRow: operatorCredential,
+    globalRow: globalCredentialResult.data ?? null,
+  });
+  if (!credentialSummary.configured) {
+    const err: any = new Error(
+      platform === 'linkedin'
+        ? 'LinkedIn is not ready for one-click connect. Configure the global OBAOL LinkedIn app credentials first.'
+        : `${platform} credentials are required before connect`
+    );
     err.statusCode = 400;
-    err.details = { missing_fields: missing.length > 0 ? missing : requiredFieldsByPlatform(platform) };
+    err.details = { missing_fields: credentialSummary.missing.length > 0 ? credentialSummary.missing : requiredFieldsByPlatform(platform) };
     throw err;
   }
 
@@ -405,6 +496,7 @@ export async function startSocialSetupConnect(params: {
   return {
     platform_code: platform,
     operator_id: operatorId,
+    credential_source: credentialSummary.source,
     redirect_url: redirectUrl,
   };
 }

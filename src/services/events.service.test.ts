@@ -341,6 +341,23 @@ test('expanded event source migration includes startup, AI, and AgriTech sources
   assert.match(sql, /ai/);
 });
 
+test('events integration migration creates operational tables and expanded source health', () => {
+  const sql = readFileSync('sql/20260906_harden_events_intelligence_integration.sql', 'utf8');
+  const sourcePack = sql.slice(sql.indexOf('from (\n  values'));
+  const urls = Array.from(sourcePack.matchAll(/'https:\/\/[^']+'/g)).map((match) => match[0]);
+
+  assert.match(sql, /create table if not exists public\.event_items/);
+  assert.match(sql, /create table if not exists public\.event_ingestion_runs/);
+  assert.match(sql, /last_checked_at/);
+  assert.match(sql, /last_success_at/);
+  assert.match(sql, /health_status/);
+  assert.match(sql, /https:\/\/apeda\.gov\.in\/TradeFairs/);
+  assert.match(sql, /aishala_events/);
+  assert.match(sql, /tradefairdates_agriculture_india/);
+  assert.ok(urls.length >= 5);
+  assert.equal(new Set(urls).size, urls.length);
+});
+
 test('buildCountdownMeta labels future events', async () => {
   const { buildCountdownMeta } = await loadEventsModule();
   const meta = buildCountdownMeta('2026-07-15T00:00:00.000Z', new Date('2026-07-12T00:00:00.000Z'));

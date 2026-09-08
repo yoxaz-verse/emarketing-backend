@@ -1,3 +1,5 @@
+import communicationsRoutes from './routes/communications.routes';
+import { startCommunicationRunner } from './services/communications/projector';
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
@@ -277,6 +279,7 @@ app.use('/sequences', sequencesRoutes);
 app.use('/agents', agentsRoutes);
 app.use('/reply', replyRoutes);
 app.use('/stats', statsRoutes);
+app.use('/communications', communicationsRoutes);
 app.use('/admin', adminRoutes);
 app.use('/newsletter', newsletterRoutes);
 app.use('/marketplaces', marketplacesRoutes);
@@ -439,6 +442,7 @@ function startBackgroundRunners() {
 
   try {
     startReplyCaptureWorker();
+    startCommunicationRunner();
   } catch (error) {
     console.error('[REPLY_CAPTURE_WORKER_BOOT_ERROR]', formatUnknownError(error));
   }

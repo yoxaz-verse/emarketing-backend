@@ -6,6 +6,10 @@ type InboundReplyPayload = {
   message?: string;
   inbox_email?: string;
   message_id?: string;
+  own_message_id?: string;
+  in_reply_to?: string;
+  reference_ids?: string[];
+  subject?: string;
   received_at?: string;
   leadId?: string;
   source?: 'imap_poll' | 'manual_api' | 'provider_webhook' | 'unknown';
@@ -49,7 +53,8 @@ export async function ingestInboundReply(input: InboundReplyPayload) {
   const receivedAtIso = input.received_at
     ? new Date(input.received_at).toISOString()
     : new Date().toISOString();
-  const dedupeKey = toDedupeKey({ fromEmail, message, messageId, receivedAtIso });
+  const ownMessageId = String(input.own_message_id ?? '').trim().replace(/^<|>$/g, '');
+  const dedupeKey = toDedupeKey({ fromEmail, message, messageId: ownMessageId ? `${inboxEmail}|${ownMessageId}` : '', receivedAtIso });
 
   // Resolve order: message-id correlation -> explicit leadId -> from-email fallback.
   let lead: any = null;
@@ -118,6 +123,10 @@ export async function ingestInboundReply(input: InboundReplyPayload) {
       from_email: fromEmail || null,
       inbox_email: inboxEmail || null,
       message_id: messageId || null,
+      own_message_id: ownMessageId || null,
+      in_reply_to: input.in_reply_to || null,
+      reference_ids: input.reference_ids || [],
+      subject: input.subject || null,
       message: message || null,
       received_at: receivedAtIso,
     });

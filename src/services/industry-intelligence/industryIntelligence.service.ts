@@ -4,6 +4,7 @@ import { supabase } from '../../supabase';
 import { safeFetch } from '../../utils/safeFetch';
 import {
   IndustryFetchRun,
+  IndustryIntelligenceType,
   IndustryIntelligenceSource,
   IndustryOpportunityCategory,
   IndustryOpportunityFilters,
@@ -18,6 +19,7 @@ import {
 
 const ALLOWED_CATEGORIES: IndustryOpportunityCategory[] = [
   'seed_funding',
+  'funding_news',
   'grant',
   'accelerator',
   'pitch_event',
@@ -37,6 +39,7 @@ const ALLOWED_STATUSES: IndustryOpportunityStatus[] = [
 
 const ALLOWED_SOURCE_MODES: IndustrySourceMode[] = ['manual', 'rss', 'api', 'webhook'];
 const ALLOWED_SOURCE_STATUSES: IndustrySourceStatus[] = ['active', 'paused', 'disabled'];
+const ALLOWED_INTELLIGENCE_TYPES: IndustryIntelligenceType[] = ['opportunity', 'funding_news'];
 
 const FALLBACK_SOURCES: IndustryIntelligenceSource[] = [
   fallbackSource('startupindia', 'Startup India', 'html', 'https://www.startupindia.gov.in/content/sih/en/government-schemes.html', ['startup', 'agri-tech', 'technology'], { priority: 1 }),
@@ -356,15 +359,62 @@ function inferCategory(input: IndustryOpportunityInput): IndustryOpportunityCate
   }
 
   const haystack = `${input.title ?? ''} ${input.summary ?? ''}`.toLowerCase();
+  if (inferIntelligenceType(input) === 'funding_news') return 'funding_news';
   if (haystack.includes('demo day')) return 'demo_day';
   if (haystack.includes('grant')) return 'grant';
   if (haystack.includes('scheme') || haystack.includes('subsidy')) return 'grant';
-  if (haystack.includes('seed') || haystack.includes('funding') || haystack.includes('raises') || haystack.includes('raised') || haystack.includes('investment')) return 'seed_funding';
   if (haystack.includes('accelerator') || haystack.includes('incubator')) return 'accelerator';
   if (haystack.includes('pitch') || haystack.includes('startup showcase')) return 'pitch_event';
   if (haystack.includes('investor') || haystack.includes('vc') || haystack.includes('venture capital')) return 'investor_call';
   if (haystack.includes('program') || haystack.includes('challenge')) return 'ecosystem_program';
+  if (haystack.includes('seed') || haystack.includes('funding') || haystack.includes('raises') || haystack.includes('raised') || haystack.includes('investment')) return 'seed_funding';
   return 'seed_funding';
+}
+
+function inferIntelligenceType(input: IndustryOpportunityInput): IndustryIntelligenceType {
+  const explicit = String(input.intelligence_type ?? '').trim().toLowerCase();
+  if (ALLOWED_INTELLIGENCE_TYPES.includes(explicit as IndustryIntelligenceType)) {
+    return explicit as IndustryIntelligenceType;
+  }
+
+  const haystack = `${input.title ?? ''} ${input.summary ?? ''} ${input.source_url ?? ''}`.toLowerCase();
+  const opportunitySignals = [
+    'apply',
+    'applications open',
+    'deadline',
+    'grant',
+    'scheme',
+    'subsidy',
+    'accelerator',
+    'incubator',
+    'cohort',
+    'pitch',
+    'demo day',
+    'challenge',
+    'call for startups',
+    'request for proposal',
+    'rfp',
+    'fellowship',
+  ];
+  if (opportunitySignals.some((signal) => haystack.includes(signal))) return 'opportunity';
+
+  const newsSignals = [
+    'raises',
+    'raised',
+    'funding round',
+    'fundraise',
+    'market cap',
+    'ipo',
+    'listing',
+    'stake sale',
+    'esop',
+    'valuation',
+    'acquires',
+    'acquired',
+  ];
+  if (newsSignals.some((signal) => haystack.includes(signal))) return 'funding_news';
+
+  return input.category === 'funding_news' ? 'funding_news' : 'opportunity';
 }
 
 function normalizeTags(input: string[] | string | null | undefined): string[] {
@@ -395,6 +445,10 @@ function relevanceFor(input: IndustryOpportunityInput): number {
   return Math.min(100, score);
 }
 
+function fundingUseFor(type: IndustryIntelligenceType, category: IndustryOpportunityCategory): boolean {
+  return type === 'opportunity' && ['seed_funding', 'grant', 'accelerator', 'investor_call'].includes(category);
+}
+
 function isRelevantIndustryItem(input: IndustryOpportunityInput): boolean {
   const itemText = `${input.title ?? ''} ${input.summary ?? ''}`.toLowerCase();
   const haystack = `${itemText} ${input.sector ?? ''} ${input.geography ?? ''}`.toLowerCase();
@@ -412,6 +466,7 @@ export function parseIndustryRssItems(xml: string, source: Pick<IndustryIntellig
     const sourceUrl = rssLink(item);
     const publishedAt = parseOptionalDate(xmlTag(item, ['pubDate', 'published', 'updated', 'dc:date']));
     const category = inferCategory({ title, summary });
+    const intelligenceType = inferIntelligenceType({ title, summary, source_url: sourceUrl || null, category });
     const parsed: ParsedIndustryItem = {
       title: title.slice(0, 300),
       summary: summary || null,
@@ -424,10 +479,11 @@ export function parseIndustryRssItems(xml: string, source: Pick<IndustryIntellig
       organizer_or_investor: source.name,
       relevance_score: relevanceFor({ title, summary, sector: source.sector_focus?.[0] ?? null }),
       tags: [source.code, category, ...(source.sector_focus ?? [])].slice(0, 8),
-      useful_for_funding: ['seed_funding', 'grant', 'accelerator', 'investor_call'].includes(category),
+      intelligence_type: intelligenceType,
+      useful_for_funding: fundingUseFor(intelligenceType, category),
       useful_for_partnerships: ['accelerator', 'ecosystem_program', 'pitch_event', 'demo_day'].includes(category),
       useful_for_content: true,
-      raw_payload: { parser: 'rss', guid: xmlTag(item, ['guid', 'id']) || null },
+      raw_payload: { parser: 'rss', guid: xmlTag(item, ['guid', 'id']) || null, intelligence_type: intelligenceType },
       confidence: sourceUrl ? 0.8 : 0.55,
     };
     if (isRelevantIndustryItem(parsed)) items.push(parsed);
@@ -444,6 +500,7 @@ export function parseIndustryHtmlItems(html: string, baseUrl: string, source: Pi
     if (!text || text.length < 12) continue;
     const sourceUrl = normalizeAbsoluteUrl(href, baseUrl);
     const category = inferCategory({ title: text, summary: text });
+    const intelligenceType = inferIntelligenceType({ title: text, summary: text, source_url: sourceUrl, category });
     const parsed: ParsedIndustryItem = {
       title: text,
       summary: text,
@@ -456,10 +513,11 @@ export function parseIndustryHtmlItems(html: string, baseUrl: string, source: Pi
       organizer_or_investor: source.name,
       relevance_score: relevanceFor({ title: text, summary: text, sector: source.sector_focus?.[0] ?? null }),
       tags: [source.code, category, ...(source.sector_focus ?? [])].slice(0, 8),
-      useful_for_funding: ['seed_funding', 'grant', 'accelerator', 'investor_call'].includes(category),
+      intelligence_type: intelligenceType,
+      useful_for_funding: fundingUseFor(intelligenceType, category),
       useful_for_partnerships: ['accelerator', 'ecosystem_program', 'pitch_event', 'demo_day'].includes(category),
       useful_for_content: true,
-      raw_payload: { parser: 'html_anchor' },
+      raw_payload: { parser: 'html_anchor', intelligence_type: intelligenceType },
       confidence: sourceUrl ? 0.55 : 0.35,
     };
     if (isRelevantIndustryItem(parsed)) {
@@ -543,6 +601,7 @@ async function fetchSourceItems(source: IndustryIntelligenceSource): Promise<Sou
         source_name: source.name,
         source_url: normalizeText(row.source_url ?? row.url ?? row.link),
         category: normalizeText(row.category),
+        intelligence_type: normalizeText(row.intelligence_type ?? row.type ?? row.kind),
         sector: normalizeText(row.sector) ?? source.sector_focus?.[0] ?? null,
         geography: normalizeText(row.geography ?? row.region) ?? source.region ?? 'India',
         funding_stage: normalizeText(row.funding_stage ?? row.stage),
@@ -800,6 +859,7 @@ async function upsertOpportunity(params: {
   if (existing.data?.id) return 'deduped';
 
   const category = inferCategory(params.item);
+  const intelligenceType = inferIntelligenceType({ ...params.item, category });
   const relevanceScore = normalizeScore(params.item.relevance_score) ?? relevanceFor({ ...params.item, category });
 
   const { error } = await supabase.from('industry_intelligence_opportunities').insert({
@@ -818,14 +878,15 @@ async function upsertOpportunity(params: {
     opportunity_date: normalizeText(params.item.opportunity_date) ?? nowIso(),
     organizer_or_investor: normalizeText(params.item.organizer_or_investor),
     relevance_score: relevanceScore,
+    intelligence_type: intelligenceType,
     status: 'new',
     tags: normalizeTags(params.item.tags),
-    useful_for_funding: params.item.useful_for_funding ?? true,
+    useful_for_funding: params.item.useful_for_funding ?? fundingUseFor(intelligenceType, category),
     useful_for_clients: params.item.useful_for_clients ?? false,
     useful_for_partnerships: params.item.useful_for_partnerships ?? false,
     useful_for_content: params.item.useful_for_content ?? false,
     dedupe_hash: dedupeHash,
-    raw_payload: params.item.raw_payload ?? params.item,
+    raw_payload: { ...(params.item.raw_payload ?? params.item), intelligence_type: intelligenceType },
     fetched_run_id: params.runId,
     created_by: params.userId ?? null,
     operator_id: params.operatorId ?? null,
@@ -1020,8 +1081,10 @@ export async function listIndustryFetchRuns(limit: number = 20): Promise<Industr
 }
 
 export async function getIndustrySummary() {
-  const [total, newRows, shortlisted, applied, recentRuns, sources] = await Promise.all([
+  const [total, opportunities, fundingNews, newRows, shortlisted, applied, recentRuns, sources] = await Promise.all([
     supabase.from('industry_intelligence_opportunities').select('id', { count: 'exact', head: true }),
+    supabase.from('industry_intelligence_opportunities').select('id', { count: 'exact', head: true }).or('intelligence_type.eq.opportunity,intelligence_type.is.null'),
+    supabase.from('industry_intelligence_opportunities').select('id', { count: 'exact', head: true }).eq('intelligence_type', 'funding_news'),
     supabase.from('industry_intelligence_opportunities').select('id', { count: 'exact', head: true }).eq('status', 'new'),
     supabase.from('industry_intelligence_opportunities').select('id', { count: 'exact', head: true }).eq('status', 'shortlisted'),
     supabase.from('industry_intelligence_opportunities').select('id', { count: 'exact', head: true }).eq('status', 'applied'),
@@ -1029,10 +1092,12 @@ export async function getIndustrySummary() {
     supabase.from('industry_intelligence_sources').select('id,code,name,health_status,last_checked_at,last_success_at,last_error').eq('status', 'active'),
   ]);
 
-  const schemaError = [total.error, newRows.error, shortlisted.error, applied.error, recentRuns.error, sources.error].find(isSchemaMissingError);
+  const schemaError = [total.error, opportunities.error, fundingNews.error, newRows.error, shortlisted.error, applied.error, recentRuns.error, sources.error].find(isSchemaMissingError);
   if (schemaError) {
     return {
       total: 0,
+      opportunity_count: 0,
+      funding_news_count: 0,
       new_count: 0,
       shortlisted_count: 0,
       applied_count: 0,
@@ -1040,7 +1105,7 @@ export async function getIndustrySummary() {
       source_health: [],
     };
   }
-  const nonSchemaError = [total.error, newRows.error, shortlisted.error, applied.error, recentRuns.error, sources.error].find(Boolean);
+  const nonSchemaError = [total.error, opportunities.error, fundingNews.error, newRows.error, shortlisted.error, applied.error, recentRuns.error, sources.error].find(Boolean);
   if (nonSchemaError) throw nonSchemaError;
 
   const sourceRows = sources.data ?? [];
@@ -1048,6 +1113,8 @@ export async function getIndustrySummary() {
 
   return {
     total: Number(total.count ?? 0),
+    opportunity_count: Number(opportunities.count ?? 0),
+    funding_news_count: Number(fundingNews.count ?? 0),
     new_count: Number(newRows.count ?? 0),
     shortlisted_count: Number(shortlisted.count ?? 0),
     applied_count: Number(applied.count ?? 0),
@@ -1072,6 +1139,12 @@ export async function listIndustryOpportunities(filters: IndustryOpportunityFilt
 
   if (filters.source_code) query = query.eq('source_code', String(filters.source_code));
   if (filters.category) query = query.eq('category', String(filters.category));
+  if (filters.intelligence_type) {
+    const type = String(filters.intelligence_type);
+    query = type === 'opportunity'
+      ? query.or('intelligence_type.eq.opportunity,intelligence_type.is.null')
+      : query.eq('intelligence_type', type);
+  }
   if (filters.sector) query = query.ilike('sector', `%${String(filters.sector)}%`);
   if (filters.funding_stage) query = query.ilike('funding_stage', `%${String(filters.funding_stage)}%`);
   if (filters.status) query = query.eq('status', String(filters.status));
@@ -1109,7 +1182,17 @@ export async function updateIndustryOpportunity(
 
   if (readError) throw readError;
 
-  const nextCategory = String(payload.category ?? existing.category) as IndustryOpportunityCategory;
+  const nextIntelligenceType = String(payload.intelligence_type ?? existing.intelligence_type ?? 'opportunity') as IndustryIntelligenceType;
+  if (!ALLOWED_INTELLIGENCE_TYPES.includes(nextIntelligenceType)) {
+    throw new Error(`Invalid intelligence_type. Allowed: ${ALLOWED_INTELLIGENCE_TYPES.join(', ')}`);
+  }
+
+  const requestedCategory = String(payload.category ?? existing.category) as IndustryOpportunityCategory;
+  const nextCategory = (nextIntelligenceType === 'funding_news'
+    ? 'funding_news'
+    : requestedCategory === 'funding_news'
+      ? 'seed_funding'
+      : requestedCategory) as IndustryOpportunityCategory;
   if (!ALLOWED_CATEGORIES.includes(nextCategory)) {
     throw new Error(`Invalid category. Allowed: ${ALLOWED_CATEGORIES.join(', ')}`);
   }
@@ -1126,6 +1209,7 @@ export async function updateIndustryOpportunity(
     funding_stage: payload.funding_stage ?? existing.funding_stage,
     status: nextStatus,
     relevance_score: normalizeScore(payload.relevance_score) ?? existing.relevance_score,
+    intelligence_type: nextIntelligenceType,
     owner: payload.owner ?? existing.owner,
     notes: payload.notes ?? existing.notes,
     tags: payload.tags === undefined ? existing.tags : normalizeTags(payload.tags),
@@ -1149,6 +1233,7 @@ export async function updateIndustryOpportunity(
 
 function exportRowsTransform(rows: any[]) {
   return rows.map((row) => ({
+    intelligence_type: row.intelligence_type ?? 'opportunity',
     title: row.title,
     source_code: row.source_code,
     source_name: row.source_name,

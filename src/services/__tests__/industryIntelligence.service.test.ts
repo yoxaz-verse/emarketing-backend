@@ -66,7 +66,7 @@ test('industry opportunity dedupe falls back to title source date and category',
   assert.notEqual(first, third);
 });
 
-test('industry RSS parser extracts relevant funding items', () => {
+test('industry RSS parser separates funding news from opportunities', () => {
   const items = parseIndustryRssItems(`
     <rss><channel>
       <item>
@@ -76,6 +76,12 @@ test('industry RSS parser extracts relevant funding items', () => {
         <pubDate>Mon, 13 Jul 2026 10:00:00 GMT</pubDate>
       </item>
       <item>
+        <title><![CDATA[Applications open for agri-tech seed accelerator]]></title>
+        <link>https://inc42.com/startups/agritech-accelerator</link>
+        <description><![CDATA[Indian agri startups can apply before the deadline for investor access.]]></description>
+        <pubDate>Tue, 14 Jul 2026 10:00:00 GMT</pubDate>
+      </item>
+      <item>
         <title>Generic entertainment update</title>
         <link>https://example.com/entertainment</link>
         <description>Unrelated item</description>
@@ -83,10 +89,15 @@ test('industry RSS parser extracts relevant funding items', () => {
     </channel></rss>
   `, source);
 
-  assert.equal(items.length, 1);
-  assert.equal(items[0].category, 'seed_funding');
+  assert.equal(items.length, 2);
+  assert.equal(items[0].category, 'funding_news');
+  assert.equal(items[0].intelligence_type, 'funding_news');
+  assert.equal(items[0].useful_for_funding, false);
   assert.equal(items[0].source_url, 'https://inc42.com/funding/agritech-seed');
   assert.equal(items[0].geography, 'India');
+  assert.equal(items[1].category, 'accelerator');
+  assert.equal(items[1].intelligence_type, 'opportunity');
+  assert.equal(items[1].useful_for_funding, true);
 });
 
 test('industry HTML parser extracts relevant opportunity links', () => {

@@ -135,6 +135,23 @@ async function getGlobalOAuthAppRow(platform: string): Promise<OAuthAppRow | nul
   return (data as OAuthAppRow | null) ?? null;
 }
 
+function getEnvOAuthAppConfig(platform: string): OAuthAppConfig | null {
+  if (platform !== 'linkedin') return null;
+
+  const clientId = String(process.env.LINKEDIN_CLIENT_ID ?? '').trim();
+  const clientSecret = String(process.env.LINKEDIN_CLIENT_SECRET ?? '').trim();
+  const redirectUri = String(process.env.LINKEDIN_REDIRECT_URI ?? '').trim();
+  if (!clientId || !clientSecret || !redirectUri) return null;
+
+  return {
+    clientId,
+    clientSecret,
+    redirectUri,
+    scopes: normalizeScopes(String(process.env.LINKEDIN_SCOPES ?? '').split(/[,\s]+/), platform),
+    metadata: {},
+  };
+}
+
 function toOAuthConfig(row: OAuthAppRow, platform: string): OAuthAppConfig {
   return {
     clientId: String(row.client_id || '').trim(),
@@ -152,6 +169,9 @@ async function resolveOAuthAppConfig(platform: string, operatorId?: string | nul
   const global = await getGlobalOAuthAppRow(platform);
   if (global) return toOAuthConfig(global, platform);
 
+  const envConfig = getEnvOAuthAppConfig(platform);
+  if (envConfig) return envConfig;
+
   throw new Error(`${platform} app credentials not configured (operator override or global default)`);
 }
 
@@ -159,7 +179,8 @@ export async function hasOAuthAppConfig(platform: string, operatorId?: string | 
   const op = await getOperatorOAuthAppRow(platform, operatorId);
   if (op) return true;
   const global = await getGlobalOAuthAppRow(platform);
-  return Boolean(global);
+  if (global) return true;
+  return Boolean(getEnvOAuthAppConfig(platform));
 }
 
 export async function getConnectionStatuses(userId?: string | null, operatorId?: string | null) {

@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import XLSX from 'xlsx';
 import { supabase } from '../supabase';
 import { safeFetch } from '../utils/safeFetch';
 
@@ -32,6 +33,27 @@ type EventListFilters = {
   days?: number | string | null;
   page?: number | string | null;
   page_size?: number | string | null;
+};
+
+type EventSourcePatchInput = Partial<EventSourceInput>;
+
+type EventSourceFetchDetails = {
+  ok: boolean;
+  source_id: string;
+  source_name: string;
+  source_url: string;
+  provider_type: EventProviderType;
+  parser_key: string | null;
+  http_status: number | null;
+  fetched_count: number;
+  error_code: string | null;
+  error_message: string | null;
+  suggested_action: string | null;
+};
+
+type RunEventIngestionOptions = {
+  sourceIds?: string[];
+  force?: boolean;
 };
 
 export type ParsedEventItem = {
@@ -109,6 +131,90 @@ function normalizeString(value: unknown): string {
 function normalizeNullable(value: unknown): string | null {
   const normalized = normalizeString(value);
   return normalized || null;
+}
+
+function todayKey(): string {
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  return `${yyyy}${mm}${dd}`;
+}
+
+function validatePublicUrl(raw: unknown, fieldName = 'source_url'): string {
+  const value = normalizeString(raw);
+  if (!value) throw new Error(`${fieldName} is required`);
+  try {
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Only HTTP and HTTPS URLs are allowed');
+    if (url.username || url.password) throw new Error('Credentials in source URLs are not allowed');
+    url.hash = '';
+    return url.toString();
+  } catch (err: any) {
+    throw new Error(`${fieldName} is invalid: ${err?.message ?? 'Invalid URL'}`);
+  }
+}
+
+function sourceStatusMessage(status: number): Pick<EventSourceFetchDetails, 'error_code' | 'error_message' | 'suggested_action'> {
+  if (status === 401) {
+    return {
+      error_code: 'source_fetch_401',
+      error_message: 'Source requires authentication before it can be fetched.',
+      suggested_action: 'Use a public RSS/API/calendar URL, or pause this source.',
+    };
+  }
+  if (status === 403) {
+    return {
+      error_code: 'source_fetch_403',
+      error_message: 'Source blocked access to this server.',
+      suggested_action: 'Try an RSS/API/calendar endpoint, increase the polling interval, or pause this source.',
+    };
+  }
+  if (status === 404) {
+    return {
+      error_code: 'source_fetch_404',
+      error_message: 'Source URL was not found.',
+      suggested_action: 'Check the URL, replace it with the current events page/feed, or disable this source.',
+    };
+  }
+  if (status === 429) {
+    return {
+      error_code: 'source_fetch_429',
+      error_message: 'Source rate-limited this server.',
+      suggested_action: 'Increase the polling interval and retry later.',
+    };
+  }
+  return {
+    error_code: `source_fetch_${status}`,
+    error_message: `Source returned HTTP ${status}.`,
+    suggested_action: 'Check the source URL or switch to RSS/API/calendar if available.',
+  };
+}
+
+function normalizeSourceError(value: unknown, status?: number | null): Pick<EventSourceFetchDetails, 'error_code' | 'error_message' | 'suggested_action'> {
+  if (status) return sourceStatusMessage(status);
+  const raw = normalizeString(value);
+  const match = raw.match(/^source_fetch_(\d{3})$/);
+  if (match) return sourceStatusMessage(Number(match[1]));
+  if (/timeout|aborted/i.test(raw)) {
+    return {
+      error_code: 'source_fetch_timeout',
+      error_message: 'Source fetch timed out.',
+      suggested_action: 'Retry later or increase the polling interval.',
+    };
+  }
+  if (/getaddrinfo|enotfound|dns/i.test(raw)) {
+    return {
+      error_code: 'source_dns_failed',
+      error_message: 'Source host could not be resolved.',
+      suggested_action: 'Check the domain name or replace this source URL.',
+    };
+  }
+  return {
+    error_code: raw ? 'source_fetch_failed' : null,
+    error_message: raw || null,
+    suggested_action: raw ? 'Check the source URL, network availability, or use a feed/API endpoint.' : null,
+  };
 }
 
 function normalizeScope(value: unknown): EventScope {
@@ -262,6 +368,11 @@ function htmlBlocksForParser(html: string, parserKey: string): string[] {
     itpo_aahar_events: ['event', 'fair', 'exhibition', 'aahar', 'row'],
     cepci_events: ['event', 'fair', 'news', 'row'],
     ipga_events: ['event', 'conference', 'row', 'post'],
+    cii_trade_fairs: ['event', 'fair', 'expo', 'exhibition', 'forthcoming', 'row'],
+    tradefairdates_agriculture_india: ['trade fair', 'agriculture', 'exhibition', 'appointment', 'row', 'date'],
+    aishala_events: ['event', 'conference', 'meetup', 'workshop', 'hackathon', 'card', 'row'],
+    agrotech_india_events: ['schedule', 'event', 'session', 'conference', 'programme', 'row'],
+    generic_trade_fair_events: ['event', 'trade fair', 'expo', 'exhibition', 'conference', 'row', 'card'],
   };
   const hints = classHints[normalizedKey] ?? ['event', 'trade', 'fair', 'card', 'row', 'post'];
   const blocks: string[] = [];
@@ -648,32 +759,74 @@ export async function listEventSources() {
   return data ?? [];
 }
 
+function buildEventSourcePayload(input: EventSourceInput | EventSourcePatchInput, userId?: string | null, partial = false) {
+  const payload: Record<string, unknown> = {};
+
+  if (!partial || input.source_name !== undefined) {
+    const sourceName = normalizeString(input.source_name);
+    if (!sourceName) throw new Error('source_name is required');
+    payload.source_name = sourceName;
+  }
+  if (!partial || input.provider_type !== undefined) {
+    payload.provider_type = normalizeProvider(input.provider_type);
+  }
+  if (!partial || input.source_url !== undefined) {
+    payload.source_url = validatePublicUrl(input.source_url);
+  }
+  if (!partial || input.geography_scope !== undefined) {
+    payload.geography_scope = normalizeScope(input.geography_scope);
+  }
+  if (!partial || input.country !== undefined) {
+    const scope = normalizeScope(input.geography_scope ?? payload.geography_scope);
+    payload.country = normalizeNullable(input.country) ?? (scope === 'international' ? null : 'India');
+  }
+  if (input.state !== undefined) payload.state = normalizeNullable(input.state);
+  if (input.district !== undefined) payload.district = normalizeNullable(input.district);
+  if (input.categories !== undefined) payload.categories = normalizeCategories(input.categories);
+  if (input.parser_key !== undefined) payload.parser_key = normalizeNullable(input.parser_key);
+  if (input.trust_score !== undefined || !partial) payload.trust_score = Math.max(0, Math.min(1, Number(input.trust_score ?? 0.7) || 0.7));
+  if (input.polling_interval_minutes !== undefined || !partial) {
+    payload.polling_interval_minutes = Math.max(15, Math.trunc(Number(input.polling_interval_minutes ?? 360) || 360));
+  }
+  if (input.active !== undefined || !partial) payload.active = input.active !== false;
+  if (!partial) payload.created_by = userId ?? null;
+  payload.updated_at = new Date().toISOString();
+
+  return payload;
+}
+
 export async function createEventSource(input: EventSourceInput, userId?: string | null) {
-  const sourceName = normalizeString(input.source_name);
-  if (!sourceName) throw new Error('source_name is required');
-  const providerType = normalizeProvider(input.provider_type);
-  const sourceUrl = normalizeString(input.source_url);
-  if (!sourceUrl) throw new Error('source_url is required');
-
-  const payload = {
-    source_name: sourceName,
-    provider_type: providerType,
-    source_url: sourceUrl,
-    geography_scope: normalizeScope(input.geography_scope),
-    country: normalizeNullable(input.country) ?? (normalizeScope(input.geography_scope) === 'international' ? null : 'India'),
-    state: normalizeNullable(input.state),
-    district: normalizeNullable(input.district),
-    categories: normalizeCategories(input.categories),
-    parser_key: normalizeNullable(input.parser_key),
-    trust_score: Math.max(0, Math.min(1, Number(input.trust_score ?? 0.7) || 0.7)),
-    polling_interval_minutes: Math.max(15, Math.trunc(Number(input.polling_interval_minutes ?? 360) || 360)),
-    active: input.active !== false,
-    created_by: userId ?? null,
-  };
-
   const { data, error } = await supabase
     .from('event_sources')
-    .insert(payload)
+    .insert(buildEventSourcePayload(input, userId))
+    .select('*')
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+export async function updateEventSource(id: string, input: EventSourcePatchInput, userId?: string | null) {
+  const sourceId = normalizeString(id);
+  if (!sourceId) throw new Error('id is required');
+  const payload = buildEventSourcePayload(input, userId, true);
+  payload.updated_by = userId ?? null;
+  const { data, error } = await supabase
+    .from('event_sources')
+    .update(payload)
+    .eq('id', sourceId)
+    .select('*')
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+export async function setEventSourceActive(id: string, active: boolean, userId?: string | null) {
+  const sourceId = normalizeString(id);
+  if (!sourceId) throw new Error('id is required');
+  const { data, error } = await supabase
+    .from('event_sources')
+    .update({ active, updated_by: userId ?? null, updated_at: new Date().toISOString() })
+    .eq('id', sourceId)
     .select('*')
     .single();
   if (error) throw error;
@@ -683,7 +836,7 @@ export async function createEventSource(input: EventSourceInput, userId?: string
 export async function listEvents(filters: EventListFilters) {
   await expirePastDiscoveredEvents();
   const safePage = Math.max(1, Math.trunc(Number(filters.page ?? 1) || 1));
-  const safePageSize = Math.max(1, Math.min(100, Math.trunc(Number(filters.page_size ?? 50) || 50)));
+  const safePageSize = Math.max(1, Math.min(5000, Math.trunc(Number(filters.page_size ?? 50) || 50)));
   const days = Math.max(1, Math.min(365, Math.trunc(Number(filters.days ?? 30) || 30)));
   const until = new Date(Date.now() + days * 86_400_000).toISOString();
 
@@ -723,23 +876,97 @@ export async function listEvents(filters: EventListFilters) {
   };
 }
 
-async function fetchSourceItems(source: any): Promise<ParsedEventItem[]> {
-  const response = await safeFetch(String(source.source_url), {}, { timeoutMs: 20000 });
+async function fetchSourceItems(source: any): Promise<{ items: ParsedEventItem[]; http_status: number | null }> {
+  const response = await safeFetch(String(source.source_url), {
+    headers: {
+      'User-Agent': 'OBAOL Events Intelligence/1.0',
+      Accept: 'application/rss+xml, application/xml, text/xml, text/calendar, text/html, application/json;q=0.9, */*;q=0.8',
+    },
+  }, { timeoutMs: 20000 });
   if (!response.ok) throw new Error(`source_fetch_${response.status}`);
   const text = await response.text();
-  if (source.provider_type === 'api') return parseApiEventItems(text);
-  if (source.provider_type === 'ics') return parseIcsEventItems(text);
-  if (source.provider_type === 'html') return parseHtmlEventItems(text, source);
-  return parseRssEventItems(text);
+  if (source.provider_type === 'api') return { items: parseApiEventItems(text), http_status: response.status };
+  if (source.provider_type === 'ics') return { items: parseIcsEventItems(text), http_status: response.status };
+  if (source.provider_type === 'html') return { items: parseHtmlEventItems(text, source), http_status: response.status };
+  return { items: parseRssEventItems(text), http_status: response.status };
 }
 
-export async function runEventIngestion(userId?: string | null) {
+function eventSourceFetchDetails(source: any, params: {
+  ok: boolean;
+  fetchedCount?: number;
+  httpStatus?: number | null;
+  error?: unknown;
+}): EventSourceFetchDetails {
+  const normalizedError = params.ok ? normalizeSourceError(null) : normalizeSourceError(params.error, params.httpStatus);
+  return {
+    ok: params.ok,
+    source_id: String(source.id),
+    source_name: String(source.source_name ?? ''),
+    source_url: String(source.source_url ?? ''),
+    provider_type: source.provider_type,
+    parser_key: source.parser_key ?? null,
+    http_status: params.httpStatus ?? null,
+    fetched_count: params.fetchedCount ?? 0,
+    error_code: normalizedError.error_code,
+    error_message: normalizedError.error_message,
+    suggested_action: normalizedError.suggested_action,
+  };
+}
+
+async function updateEventSourceHealth(source: any, details: EventSourceFetchDetails, options: { markIngested?: boolean } = {}) {
+  const now = new Date().toISOString();
+  await supabase
+    .from('event_sources')
+    .update({
+      last_checked_at: now,
+      last_success_at: details.ok ? now : source.last_success_at ?? null,
+      ...(options.markIngested ? { last_ingested_at: details.ok ? now : source.last_ingested_at ?? null } : {}),
+      last_error: details.error_message,
+      health_status: details.ok ? 'healthy' : 'error',
+      updated_at: now,
+    })
+    .eq('id', source.id);
+}
+
+export async function testEventSource(id: string) {
+  const sourceId = normalizeString(id);
+  if (!sourceId) throw new Error('id is required');
+  const { data: source, error } = await supabase
+    .from('event_sources')
+    .select('*')
+    .eq('id', sourceId)
+    .single();
+  if (error) throw error;
+
+  try {
+    const fetched = await fetchSourceItems(source);
+    const details = eventSourceFetchDetails(source, {
+      ok: true,
+      fetchedCount: fetched.items.length,
+      httpStatus: fetched.http_status,
+    });
+    await updateEventSourceHealth(source, details);
+    return details;
+  } catch (err: any) {
+    const details = eventSourceFetchDetails(source, {
+      ok: false,
+      error: err?.message ?? err,
+    });
+    await updateEventSourceHealth(source, details);
+    return details;
+  }
+}
+
+export async function runEventIngestion(userId?: string | null, options: RunEventIngestionOptions = {}) {
   await expirePastDiscoveredEvents();
-  const { data: sources, error } = await supabase
+  let sourcesQuery = supabase
     .from('event_sources')
     .select('*')
     .eq('active', true)
     .order('created_at', { ascending: true });
+  const sourceIds = Array.from(new Set((options.sourceIds ?? []).map(normalizeString).filter(Boolean)));
+  if (sourceIds.length > 0) sourcesQuery = sourcesQuery.in('id', sourceIds);
+  const { data: sources, error } = await sourcesQuery;
   if (error) throw error;
 
   const summary = {
@@ -748,7 +975,8 @@ export async function runEventIngestion(userId?: string | null) {
     inserted_count: 0,
     skipped_count: 0,
     error_count: 0,
-    errors: [] as Array<{ source_id: string; message: string }>,
+    errors: [] as Array<{ source_id: string; message: string; suggested_action?: string | null }>,
+    source_results: [] as EventSourceFetchDetails[],
   };
 
   for (const source of sources ?? []) {
@@ -760,7 +988,8 @@ export async function runEventIngestion(userId?: string | null) {
     summary.processed_sources += 1;
 
     try {
-      const items = await fetchSourceItems(source);
+      const fetched = await fetchSourceItems(source);
+      const items = fetched.items;
       for (const item of items) {
         processed += 1;
         summary.processed_count += 1;
@@ -788,19 +1017,25 @@ export async function runEventIngestion(userId?: string | null) {
         }
       }
 
-      await supabase
-        .from('event_sources')
-        .update({ last_ingested_at: new Date().toISOString(), last_error: runErrors[0]?.message ?? null, updated_at: new Date().toISOString() })
-        .eq('id', source.id);
+      const details = eventSourceFetchDetails(source, {
+        ok: runErrors.length === 0,
+        fetchedCount: processed,
+        httpStatus: fetched.http_status,
+        error: runErrors[0]?.message,
+      });
+      summary.source_results.push(details);
+      await updateEventSourceHealth(source, details, { markIngested: true });
     } catch (sourceError: any) {
       summary.error_count += 1;
-      const message = sourceError?.message ?? 'source_error';
-      summary.errors.push({ source_id: source.id, message });
+      const details = eventSourceFetchDetails(source, {
+        ok: false,
+        error: sourceError?.message ?? 'source_error',
+      });
+      const message = details.error_message ?? sourceError?.message ?? 'source_error';
+      summary.errors.push({ source_id: source.id, message, suggested_action: details.suggested_action });
+      summary.source_results.push(details);
       runErrors.push({ message });
-      await supabase
-        .from('event_sources')
-        .update({ last_error: message, updated_at: new Date().toISOString() })
-        .eq('id', source.id);
+      await updateEventSourceHealth(source, details, { markIngested: true });
     } finally {
       const status = runErrors.length === 0 ? 'success' : inserted > 0 ? 'partial' : 'failed';
       await supabase.from('event_ingestion_runs').insert({
@@ -811,6 +1046,7 @@ export async function runEventIngestion(userId?: string | null) {
         skipped_count: skipped,
         error_count: runErrors.length,
         errors: runErrors,
+        metadata: summary.source_results[summary.source_results.length - 1] ?? null,
         started_at: startedAt,
         finished_at: new Date().toISOString(),
         created_by: userId ?? null,
@@ -819,6 +1055,67 @@ export async function runEventIngestion(userId?: string | null) {
   }
 
   return summary;
+}
+
+export async function listEventIngestionRuns(limit: number = 20) {
+  const safeLimit = Math.max(1, Math.min(100, Math.trunc(Number(limit) || 20)));
+  const { data, error } = await supabase
+    .from('event_ingestion_runs')
+    .select('*, event_sources(source_name, provider_type)')
+    .order('created_at', { ascending: false })
+    .limit(safeLimit);
+  if (error) {
+    if (error.code === 'PGRST205' || error.code === '42P01') return [];
+    throw error;
+  }
+  return data ?? [];
+}
+
+function exportEventRows(rows: any[]) {
+  return rows.map((row) => ({
+    title: row.title,
+    starts_at: row.starts_at,
+    ends_at: row.ends_at,
+    timezone: row.timezone,
+    location: row.location,
+    scope: row.geography_scope,
+    country: row.country,
+    state: row.state,
+    district: row.district,
+    category: row.category,
+    status: row.status,
+    source_name: row.event_sources?.source_name ?? row.source_snapshot?.source_name ?? null,
+    provider_type: row.event_sources?.provider_type ?? row.source_snapshot?.provider_type ?? null,
+    source_url: row.source_url,
+    description: row.description,
+    planning_notes: row.planning_notes,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  }));
+}
+
+export async function exportEvents(filters: EventListFilters, format: 'csv' | 'xlsx') {
+  const list = await listEvents({ ...filters, page: 1, page_size: 5000 });
+  const rows = exportEventRows(list.rows);
+  const worksheet = XLSX.utils.json_to_sheet(rows);
+
+  if (format === 'csv') {
+    const csv = XLSX.utils.sheet_to_csv(worksheet);
+    return {
+      contentType: 'text/csv; charset=utf-8',
+      fileName: `events-intelligence-${todayKey()}.csv`,
+      buffer: Buffer.from(csv, 'utf-8'),
+    };
+  }
+
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Events Intelligence');
+  const xlsxBuffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+  return {
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    fileName: `events-intelligence-${todayKey()}.xlsx`,
+    buffer: Buffer.from(xlsxBuffer),
+  };
 }
 
 export async function updateEventStatus(id: string, input: { status?: string; planning_notes?: string | null }, userId?: string | null) {

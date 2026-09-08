@@ -36,10 +36,11 @@ function buildTlsOptions(servername?: string): ConnectionOptions | undefined {
   return { servername };
 }
 
-export function createSmtpTransport(smtp: SmtpRow, servername?: string) {
+export function createSmtpTransport(smtp: SmtpRow, servername?: string, timeouts: { connectionTimeout?: number; greetingTimeout?: number; socketTimeout?: number } = {}) {
   const encryption = normalizeEncryption(smtp.encryption, smtp.port);
 
   return nodemailer.createTransport({
+    ...timeouts,
     host: smtp.host,
     port: smtp.port,
     secure: encryption === 'ssl',

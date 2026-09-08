@@ -1,11 +1,14 @@
 export type IndustryOpportunityCategory =
   | 'seed_funding'
+  | 'funding_news'
   | 'grant'
   | 'accelerator'
   | 'pitch_event'
   | 'demo_day'
   | 'investor_call'
   | 'ecosystem_program';
+
+export type IndustryIntelligenceType = 'opportunity' | 'funding_news';
 
 export type IndustryOpportunityStatus =
   | 'new'
@@ -104,6 +107,7 @@ export type IndustryOpportunity = {
   opportunity_date: string | null;
   organizer_or_investor: string | null;
   relevance_score: number | null;
+  intelligence_type?: IndustryIntelligenceType;
   status: IndustryOpportunityStatus;
   owner: string | null;
   notes: string | null;
@@ -140,6 +144,7 @@ export type IndustryOpportunityInput = {
   useful_for_clients?: boolean | null;
   useful_for_partnerships?: boolean | null;
   useful_for_content?: boolean | null;
+  intelligence_type?: IndustryIntelligenceType | string | null;
   raw_payload?: Record<string, unknown>;
 };
 
@@ -157,6 +162,7 @@ export type IndustryOpportunityPatch = {
   useful_for_clients?: boolean | null;
   useful_for_partnerships?: boolean | null;
   useful_for_content?: boolean | null;
+  intelligence_type?: IndustryIntelligenceType | string | null;
 };
 
 export type IndustryOpportunityFilters = {
@@ -165,6 +171,7 @@ export type IndustryOpportunityFilters = {
   sector?: string | null;
   funding_stage?: string | null;
   status?: string | null;
+  intelligence_type?: IndustryIntelligenceType | string | null;
   from?: string | null;
   to?: string | null;
   q?: string | null;

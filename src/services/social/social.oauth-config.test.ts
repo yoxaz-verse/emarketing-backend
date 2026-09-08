@@ -152,6 +152,120 @@ test('LinkedIn redirect diagnostics supports legacy paths but recommends canonic
   assert.equal(canonical.redirect_uri_exact, true);
 });
 
+test('setup credential summary treats global LinkedIn app as one-click ready', async () => {
+  const { summarizePlatformCredential } = await import('./socialSetup.service.js');
+
+  const summary = summarizePlatformCredential({
+    platform: 'linkedin',
+    globalRow: {
+      platform_code: 'linkedin',
+      client_id: 'global-linkedin-client-id',
+      client_secret_encrypted: 'encrypted-global-secret',
+      redirect_uri: 'https://emarketing-backend.infra.obaol.com/social/oauth2-credential/callback',
+      scopes: ['w_member_social'],
+      metadata: {},
+      active: true,
+    },
+  });
+
+  assert.equal(summary.configured, true);
+  assert.equal(summary.source, 'global');
+  assert.equal(summary.oneClickAvailable, true);
+  assert.deepEqual(summary.missing, []);
+  assert.equal(summary.fields.client_secret, '***');
+});
+
+test('setup credential summary prefers operator override over global app', async () => {
+  const { summarizePlatformCredential } = await import('./socialSetup.service.js');
+
+  const summary = summarizePlatformCredential({
+    platform: 'linkedin',
+    operatorRow: {
+      platform_code: 'linkedin',
+      client_id: 'operator-linkedin-client-id',
+      client_secret_encrypted: 'encrypted-operator-secret',
+      redirect_uri: 'https://operator.example.com/social/oauth2-credential/callback',
+      scopes: ['w_member_social'],
+      metadata: {},
+      active: true,
+    },
+    globalRow: {
+      platform_code: 'linkedin',
+      client_id: 'global-linkedin-client-id',
+      client_secret_encrypted: 'encrypted-global-secret',
+      redirect_uri: 'https://global.example.com/social/oauth2-credential/callback',
+      scopes: ['w_member_social'],
+      metadata: {},
+      active: true,
+    },
+  });
+
+  assert.equal(summary.configured, true);
+  assert.equal(summary.source, 'operator');
+  assert.equal(summary.fields.client_id, 'operator-linkedin-client-id');
+});
+
+test('setup credential summary can use LinkedIn env fallback for one-click connect', async () => {
+  const previous = {
+    LINKEDIN_CLIENT_ID: process.env.LINKEDIN_CLIENT_ID,
+    LINKEDIN_CLIENT_SECRET: process.env.LINKEDIN_CLIENT_SECRET,
+    LINKEDIN_REDIRECT_URI: process.env.LINKEDIN_REDIRECT_URI,
+    LINKEDIN_SCOPES: process.env.LINKEDIN_SCOPES,
+  };
+  process.env.LINKEDIN_CLIENT_ID = 'env-linkedin-client-id';
+  process.env.LINKEDIN_CLIENT_SECRET = 'env-linkedin-client-secret';
+  process.env.LINKEDIN_REDIRECT_URI = 'https://env.example.com/social/oauth2-credential/callback';
+  process.env.LINKEDIN_SCOPES = 'w_member_social';
+
+  try {
+    const { summarizePlatformCredential } = await import('./socialSetup.service.js');
+    const summary = summarizePlatformCredential({ platform: 'linkedin' });
+
+    assert.equal(summary.configured, true);
+    assert.equal(summary.source, 'env');
+    assert.equal(summary.oneClickAvailable, true);
+    assert.equal(summary.fields.client_id, 'env-linkedin-client-id');
+    assert.equal(summary.fields.client_secret, '***');
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+});
+
+test('setup credential summary reports missing LinkedIn global app fields', async () => {
+  const previous = {
+    LINKEDIN_CLIENT_ID: process.env.LINKEDIN_CLIENT_ID,
+    LINKEDIN_CLIENT_SECRET: process.env.LINKEDIN_CLIENT_SECRET,
+    LINKEDIN_REDIRECT_URI: process.env.LINKEDIN_REDIRECT_URI,
+  };
+  delete process.env.LINKEDIN_CLIENT_ID;
+  delete process.env.LINKEDIN_CLIENT_SECRET;
+  delete process.env.LINKEDIN_REDIRECT_URI;
+
+  try {
+    const { summarizePlatformCredential } = await import('./socialSetup.service.js');
+    const summary = summarizePlatformCredential({ platform: 'linkedin' });
+
+    assert.equal(summary.configured, false);
+    assert.equal(summary.source, 'missing');
+    assert.equal(summary.oneClickAvailable, false);
+    assert.deepEqual(summary.missing, ['client_id', 'client_secret', 'redirect_uri']);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+});
+
 test('social OAuth schema migration is idempotent and creates required tables', () => {
   const sql = readFileSync('sql/20260618_fix_social_app_oauth_schema.sql', 'utf8');
 
