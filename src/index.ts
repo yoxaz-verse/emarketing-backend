@@ -1,6 +1,7 @@
 import communicationsRoutes from './routes/communications.routes';
 import { startCommunicationRunner } from './services/communications/projector';
 import express from 'express';
+import crypto from 'crypto';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import dns from 'dns/promises';
@@ -37,6 +38,8 @@ import communitiesRoutes from './routes/communities.routes';
 import inquiriesRoutes from './routes/inquiries.routes';
 import quotesRoutes from './routes/quotes.routes';
 import industryIntelligenceRoutes from './routes/industry-intelligence.routes';
+import developerKeysRoutes from './routes/developer-keys.routes';
+import publicV1Routes from './routes/public-v1.routes';
 import { startSequenceRunner } from './worker/sequenceRunner';
 import { startAgentMissionRunner } from './worker/agentMissionRunner';
 import { startSocialPublishRunner } from './worker/socialPublishRunner';
@@ -110,9 +113,16 @@ console.info('[EMAIL_VALIDATION_RUNTIME]', {
   workerHealth: getEmailValidationWorkerHealth(),
 });
 
+const allowedBrowserOrigins = [
+  'http://localhost:3000', 'http://localhost:3001',
+  'https://emarketing.obaol.com', 'https://www.emarketing.obaol.com',
+  ...(process.env.PUBLIC_API_CORS_ORIGINS ?? '').split(',').map((item) => item.trim()).filter(Boolean),
+];
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://localhost:3001', 'https://emarketing.obaol.com', 'https://www.emarketing.obaol.com'],
+  origin: allowedBrowserOrigins,
   credentials: true,
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'Idempotency-Key'],
+  exposedHeaders: ['X-Request-Id', 'RateLimit-Limit', 'RateLimit-Remaining', 'RateLimit-Reset', 'Retry-After'],
 }));
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
@@ -266,10 +276,20 @@ app.use(express.json({
     (req as express.Request & { rawBody?: Buffer }).rawBody = Buffer.from(buffer);
   },
 }));
+app.use(((error, req, res, next) => {
+  if (!req.path.startsWith('/v1')) return next(error);
+  const requestId = crypto.randomUUID();
+  const status = error?.type === 'entity.too.large' ? 413 : 400;
+  res.setHeader('X-Request-Id', requestId);
+  res.setHeader('Cache-Control', 'no-store');
+  return res.status(status).json({ error: { code: status === 413 ? 'PAYLOAD_TOO_LARGE' : 'INVALID_JSON', message: status === 413 ? 'Request body is too large.' : 'Malformed JSON body.' }, request_id: requestId });
+}) as express.ErrorRequestHandler);
 app.use('/validate', validationRoutes);
 app.use('/auth', authRoutes);
 app.use('/campaigns', campaignRoutes);
 app.use('/crud', crudRoutes);
+app.use('/developer-keys', developerKeysRoutes);
+app.use('/v1', publicV1Routes);
 app.use('/users', usersRoutes);
 app.use('/execution', executionRoutes);
 app.use('/operator', operatorRoutes);

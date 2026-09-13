@@ -295,6 +295,7 @@ export async function startPlatformConnect(platform: string, userId?: string | n
   if (OAUTH_PLATFORMS.has(normalized)) {
     const stateRaw = crypto.randomBytes(24).toString('hex');
     const stateHash = stateDigest(stateRaw);
+    const expiresAt = stateExpiryIso();
 
     const { error } = await supabase
       .from('social_oauth_states')
@@ -303,11 +304,19 @@ export async function startPlatformConnect(platform: string, userId?: string | n
         platform_code: normalized,
         user_id: userId,
         operator_id: operatorId,
-        expires_at: stateExpiryIso(),
+        expires_at: expiresAt,
         created_at: nowIso(),
       });
 
     if (error) throw error;
+
+    console.info('[SOCIAL_OAUTH_STATE_CREATED]', {
+      platform: normalized,
+      operatorId,
+      userId,
+      stateHashPrefix: stateHash.slice(0, 8),
+      expiresAt,
+    });
 
     if (normalized === 'linkedin') {
       return linkedInAuthorizeUrl(stateRaw, appConfig as LinkedInOAuthAppConfig);
@@ -431,6 +440,11 @@ export async function handlePlatformCallback(params: {
 
   const stateRow = await consumeOauthState(state, normalized);
   const context = oauthContextFromStateRow(stateRow, normalized);
+  console.info('[SOCIAL_OAUTH_CALLBACK_STATE_OK]', {
+    platform: normalized,
+    operatorId: context.operatorId,
+    userId: context.userId,
+  });
 
   try {
     const appConfig = await resolveOAuthAppConfig(normalized, context.operatorId);
@@ -453,6 +467,11 @@ export async function handlePlatformCallback(params: {
         expiresInSeconds: token.expires_in,
         scopes: normalizeLinkedInTokenScopes(token.scope, appConfig.scopes),
         metadata,
+      });
+      console.info('[SOCIAL_OAUTH_CALLBACK_CONNECTED]', {
+        platform: normalized,
+        operatorId: context.operatorId,
+        userId: context.userId,
       });
       return { connection, context };
     }
@@ -493,6 +512,11 @@ export async function handlePlatformCallback(params: {
           account_discovery_error: (publishingAccounts as any)?.discovery_error ?? null,
         },
       });
+      console.info('[SOCIAL_OAUTH_CALLBACK_CONNECTED]', {
+        platform: normalized,
+        operatorId: context.operatorId,
+        userId: context.userId,
+      });
       return { connection, context };
     }
 
@@ -512,6 +536,11 @@ export async function handlePlatformCallback(params: {
         profile,
         user_agent: userAgent,
       },
+    });
+    console.info('[SOCIAL_OAUTH_CALLBACK_CONNECTED]', {
+      platform: normalized,
+      operatorId: context.operatorId,
+      userId: context.userId,
     });
     return { connection, context };
   } catch (err) {

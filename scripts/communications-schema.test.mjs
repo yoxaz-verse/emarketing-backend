@@ -1,0 +1,67 @@
+// Run with: PGLITE_MODULE=/absolute/path/to/@electric-sql/pglite/dist/index.js node scripts/communications-schema.test.mjs
+import { readFile } from 'node:fs/promises';
+import assert from 'node:assert/strict';
+const { PGlite } = await import(process.env.PGLITE_MODULE || '@electric-sql/pglite');
+const db = new PGlite();
+try {
+  await db.exec(`
+    create role anon; create role authenticated; create role service_role bypassrls;
+    create table users(id text primary key,role text,active boolean,operator_id text,access_flags jsonb);
+    create table campaigns(id text primary key,operator_id text);
+    create table inboxes(id text primary key,operator_id text);
+    create table leads(id text primary key,operator_id text);
+    create table reply_ingest_events(id text primary key,message text,received_at timestamptz);
+    create table email_logs(id text primary key,body text,sent_at timestamptz);
+    create table system_events(id text primary key,message text,created_at timestamptz);
+    create table social_publish_jobs(id text primary key,operator_id text,status text);
+    create table voice_calls(id text primary key,outcome text);
+    create table agent_tasks(id text primary key,operator_id text);
+    insert into users values ('a','user',true,'op-a','{"marketing":true}'),('b','viewer',true,'op-b','{"marketing":true}'),('a2','viewer',true,'op-a','{"marketing":true}'),('denied','user',true,'op-a','{}'),('admin','admin',true,null,'{}'),('disabled','admin',false,null,'{}');
+    insert into campaigns values ('ca','op-a'),('cb','op-b');
+    insert into email_logs values ('historical-email','original',now()-interval '2 days');
+    insert into reply_ingest_events values ('historical-reply','reply',now()-interval '1 day');
+  `);
+  const migration = await readFile(new URL('../sql/20260906_unified_communications.sql', import.meta.url), 'utf8');
+  await db.exec(migration);
+  await db.exec(migration); // Safe to resume installation before the backfill completes.
+  assert.equal((await db.query('select count(*)::int n from communication_queue')).rows[0].n, 2);
+  const q = (await db.query('select * from communication_queue order by id')).rows;
+  assert.equal(q[0].source_table, 'email_logs');
+  assert.equal(q.every(x=>x.historical), true);
+  await db.exec(`begin; insert into social_publish_jobs values ('post','op-a','pending'); update social_publish_jobs set status='published' where id='post'; commit;`);
+  assert.equal((await db.query("select count(*)::int n from communication_queue where source_id='post'")).rows[0].n,2,'distinct changes in one transaction survive');
+  const insert = async (key,scope,historical=false) => (await db.query(`insert into communication_items(source_key,kind,source,module,scope_table,scope_id,title,preview,occurred_at,historical) values($1,'notification','campaign','marketing','campaigns',$2,$1,'update',now(),$3) returning id`,[key,scope,historical])).rows[0].id;
+  const a=await insert('a-item','ca'),b=await insert('b-item','cb'),old=await insert('history','ca',true);
+  const list = async (user,args='') => (await db.query(`select communication_list($1${args}) as data`,[user])).rows[0].data;
+  assert.equal((await list('a')).unread_count,1);
+  assert.equal((await list('a')).total,2);
+  assert.equal((await list('b')).total,1);
+  assert.equal((await list('denied')).total,0);
+  assert.equal((await list('disabled')).total,0);
+  assert.equal((await list('admin')).total,3);
+  assert.equal((await list('a',",p_id=>'"+b+"'::uuid")).total,0);
+  const snapshot=(await list('a')).as_of;
+  await db.query('select communication_mark_read($1,$2::uuid[],$3::timestamptz)',['a',[a,b],snapshot]);
+  assert.equal((await list('a')).unread_count,0);
+  assert.equal((await list('a2')).unread_count,1,'read state is personal');
+  assert.equal((await db.query('select count(*)::int n from communication_reads where item_id=$1',[b])).rows[0].n,0,'cannot mark inaccessible items');
+  await db.query('update communication_items set activity_at=clock_timestamp() where id=$1',[a]);
+  await db.query('select communication_mark_read($1,null,$2::timestamptz)',['a',snapshot]);
+  assert.equal((await list('a')).unread_count,1,'mark-all snapshot does not hide newer activity');
+  assert.equal((await list('a',",p_search=>'history'")).total,1);
+  assert.equal((await list('a',",p_source=>'social'")).total,0);
+  assert.equal((await list('a',",p_unread=>true")).total,1);
+  assert.equal((await list('a',",p_limit=>1,p_page=>2")).items.length,1);
+  await db.exec("update campaigns set operator_id='op-b' where id='ca'");
+  assert.equal((await list('a')).total,0,'ownership changes immediately revoke list and counts');
+  assert.equal((await list('b')).total,3);
+  assert.equal((await db.query("select communication_lease('one') ok")).rows[0].ok,true);
+  assert.equal((await db.query("select communication_lease('two') ok")).rows[0].ok,false);
+  await db.exec("select communication_lease('one',true)");
+  assert.equal((await db.query("select communication_lease('two') ok")).rows[0].ok,true);
+  await db.exec('set role authenticated');
+  await assert.rejects(db.query('select * from communication_items'),/permission denied/);
+  await assert.rejects(db.query("select communication_list('admin')"),/permission denied/);
+  await db.exec('reset role');
+  console.log('Communications PostgreSQL migration, queue, access, read state, filters, pagination and lease checks passed.');
+} finally { await db.close(); }

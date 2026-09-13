@@ -31,7 +31,18 @@ test('social OAuth redirect allows localhost fallback outside production', () =>
   const env = { NODE_ENV: 'development' } as NodeJS.ProcessEnv;
 
   assert.equal(isSocialOAuthRedirectConfigured(env), false);
-  assert.equal(socialOAuthRedirectBase(env), 'http://localhost:3000/dashboard/social-connectors');
+  assert.equal(socialOAuthRedirectBase(env), 'http://localhost:3001/dashboard/social-connectors');
+});
+
+test('social OAuth redirect uses dashboard URL and port fallbacks outside production', () => {
+  assert.equal(
+    socialOAuthRedirectBase({ NODE_ENV: 'development', DASHBOARD_URL: 'http://localhost:3007/' } as NodeJS.ProcessEnv),
+    'http://localhost:3007/dashboard/social-connectors'
+  );
+  assert.equal(
+    socialOAuthRedirectBase({ NODE_ENV: 'development', DASHBOARD_PORT: '3010' } as NodeJS.ProcessEnv),
+    'http://localhost:3010/dashboard/social-connectors'
+  );
 });
 
 test('social OAuth success and error URLs preserve existing query parameters', () => {
@@ -90,5 +101,12 @@ test('social OAuth classifier treats LinkedIn 403 access denied as provider perm
   assert.notEqual(
     classifySocialOAuthError('LinkedIn profile fetch failed (403): {"code":"ACCESS_DENIED","message":"Not enough permissions"}'),
     'backend_unavailable'
+  );
+});
+
+test('social OAuth classifier surfaces Supabase auth misconfiguration', () => {
+  assert.equal(
+    classifySocialOAuthError('Supabase rejected the backend API key or project configuration. Unregistered API key'),
+    'auth_service_misconfigured'
   );
 });

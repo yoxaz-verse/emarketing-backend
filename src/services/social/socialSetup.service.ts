@@ -1,4 +1,5 @@
 import { supabase } from '../../supabase';
+import { formatUnknownError, isConnectivityError, isSchemaDriftError, isSupabaseAuthConfigError } from '../../utils/errorFormat';
 import { encryptSocialSecret } from '../../utils/socialIntegrationEncryption';
 import { bootstrapSocialPublishingAutomation } from '../agents/agentMissions.service';
 import { getConnectionStatuses, startPlatformConnect } from './socialAuth.service';
@@ -6,6 +7,15 @@ import { listSocialConnectors } from './social.service';
 
 type SocialPlatform = 'linkedin' | 'meta' | 'reddit' | 'telegram' | 'whatsapp';
 type CredentialSource = 'operator' | 'global' | 'env' | 'missing';
+type SocialSetupPreflightCode =
+  | 'OK'
+  | 'OPERATOR_CONTEXT_REQUIRED'
+  | 'UNSUPPORTED_PLATFORM'
+  | 'AUTH_SERVICE_MISCONFIGURED'
+  | 'AUTH_SERVICE_UNAVAILABLE'
+  | 'SOCIAL_OAUTH_SCHEMA_MISSING'
+  | 'PROVIDER_CONFIG_MISSING'
+  | 'UNKNOWN';
 
 const SOCIAL_PLATFORMS: SocialPlatform[] = ['linkedin', 'meta', 'reddit', 'telegram', 'whatsapp'];
 const SECRET_PLACEHOLDER = '***';
@@ -136,6 +146,22 @@ async function getOperatorCredentialRow(platform: SocialPlatform, operatorId: st
     .maybeSingle();
 
   if (error && error.code !== 'PGRST116') throw error;
+  return data as any | null;
+}
+
+async function getGlobalCredentialRow(platform: SocialPlatform) {
+  const { data, error } = await supabase
+    .from('social_global_oauth_apps')
+    .select('*')
+    .eq('platform_code', platform)
+    .eq('active', true)
+    .maybeSingle();
+
+  if (error) {
+    if (error.code === 'PGRST116' || error.code === 'PGRST205' || error.code === '42P01') return null;
+    throw error;
+  }
+
   return data as any | null;
 }
 
@@ -270,6 +296,129 @@ export function summarizePlatformCredential(params: {
   };
 }
 
+function preflightFailure(params: {
+  code: Exclude<SocialSetupPreflightCode, 'OK'>;
+  message: string;
+  statusCode?: number;
+  details?: Record<string, unknown>;
+}) {
+  return {
+    ok: false as const,
+    code: params.code,
+    message: params.message,
+    statusCode: params.statusCode ?? 400,
+    details: params.details ?? {},
+  };
+}
+
+function setupErrorCode(error: unknown): Exclude<SocialSetupPreflightCode, 'OK'> {
+  if (isSchemaDriftError(error)) return 'SOCIAL_OAUTH_SCHEMA_MISSING';
+  if (isSupabaseAuthConfigError(error)) return 'AUTH_SERVICE_MISCONFIGURED';
+  if (isConnectivityError(error)) return 'AUTH_SERVICE_UNAVAILABLE';
+  return 'UNKNOWN';
+}
+
+async function assertOauthStateStoreAvailable() {
+  const { error } = await supabase
+    .from('social_oauth_states')
+    .select('id', { count: 'exact', head: true })
+    .limit(1);
+
+  if (error) throw error;
+}
+
+export async function preflightSocialSetupConnect(params: {
+  platform: unknown;
+  userId?: string | null;
+  operatorId?: string | null;
+}) {
+  let platform: SocialPlatform;
+  try {
+    platform = normalizePlatform(params.platform);
+  } catch {
+    return preflightFailure({
+      code: 'UNSUPPORTED_PLATFORM',
+      message: 'Unsupported social platform.',
+      statusCode: 400,
+    });
+  }
+
+  const userId = String(params.userId ?? '').trim();
+  const operatorId = String(params.operatorId ?? '').trim();
+  if (!userId || !operatorId) {
+    return preflightFailure({
+      code: 'OPERATOR_CONTEXT_REQUIRED',
+      message: 'Select an operator before connecting LinkedIn.',
+      statusCode: 400,
+      details: { has_user: Boolean(userId), has_operator: Boolean(operatorId) },
+    });
+  }
+
+  try {
+    await assertOauthStateStoreAvailable();
+
+    const [operatorCredential, globalCredential] = await Promise.all([
+      getOperatorCredentialRow(platform, operatorId),
+      getGlobalCredentialRow(platform),
+    ]);
+    const credentialSummary = summarizePlatformCredential({
+      platform,
+      operatorRow: operatorCredential,
+      globalRow: globalCredential,
+    });
+
+    if (!credentialSummary.configured) {
+      return preflightFailure({
+        code: 'PROVIDER_CONFIG_MISSING',
+        message: platform === 'linkedin'
+          ? 'LinkedIn one-click connect is not ready. Configure the global OBAOL LinkedIn app credentials first.'
+          : `${platform} credentials are required before connect.`,
+        statusCode: 400,
+        details: {
+          platform,
+          operator_id: operatorId,
+          missing_fields: credentialSummary.missing.length > 0 ? credentialSummary.missing : requiredFieldsByPlatform(platform),
+          credential_source: credentialSummary.source,
+        },
+      });
+    }
+
+    return {
+      ok: true as const,
+      code: 'OK' as const,
+      message: `${platform} is ready to connect.`,
+      platform_code: platform,
+      operator_id: operatorId,
+      credential_source: credentialSummary.source,
+      one_click_available: credentialSummary.oneClickAvailable,
+    };
+  } catch (error) {
+    const formatted = formatUnknownError(error);
+    const code = setupErrorCode(error);
+    const message = code === 'AUTH_SERVICE_MISCONFIGURED'
+      ? 'Supabase rejected the backend API key or project configuration. Fix the backend Supabase service role key, then restart the backend.'
+      : code === 'AUTH_SERVICE_UNAVAILABLE'
+        ? 'Supabase is unreachable right now. Check backend network/Supabase availability, then retry.'
+        : code === 'SOCIAL_OAUTH_SCHEMA_MISSING'
+          ? 'Social OAuth schema is not ready. Apply Backend/sql/20260618_fix_social_app_oauth_schema.sql and restart backend.'
+          : formatted.message || 'LinkedIn one-click preflight failed.';
+
+    return preflightFailure({
+      code,
+      message,
+      statusCode: code === 'AUTH_SERVICE_MISCONFIGURED' || code === 'AUTH_SERVICE_UNAVAILABLE' || code === 'SOCIAL_OAUTH_SCHEMA_MISSING' ? 503 : 500,
+      details: {
+        platform,
+        operator_id: operatorId,
+        error: {
+          code: formatted.code,
+          status: formatted.status,
+        },
+      },
+    });
+  }
+}
+
 export async function saveOperatorSocialCredentials(params: {
   platform: unknown;
   operatorId?: string | null;
@@ -354,10 +503,7 @@ export async function getSocialSetupStatus(userId?: string | null, operatorId?: 
       .select('*')
       .eq('operator_id', operatorId)
       .eq('active', true),
-    supabase
-      .from('social_global_oauth_apps')
-      .select('*')
-      .eq('active', true),
+    Promise.all(SOCIAL_PLATFORMS.map((platform) => getGlobalCredentialRow(platform))),
     supabase
       .from('agent_missions')
       .select('id,agent_id,role_key,task_type,active,operator_id,metadata')
@@ -369,7 +515,6 @@ export async function getSocialSetupStatus(userId?: string | null, operatorId?: 
   ]);
 
   if (operatorCredentialRows.error && operatorCredentialRows.error.code !== 'PGRST205' && operatorCredentialRows.error.code !== '42P01') throw operatorCredentialRows.error;
-  if (globalCredentialRows.error && globalCredentialRows.error.code !== 'PGRST205' && globalCredentialRows.error.code !== '42P01') throw globalCredentialRows.error;
   if (missions.error && missions.error.code !== 'PGRST116' && missions.error.code !== 'PGRST205' && missions.error.code !== '42P01') throw missions.error;
 
   const operatorCredentialByPlatform = new Map<string, any>();
@@ -377,8 +522,8 @@ export async function getSocialSetupStatus(userId?: string | null, operatorId?: 
     operatorCredentialByPlatform.set(String((row as any).platform_code ?? '').toLowerCase(), row);
   }
   const globalCredentialByPlatform = new Map<string, any>();
-  for (const row of globalCredentialRows.data ?? []) {
-    globalCredentialByPlatform.set(String((row as any).platform_code ?? '').toLowerCase(), row);
+  for (const row of globalCredentialRows) {
+    if (row) globalCredentialByPlatform.set(String((row as any).platform_code ?? '').toLowerCase(), row);
   }
   const connectionByPlatform = new Map<string, any>();
   for (const connection of connections as any[]) {
@@ -465,38 +610,28 @@ export async function startSocialSetupConnect(params: {
   const operatorId = String(params.operatorId ?? '').trim();
   if (!operatorId) throw new Error('operator_id is required');
 
-  const [operatorCredential, globalCredentialResult] = await Promise.all([
-    getOperatorCredentialRow(platform, operatorId),
-    supabase
-      .from('social_global_oauth_apps')
-      .select('*')
-      .eq('platform_code', platform)
-      .eq('active', true)
-      .maybeSingle(),
-  ]);
-  if (globalCredentialResult.error && globalCredentialResult.error.code !== 'PGRST116') throw globalCredentialResult.error;
-
-  const credentialSummary = summarizePlatformCredential({
-    platform,
-    operatorRow: operatorCredential,
-    globalRow: globalCredentialResult.data ?? null,
-  });
-  if (!credentialSummary.configured) {
+  const preflight = await preflightSocialSetupConnect(params);
+  if (!preflight.ok) {
     const err: any = new Error(
-      platform === 'linkedin'
-        ? 'LinkedIn is not ready for one-click connect. Configure the global OBAOL LinkedIn app credentials first.'
-        : `${platform} credentials are required before connect`
+      preflight.message
     );
-    err.statusCode = 400;
-    err.details = { missing_fields: credentialSummary.missing.length > 0 ? credentialSummary.missing : requiredFieldsByPlatform(platform) };
+    err.statusCode = preflight.statusCode;
+    err.code = preflight.code;
+    err.details = preflight.details;
     throw err;
   }
+
+  console.info('[SOCIAL_SETUP_START_PREFLIGHT_OK]', {
+    platform,
+    operatorId,
+    credentialSource: preflight.credential_source,
+  });
 
   const redirectUrl = await startPlatformConnect(platform, params.userId, operatorId);
   return {
     platform_code: platform,
     operator_id: operatorId,
-    credential_source: credentialSummary.source,
+    credential_source: preflight.credential_source,
     redirect_url: redirectUrl,
   };
 }

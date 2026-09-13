@@ -16,10 +16,12 @@ import {
 import {
   enableSocialAutomation,
   getSocialSetupStatus,
+  preflightSocialSetupConnect,
   saveMetaAccountSelection,
   saveOperatorSocialCredentials,
   startSocialSetupConnect,
 } from '../services/social/socialSetup.service';
+import { formatUnknownError, isConnectivityError, isSchemaDriftError, isSupabaseAuthConfigError } from '../utils/errorFormat';
 
 const router = Router();
 router.use(requireAuth('viewer'));
@@ -57,8 +59,27 @@ router.get('/setup/status', async (req, res) => {
     const data = await getSocialSetupStatus(req.auth?.user_id, operatorId);
     res.json(data);
   } catch (err: any) {
-    console.error('[SOCIAL SETUP STATUS ERROR]', err?.message ?? err);
-    res.status(500).json({ error: err?.message ?? 'Failed to read social setup status' });
+    const formatted = formatUnknownError(err);
+    const code = isSupabaseAuthConfigError(err)
+      ? 'AUTH_SERVICE_MISCONFIGURED'
+      : isConnectivityError(err)
+        ? 'AUTH_SERVICE_UNAVAILABLE'
+        : isSchemaDriftError(err)
+          ? 'SOCIAL_OAUTH_SCHEMA_MISSING'
+          : 'UNKNOWN';
+    const message = code === 'AUTH_SERVICE_MISCONFIGURED'
+      ? 'Supabase rejected the backend API key or project configuration. Fix the backend Supabase service role key, then restart the backend.'
+      : code === 'AUTH_SERVICE_UNAVAILABLE'
+        ? 'Supabase is unreachable right now. Check backend network/Supabase availability, then retry.'
+        : code === 'SOCIAL_OAUTH_SCHEMA_MISSING'
+          ? 'Social OAuth schema is not ready. Apply Backend/sql/20260618_fix_social_app_oauth_schema.sql and restart backend.'
+          : formatted.message || 'Failed to read social setup status';
+    console.error('[SOCIAL SETUP STATUS ERROR]', { code, error: formatted });
+    res.status(code === 'UNKNOWN' ? 500 : 503).json({
+      error: message,
+      code,
+      details: { error: { code: formatted.code, status: formatted.status } },
+    });
   }
 });
 
@@ -81,6 +102,34 @@ router.post('/setup/credentials', async (req, res) => {
   }
 });
 
+router.post('/setup/preflight', async (req, res) => {
+  try {
+    const operatorId = resolveOperatorId(req);
+    const data = await preflightSocialSetupConnect({
+      platform: req.body?.platform,
+      userId: req.auth?.user_id,
+      operatorId,
+    });
+    if (!data.ok) {
+      console.warn('[SOCIAL_SETUP_PREFLIGHT_BLOCKED]', {
+        platform: req.body?.platform ?? null,
+        operatorId,
+        code: data.code,
+      });
+    }
+    const statusCode = data.ok ? 200 : data.statusCode;
+    res.status(statusCode).json(data);
+  } catch (err: any) {
+    console.error('[SOCIAL SETUP PREFLIGHT ERROR]', err?.message ?? err);
+    res.status(500).json({
+      ok: false,
+      code: err?.code ?? 'UNKNOWN',
+      error: err?.message ?? 'Failed to run social setup preflight',
+      details: err?.details,
+    });
+  }
+});
+
 router.post('/setup/start', async (req, res) => {
   try {
     const operatorId = resolveOperatorId(req);
@@ -94,6 +143,7 @@ router.post('/setup/start', async (req, res) => {
     console.error('[SOCIAL SETUP START ERROR]', err?.message ?? err);
     const statusCode = Number(err?.statusCode ?? 400);
     res.status(statusCode >= 400 && statusCode < 600 ? statusCode : 400).json({
+      code: err?.code,
       error: err?.message ?? 'Failed to start social setup',
       details: err?.details,
     });

@@ -1,5 +1,15 @@
 # emailmarketing-backend
 
+## Public Integration API (v1)
+
+Apply `sql/20260913_public_api_v1.sql` to Supabase **before** deploying the backend and dashboard changes. The migration adds scoped key metadata and idempotency storage; existing keys remain usable only on legacy routes. The old generic `/crud/api_keys` route returns 410 after this release.
+
+Set `PUBLIC_API_BASE_URL` to the externally reachable backend origin so `/v1/openapi.json` advertises the correct server. Optionally set `PUBLIC_API_CORS_ORIGINS` to a comma-separated list of additional browser origins, and `PUBLIC_API_RATE_LIMIT_PER_MINUTE` (default 120). Existing dashboard origins are already allowed. Redis is recommended for a rate limit shared across backend replicas; without it the fallback is process-local.
+
+The public guide lives at `/developers/api` on the dashboard, and signed-in users manage scoped keys at `/dashboard/developers/api-keys`. New keys use `X-API-Key: obaol_live_…` with `/v1`; their secret is displayed only on creation or rotation. Verify a connection with `GET /v1/auth/check`. Do not put a key in a public browser bundle or URL. For n8n or similar tools, store it in a credential or secret variable.
+
+The v1 catalog is at `GET /v1/openapi.json`. Sequence access is limited to sequences already used by the target operator's campaigns; create the first campaign/sequence association through the dashboard. Idempotency records intentionally retain a pending state after a process crash to avoid unsafe automatic replay; investigate a persistent `IDEMPOTENCY_IN_PROGRESS` response before retrying with a different key. Periodically purge old completed `api_idempotency` rows according to your retention policy.
+
 ## Local Runbook (Campaign Inbox Assignment)
 
 1. Start backend on port `3004`:

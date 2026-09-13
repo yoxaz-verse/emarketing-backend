@@ -1,8 +1,10 @@
 const PRODUCTION_SOCIAL_OAUTH_REDIRECT = 'https://emarketing.obaol.com/dashboard/social-connectors';
-const LOCAL_SOCIAL_OAUTH_REDIRECT = 'http://localhost:3000/dashboard/social-connectors';
+const DEFAULT_LOCAL_DASHBOARD_PORT = '3001';
 
 export type SocialOAuthErrorCode =
   | 'backend_unavailable'
+  | 'auth_service_misconfigured'
+  | 'auth_service_unavailable'
   | 'provider_permission_denied'
   | 'provider_config_error'
   | 'oauth_state_error'
@@ -16,6 +18,16 @@ function normalizeBaseUrl(value: string): string {
   return value.replace(/[?#].*$/, '').replace(/\/+$/, '');
 }
 
+function localSocialOAuthRedirect(env: NodeJS.ProcessEnv): string {
+  const dashboardUrl = String(env.DASHBOARD_URL ?? '').trim();
+  if (dashboardUrl) {
+    return `${normalizeBaseUrl(dashboardUrl)}/dashboard/social-connectors`;
+  }
+
+  const port = String(env.DASHBOARD_PORT ?? DEFAULT_LOCAL_DASHBOARD_PORT).trim() || DEFAULT_LOCAL_DASHBOARD_PORT;
+  return `http://localhost:${port}/dashboard/social-connectors`;
+}
+
 export function isSocialOAuthRedirectConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
   return Boolean(String(env.SOCIAL_OAUTH_SUCCESS_REDIRECT ?? '').trim());
 }
@@ -26,7 +38,7 @@ export function socialOAuthRedirectBase(env: NodeJS.ProcessEnv = process.env): s
 
   return env.NODE_ENV === 'production'
     ? PRODUCTION_SOCIAL_OAUTH_REDIRECT
-    : LOCAL_SOCIAL_OAUTH_REDIRECT;
+    : localSocialOAuthRedirect(env);
 }
 
 function appendRedirectParams(
@@ -64,6 +76,23 @@ export function classifySocialOAuthError(message: string): SocialOAuthErrorCode 
     lower.includes('503')
   ) {
     return 'backend_unavailable';
+  }
+
+  if (
+    lower.includes('unregistered api key') ||
+    lower.includes('invalid api key') ||
+    lower.includes('supabase rejected') ||
+    lower.includes('auth_service_misconfigured')
+  ) {
+    return 'auth_service_misconfigured';
+  }
+
+  if (
+    lower.includes('auth_service_unavailable') ||
+    lower.includes('supabase auth service') ||
+    lower.includes('supabase is unreachable')
+  ) {
+    return 'auth_service_unavailable';
   }
 
   if (

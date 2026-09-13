@@ -4,6 +4,7 @@ import { supabase } from '../supabase.js';
 import { verifyToken } from '../utils/jwt';
 import { Role, hasPermission } from '../auth/roles.js';
 import { normalizeModuleAccessFlags } from '../auth/moduleAccess';
+import { formatUnknownError, isConnectivityError, isSupabaseAuthConfigError } from '../utils/errorFormat';
 
 type JwtPayload = {
   user_id: string;
@@ -34,6 +35,30 @@ function extractCookieToken(cookieHeader?: string): string {
       })
   );
   return String(cookieMap.auth_token ?? '').trim();
+}
+
+function authServiceFailureResponse(error: unknown): { status: number; body: Record<string, unknown> } | null {
+  if (isSupabaseAuthConfigError(error)) {
+    return {
+      status: 503,
+      body: {
+        error: 'Authentication service is misconfigured. Verify Supabase URL and service role key.',
+        code: 'AUTH_SERVICE_MISCONFIGURED',
+      },
+    };
+  }
+
+  if (isConnectivityError(error)) {
+    return {
+      status: 503,
+      body: {
+        error: 'Authentication service unavailable',
+        code: 'AUTH_SERVICE_UNAVAILABLE',
+      },
+    };
+  }
+
+  return null;
 }
 
 export function requireAuth(
@@ -92,6 +117,19 @@ export function requireAuth(
           .eq('id', jwtUser.user_id)
           .maybeSingle();
       
+        if (error) {
+          const authFailure = authServiceFailureResponse(error);
+          if (authFailure) {
+            console.error('[AUTH_REJECT_SERVICE_ERROR]', {
+              tokenSource,
+              userId: jwtUser.user_id,
+              ...authMeta(req),
+              error: formatUnknownError(error),
+            });
+            return res.status(authFailure.status).json(authFailure.body);
+          }
+        }
+
         if (error || !dbUser) {
           console.warn('[AUTH_REJECT] JWT user is not provisioned', { tokenSource, userId: jwtUser.user_id, ...authMeta(req) });
           return res.status(401).json({ error: 'User is not provisioned' });
@@ -147,15 +185,32 @@ export function requireAuth(
 
         const { data: key, error } = await supabase
           .from('api_keys')
-          .select('id, user_id, operator_id, role, active')
+          .select('id, user_id, operator_id, role, active, scopes')
           .eq('key_hash', keyHash)
           .single();
+
+        if (error) {
+          const authFailure = authServiceFailureResponse(error);
+          if (authFailure) {
+            console.error('[AUTH_REJECT_API_KEY_SERVICE_ERROR]', {
+              ...authMeta(req),
+              error: formatUnknownError(error),
+            });
+            return res.status(authFailure.status).json(authFailure.body);
+          }
+        }
 
         if (error || !key || !key.active) {
           console.warn('[AUTH_REJECT] Invalid or inactive API key');
           return res.status(403).json({
             error: 'Invalid or inactive API key',
           });
+        }
+
+        // New scoped integration keys are accepted only by /v1. Legacy keys
+        // (scopes IS NULL) retain their old behavior during migration.
+        if (Array.isArray(key.scopes)) {
+          return res.status(403).json({ error: 'Scoped API keys can only access /v1' });
         }
 
         /* ======================================================
@@ -215,7 +270,15 @@ export function requireAuth(
         error: 'Authentication required',
       });
     } catch (err) {
-      console.error('[AUTH ERROR]', err);
+      const authFailure = authServiceFailureResponse(err);
+      if (authFailure) {
+        console.error('[AUTH SERVICE ERROR]', {
+          ...authMeta(req),
+          error: formatUnknownError(err),
+        });
+        return res.status(authFailure.status).json(authFailure.body);
+      }
+      console.error('[AUTH ERROR]', formatUnknownError(err));
       return res.status(401).json({
         error: 'Authentication failed',
       });

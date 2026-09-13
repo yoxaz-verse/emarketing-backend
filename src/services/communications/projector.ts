@@ -1,7 +1,8 @@
 import { randomUUID } from 'crypto';
-import { supabase as db } from '../../supabase';
+import { supabase as defaultDb } from '../../supabase';
 import { messageId, scopeForEvent } from './model';
 
+export function createCommunicationProjector(db: any = defaultDb) {
 async function result(query: any): Promise<any> { const {data,error}=await query; if(error) throw error; return data; }
 async function row(table: string, id: string) { return id ? result(db.from(table).select('*').eq('id',id).maybeSingle()) : null; }
 async function unique(table: string, column: string, value: string) {
@@ -16,36 +17,46 @@ async function projectEmail(q: any) {
   // Historical reply.message_id may be the parent's ID: never pretend it is the inbound ID.
   const parent=messageId(inbound ? r.in_reply_to || (!r.own_message_id ? r.message_id : null) : null);
   const recipient=String(inbound ? r.from_email || '' : r.to_email || '').toLowerCase();
+  const sourceKey=`${q.source_table}:${q.source_id}`;
+  // Replaying a completed append is a no-op; its feed update was in the same transaction.
+  if(await unique('communication_messages','source_key',sourceKey)) return;
   let conversation:any=null;
-  if(inbound && inbox && parent) {
-    const candidates=await result(db.from('communication_messages').select('conversation_id').eq('message_id',parent).limit(20));
-    for(const candidate of candidates || []) {
-      const c=await row('communication_conversations',candidate.conversation_id);
-      if(c?.inbox_id===String(inbox.id) && c.recipient===recipient) {
-        if(conversation && conversation.id!==c.id) {conversation=null; break;}
-        conversation=c;
+  if(inbound && inbox) {
+    const parents=[...new Set([parent,...(Array.isArray(r.reference_ids)?r.reference_ids:[]).slice().reverse(),r.message_id].map(messageId).filter(Boolean))];
+    for(const reference of parents) {
+      let candidates=await result(db.from('communication_messages').select('conversation_id').eq('message_id',reference).limit(101));
+      // Resolve originals even if an incoming reply reached the queue first.
+      if(!candidates.length) {
+        const originals=await result(db.from('email_logs').select('*').eq('provider_message_id',reference).eq('inbox_id',inbox.id).eq('to_email',recipient).limit(2));
+        if(originals.length===1) {
+          await projectEmail({source_table:'email_logs',source_id:String(originals[0].id),payload:originals[0],created_at:q.created_at,historical:true});
+          candidates=await result(db.from('communication_messages').select('conversation_id').eq('message_id',reference).limit(101));
+        }
       }
+      if(candidates.length>100) break; // Never infer uniqueness from a truncated result.
+      const matching=new Map<string,any>();
+      for(const candidate of candidates) {
+        const c=await row('communication_conversations',candidate.conversation_id);
+        if(c?.inbox_id===String(inbox.id) && c.recipient===recipient) matching.set(c.id,c);
+      }
+      if(matching.size>1) break; // Ambiguous parent: keep the reply independent.
+      if(matching.size===1) {conversation=[...matching.values()][0];break;}
     }
   }
-  // Group only by verified parent identity or exact original campaign log. No sender-only matching.
-  const sourceKey=`${q.source_table}:${q.source_id}`;
-  let item:any=conversation ? await row('communication_items',conversation.id) : await unique('communication_items','source_key',sourceKey);
+  const item=conversation ? await row('communication_items',conversation.id) : null;
   const occurred=r.received_at || r.sent_at || r.created_at || q.created_at;
   const campaign=conversation?.campaign_id || (!inbound ? r.campaign_id : null);
-  const subject=r.subject || conversation?.subject || 'Email conversation';
-  if(!item) item=await result(db.from('communication_items').upsert({source_key:sourceKey,kind:'message',source:'email',module:'marketing',
-    scope_table:campaign ? 'campaigns' : inbox ? 'inboxes' : null,scope_id:campaign ? String(campaign) : inbox ? String(inbox.id) : null,
-    title:subject,preview:String(inbound ? r.message || '' : r.body || '').slice(0,400),href:null,
-    occurred_at:occurred,activity_at:q.created_at,historical:q.historical},{onConflict:'source_key'}).select().single());
-  if(!conversation) conversation=await result(db.from('communication_conversations').upsert({id:item.id,inbox_id:inbox ? String(inbox.id) : null,
-    recipient:recipient || null,campaign_id:campaign ? String(campaign) : null,subject},{onConflict:'id'}).select().single());
-  await result(db.from('communication_messages').upsert({conversation_id:conversation.id,source_key:sourceKey,direction:inbound?'inbound':'outbound',
-    sender:inbound ? r.from_email : inbox?.email_address,recipient:inbound ? r.inbox_email : r.to_email,subject,
-    body:inbound ? r.message : r.body,message_id:own,in_reply_to:parent,reference_ids:(r.reference_ids || []).map(messageId).filter(Boolean),
-    occurred_at:occurred,status:inbound?'received':r.status || 'sent'},{onConflict:'source_key',ignoreDuplicates:true}));
-  // A historical record must never erase newer unread activity.
-  if(new Date(occurred)>=new Date(item.occurred_at)) await result(db.from('communication_items').update({occurred_at:occurred,
-    preview:String(inbound?r.message || '':r.body || '').slice(0,400),activity_at:q.created_at,historical: item.historical && q.historical}).eq('id',item.id));
+  const subject=String(r.subject || conversation?.subject || 'Email conversation');
+  await result(db.rpc('communication_append', {
+    p_item:item || {id:randomUUID(),source_key:sourceKey,
+      scope_table:campaign?'campaigns':inbox?'inboxes':null,
+      scope_id:campaign?String(campaign):inbox?String(inbox.id):null,title:subject},
+    p_conversation:conversation || {inbox_id:inbox?String(inbox.id):null,recipient:recipient||null,campaign_id:campaign?String(campaign):null,subject},
+    p_message:{source_key:sourceKey,direction:inbound?'inbound':'outbound',sender:inbound?r.from_email:inbox?.email_address,
+      recipient:inbound?r.inbox_email:r.to_email,subject,body:inbound?r.message:r.body,message_id:own,in_reply_to:parent,
+      reference_ids:(Array.isArray(r.reference_ids)?r.reference_ids:[]).map(messageId).filter(Boolean),occurred_at:occurred,status:inbound?'received':r.status||'sent'},
+    p_historical:q.historical
+  }));
 }
 async function project(q:any) {
   if(['reply_ingest_events','email_logs'].includes(q.source_table)) return projectEmail(q);
@@ -67,7 +78,7 @@ async function project(q:any) {
     occurred_at:r.updated_at || r.created_at || q.created_at,activity_at:q.created_at,historical:q.historical},{onConflict:'source_key'}));
 }
 let running=false;
-export async function reconcileCommunications() {
+async function reconcileCommunications() {
   if(running) return; running=true;
   const owner=randomUUID(); let leased=false;
   try {
@@ -83,13 +94,20 @@ export async function reconcileCommunications() {
     const {count,error}=await db.from('communication_queue').select('id',{count:'exact',head:true}).eq('historical',true);
     if(error) throw error;
     if(count===0) await result(db.from('communication_state').update({ready:true}).eq('id',true));
-    await result(db.from('communication_messages').update({status:'uncertain'}).eq('status','pending').lt('occurred_at',new Date(Date.now()-5*60_000).toISOString()));
+    const abandoned=await result(db.from('communication_messages').select('id').eq('status','pending').lt('occurred_at',new Date(Date.now()-5*60_000).toISOString()).limit(100));
+    for(const attempt of abandoned) await result(db.rpc('communication_finish_send',{p_id:attempt.id,p_status:'uncertain'}));
   } finally {
     try {if(leased) await result(db.rpc('communication_lease',{p_owner:owner,p_release:true}));}
     finally {running=false;}
   }
 }
-export function startCommunicationRunner() {
+function startCommunicationRunner() {
   const tick=()=>reconcileCommunications().catch((error:any)=>console.error('[COMMUNICATIONS_RECONCILE]',error.code || '',error.message));
   void tick(); const timer=setInterval(tick,5000); timer.unref();
 }
+
+return {project, reconcileCommunications, startCommunicationRunner};
+}
+const runner=createCommunicationProjector();
+export const reconcileCommunications=runner.reconcileCommunications;
+export const startCommunicationRunner=runner.startCommunicationRunner;

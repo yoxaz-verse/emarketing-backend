@@ -11,6 +11,12 @@ const router = Router();
 
 router.use(requireAuth('viewer'));
 router.use(requireWriteRole);
+router.use((req, res, next) => {
+  if (req.params.table === 'api_keys' || req.path === '/api_keys' || req.path.startsWith('/api_keys/')) {
+    return res.status(410).json({ error: 'Use /developer-keys for API key management.' });
+  }
+  next();
+});
 
 const ADMIN_ONLY_TABLES = new Set<string>([
   'users',
@@ -44,6 +50,11 @@ const TABLE_MODULE_ACCESS: Partial<Record<string, ModuleAccessKey>> = {
 };
 
 function validateTable(table: string) {
+  if (table === 'api_keys') {
+    const err = new Error('Use /developer-keys for API key management.') as Error & { statusCode?: number };
+    err.statusCode = 410;
+    throw err;
+  }
   if (!ALLOWED_TABLES.includes(table as any)) {
     throw new Error('Table not allowed');
   }

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { supabase } from '../../supabase.js';
 
 process.env.SUPABASE_URL = process.env.SUPABASE_URL || 'https://example.supabase.co';
 process.env.SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || 'test-service-role-key';
@@ -255,6 +256,84 @@ test('setup credential summary reports missing LinkedIn global app fields', asyn
     assert.equal(summary.source, 'missing');
     assert.equal(summary.oneClickAvailable, false);
     assert.deepEqual(summary.missing, ['client_id', 'client_secret', 'redirect_uri']);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+});
+
+test('LinkedIn one-click preflight reports Supabase auth misconfiguration', async (t) => {
+  const { preflightSocialSetupConnect } = await import('./socialSetup.service.js');
+
+  t.mock.method(supabase, 'from', (table: string) => {
+    if (table === 'social_oauth_states') {
+      return {
+        select: () => ({
+          limit: async () => ({
+            error: { message: 'Unregistered API key', status: 401 },
+          }),
+        }),
+      };
+    }
+    throw new Error(`Unexpected table: ${table}`);
+  });
+
+  const result = await preflightSocialSetupConnect({
+    platform: 'linkedin',
+    userId: 'user-123',
+    operatorId: 'operator-123',
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'AUTH_SERVICE_MISCONFIGURED');
+  assert.equal(result.statusCode, 503);
+});
+
+test('LinkedIn one-click preflight reports missing provider config', async (t) => {
+  const previous = {
+    LINKEDIN_CLIENT_ID: process.env.LINKEDIN_CLIENT_ID,
+    LINKEDIN_CLIENT_SECRET: process.env.LINKEDIN_CLIENT_SECRET,
+    LINKEDIN_REDIRECT_URI: process.env.LINKEDIN_REDIRECT_URI,
+  };
+  delete process.env.LINKEDIN_CLIENT_ID;
+  delete process.env.LINKEDIN_CLIENT_SECRET;
+  delete process.env.LINKEDIN_REDIRECT_URI;
+
+  const { preflightSocialSetupConnect } = await import('./socialSetup.service.js');
+
+  t.mock.method(supabase, 'from', (table: string) => {
+    if (table === 'social_oauth_states') {
+      return {
+        select: () => ({
+          limit: async () => ({ error: null }),
+        }),
+      };
+    }
+
+    const query: any = {
+      select: () => query,
+      eq: () => query,
+      maybeSingle: async () => ({ data: null, error: null }),
+    };
+    return query;
+  });
+
+  try {
+    const result = await preflightSocialSetupConnect({
+      platform: 'linkedin',
+      userId: 'user-123',
+      operatorId: 'operator-123',
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'PROVIDER_CONFIG_MISSING');
+    assert.equal(result.statusCode, 400);
+    assert.deepEqual(result.details.missing_fields, ['client_id', 'client_secret', 'redirect_uri']);
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) {

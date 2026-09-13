@@ -3,8 +3,10 @@ begin;
 create table if not exists communication_queue (
  id bigserial primary key, source_table text not null, source_id text not null,
  payload jsonb not null, historical boolean not null default false,
- created_at timestamptz not null default now(), unique(source_table, source_id, created_at)
+ created_at timestamptz not null default clock_timestamp()
 );
+alter table communication_queue drop constraint if exists communication_queue_source_table_source_id_created_at_key;
+alter table communication_queue alter column created_at set default clock_timestamp();
 create unique index if not exists communication_queue_dedupe on communication_queue(source_table,source_id,md5(payload::text));
 create table if not exists communication_items (
  id uuid primary key default gen_random_uuid(), source_key text not null unique,
@@ -35,6 +37,8 @@ create table if not exists communication_reads (
 create table if not exists communication_state (
  id boolean primary key default true check(id), ready boolean not null default false, lease_owner text, lease_until timestamptz
 );
+alter table communication_state add column if not exists lease_owner text;
+alter table communication_state add column if not exists lease_until timestamptz;
 insert into communication_state(id) values(true) on conflict do nothing;
 -- Capture the actual inbound ID independently of its parent (legacy message_id was overloaded).
 alter table reply_ingest_events add column if not exists own_message_id text;
@@ -67,10 +71,44 @@ do $$ declare t text; begin
    execute format('create trigger communication_capture after insert or update on %I for each row execute function communication_capture()',t);
    -- Queue survives restarts. Only seed on the first installation.
    if not (select ready from communication_state where id) then
-    execute format('insert into communication_queue(source_table,source_id,payload,historical) select %L,id::text,to_jsonb(s),true from %I s on conflict do nothing',t,t);
+    execute format('insert into communication_queue(source_table,source_id,payload,historical) select %L,id::text,to_jsonb(s),true from %I s order by coalesce(to_jsonb(s)->>''received_at'',to_jsonb(s)->>''sent_at'',to_jsonb(s)->>''created_at'',''''),id::text on conflict do nothing',t,t);
    end if;
   end if;
  end loop;
+end $$;
+
+-- Append and update the feed in one transaction so a worker restart cannot lose unread activity.
+create or replace function communication_touch(p_id uuid,p_preview text,p_occurred timestamptz,p_historical boolean default false) returns void
+language sql security definer set search_path=public as $$
+ update communication_items set
+ preview=case when p_occurred>=occurred_at then left(p_preview,400) else preview end,
+ occurred_at=greatest(occurred_at,p_occurred),
+ activity_at=case when p_historical then activity_at else clock_timestamp() end,
+ historical=historical and p_historical where id=p_id;
+$$;
+create or replace function communication_append(p_item jsonb,p_conversation jsonb,p_message jsonb,p_historical boolean) returns void
+language plpgsql security definer set search_path=public as $$
+declare item_id uuid; inserted_id uuid; begin
+ insert into communication_items(id,source_key,kind,source,module,scope_table,scope_id,title,preview,occurred_at,historical)
+ values((p_item->>'id')::uuid,p_item->>'source_key','message','email','marketing',p_item->>'scope_table',p_item->>'scope_id',p_item->>'title','',(p_message->>'occurred_at')::timestamptz,p_historical)
+ on conflict(source_key) do nothing;
+ select id into item_id from communication_items where source_key=p_item->>'source_key';
+ insert into communication_conversations(id,inbox_id,recipient,campaign_id,subject)
+ values(item_id,p_conversation->>'inbox_id',p_conversation->>'recipient',p_conversation->>'campaign_id',coalesce(p_conversation->>'subject','')) on conflict(id) do nothing;
+ insert into communication_messages(conversation_id,source_key,direction,sender,recipient,subject,body,message_id,in_reply_to,reference_ids,occurred_at,status)
+ values(item_id,p_message->>'source_key',p_message->>'direction',p_message->>'sender',p_message->>'recipient',p_message->>'subject',p_message->>'body',p_message->>'message_id',p_message->>'in_reply_to',
+ array(select jsonb_array_elements_text(coalesce(p_message->'reference_ids','[]'::jsonb))),(p_message->>'occurred_at')::timestamptz,p_message->>'status')
+ on conflict(source_key) do nothing returning id into inserted_id;
+ if inserted_id is not null then
+ perform communication_touch(item_id,coalesce(p_message->>'body',''),(p_message->>'occurred_at')::timestamptz,p_historical);
+ end if;
+end $$;
+create or replace function communication_finish_send(p_id uuid,p_status text) returns void
+language plpgsql security definer set search_path=public as $$
+declare m communication_messages; begin
+ if p_status not in ('sent','failed','uncertain') then raise exception 'Invalid send status'; end if;
+ update communication_messages set status=p_status where id=p_id and direction='outbound' returning * into m;
+ if found then perform communication_touch(m.conversation_id,coalesce(m.body,''),m.occurred_at,false); end if;
 end $$;
 
 -- Resolve current ownership, including reassignment/deletion, instead of trusting cached scopes.
@@ -114,7 +152,7 @@ do $$ declare t text; f record; begin
  execute format('revoke all on %I from anon,authenticated',t);
  execute format('grant all on %I to service_role',t);
  end loop;
- for f in select oid::regprocedure as signature from pg_proc where pronamespace='public'::regnamespace and proname in ('communication_allowed','communication_list','communication_mark_read','communication_capture','communication_lease') loop
+ for f in select oid::regprocedure as signature from pg_proc where pronamespace='public'::regnamespace and proname in ('communication_allowed','communication_list','communication_mark_read','communication_capture','communication_lease','communication_touch','communication_append','communication_finish_send') loop
  execute format('revoke all on function %s from public,anon,authenticated',f.signature);
  execute format('grant execute on function %s to service_role',f.signature);
  end loop;
