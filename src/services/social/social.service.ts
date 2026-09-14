@@ -18,8 +18,9 @@ import {
   validateSocialPostInput,
 } from './connectors';
 import { publishLinkedInTextLink } from './linkedin.client';
-import { publishMetaFacebookPagePost, publishMetaInstagramPost } from './platformAuth.client';
+import { publishMetaTarget } from './platformAuth.client';
 import { getConnectionStatuses, getOperatorPlatformConnection, hasOAuthAppConfig, markConnectionFailure } from './socialAuth.service';
+import { isMetaChannel, metaChannelPublishingConnection, metaChannelStatus } from './metaChannels';
 
 type SocialConnectionReadiness = {
   platform_code: string;
@@ -67,10 +68,35 @@ function platformLabel(platform: string): string {
   const normalized = String(platform || '').trim().toLowerCase();
   if (normalized === 'linkedin') return 'LinkedIn';
   if (normalized === 'meta') return 'Meta';
+  if (normalized === 'facebook') return 'Facebook';
+  if (normalized === 'instagram') return 'Instagram';
   if (normalized === 'reddit') return 'Reddit';
   if (normalized === 'telegram') return 'Telegram';
   if (normalized === 'whatsapp') return 'WhatsApp';
   return normalized || 'Platform';
+}
+
+export function instagramMediaError(input: SocialPostInput): string | null {
+  const media = Array.isArray(input.media) ? input.media.filter(Boolean) : [];
+  if (media.length === 0) return 'Instagram requires a public HTTPS image URL before scheduling.';
+  try {
+    const url = new URL(String(media[0]));
+    const host = url.hostname.toLowerCase();
+    if (url.protocol !== 'https:' || url.username || url.password || host === 'localhost' || host.endsWith('.localhost') || host === '[::1]'
+      || /^(127\.|10\.|192\.168\.|169\.254\.|0\.)/.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host)) {
+      return 'Instagram media must use a public HTTPS image URL.';
+    }
+    if (/\.(mp4|mov|webm|gif|webp|svg)$/i.test(url.pathname)) return 'Instagram publishing currently supports image URLs, not this media format.';
+  } catch {
+    return 'Instagram media must use a valid public HTTPS image URL.';
+  }
+  return null;
+}
+
+function assertInstagramMediaForTargets(targets: SocialPlatformCode[], input: SocialPostInput) {
+  if (!targets.includes('instagram')) return;
+  const issue = instagramMediaError(resolvePlatformPostInput('instagram', input));
+  if (issue) throw new Error(issue);
 }
 
 function asStringArray(value: unknown): string[] {
@@ -177,6 +203,9 @@ export function evaluateSocialTargetReadiness(params: {
       missing_fields: ['selected_page_id'],
     };
   }
+  if (isMetaChannel(platform) && !String(connection.metadata?.[platform === 'facebook' ? 'selected_facebook_page_id' : 'selected_instagram_channel_account_id'] ?? '').trim()) {
+    return { platform_code: platform, status: 'identity_required', reason: `Select a ${platformLabel(platform)} destination before scheduling.`, missing_fields: ['selected_destination'] };
+  }
 
   return null;
 }
@@ -217,7 +246,7 @@ function terminalJobStatus(status: unknown): boolean {
 
 function requiredFieldsByPlatform(platform: string): string[] {
   if (platform === 'linkedin') return ['client_id', 'client_secret', 'redirect_uri'];
-  if (platform === 'meta') return ['app_id', 'app_secret', 'redirect_uri'];
+  if (platform === 'meta' || isMetaChannel(platform)) return ['app_id', 'app_secret', 'redirect_uri'];
   if (platform === 'reddit') return ['client_id', 'client_secret', 'redirect_uri', 'user_agent'];
   if (platform === 'telegram') return ['bot_token', 'chat_id'];
   if (platform === 'whatsapp') return ['phone_number_id', 'business_account_id', 'access_token'];
@@ -238,7 +267,7 @@ function missingConfigFieldsForPlatform(platform: string, row: any | null): stri
     snapshot.client_id = clientId;
     snapshot.client_secret = hasSecret ? '***' : '';
     snapshot.redirect_uri = redirectUri;
-  } else if (platform === 'meta') {
+  } else if (platform === 'meta' || isMetaChannel(platform)) {
     snapshot.app_id = clientId;
     snapshot.app_secret = hasSecret ? '***' : '';
     snapshot.redirect_uri = redirectUri;
@@ -331,8 +360,8 @@ export async function listSocialConnectors(userId?: string | null, operatorId?: 
 
   return rows.map((row) => {
     const appRow = mergePlatformConfigRow(
-      operatorAppByPlatform.get(row.code) ?? null,
-      globalAppByPlatform.get(row.code) ?? null
+      operatorAppByPlatform.get(isMetaChannel(row.code) ? 'meta' : row.code) ?? null,
+      globalAppByPlatform.get(isMetaChannel(row.code) ? 'meta' : row.code) ?? null
     );
     const missingFields = missingConfigFieldsForPlatform(row.code, appRow);
     const appConfigured = missingFields.length === 0;
@@ -559,24 +588,19 @@ async function executeMetaApiFlow(job: any, connector: SocialConnectorCapability
   }
 
   try {
+    const channel = connector.code;
+    if (isMetaChannel(channel)) {
+      const readiness = metaChannelStatus(channel, conn);
+      if (readiness.status !== 'connected') throw new Error(readiness.reason ?? `${platformLabel(channel)} is not ready.`);
+    }
+    const publishingConn = isMetaChannel(channel) ? metaChannelPublishingConnection(channel, conn) : conn;
     timeline.push(makeEvent('PAYLOAD_BUILD', 'approval_pending', 'Meta and Instagram payload prepared'));
     const media = Array.isArray(input.media) ? input.media.filter(Boolean) : [];
-    const results = [];
-
-    if (media.length > 0 && String((conn as any).metadata?.selected_instagram_account_id ?? '').trim()) {
-      timeline.push(makeEvent('API_SUBMIT', 'approval_pending', 'Submitting Instagram media publish'));
-      results.push(await publishMetaInstagramPost(conn as any, {
-        content: input.content,
-        media,
-      }));
-    }
-
-    timeline.push(makeEvent('API_SUBMIT', 'approval_pending', 'Submitting Facebook Page publish'));
-    results.push(await publishMetaFacebookPagePost(conn as any, {
-      content: input.content,
-      media,
-      cta_url: input.cta_url,
-    }));
+    if (channel === 'instagram' && media.length === 0) throw new Error('Instagram publishing requires a public image URL.');
+    timeline.push(makeEvent('API_SUBMIT', 'approval_pending', `Submitting ${platformLabel(channel)} publish`));
+    const results = await publishMetaTarget(channel as 'meta' | 'facebook' | 'instagram', publishingConn as any, {
+      content: input.content, media, cta_url: input.cta_url,
+    });
 
     const primary = results[0];
     timeline.push(makeEvent('API_CONFIRMED', 'published', 'Meta API confirmed publish'));
@@ -594,7 +618,7 @@ async function executeMetaApiFlow(job: any, connector: SocialConnectorCapability
   } catch (err: unknown) {
     const norm = normalizeProviderError(err);
     timeline.push(makeEvent('PUBLISH', 'failed', norm.message, norm.code));
-    await markConnectionFailure('meta', userId, operatorId, norm.message);
+    if (connector.code === 'meta') await markConnectionFailure('meta', userId, operatorId, norm.message);
     return patchJob(job.id, {
       status: 'failed',
       phase: 'PUBLISH',
@@ -613,6 +637,10 @@ async function executeFlow(job: any, connector: SocialConnectorCapability, input
   const validationErrors = validateSocialPostInput(platformInput).filter((error) => {
     return !(isDueSchedule(platformInput) && error === 'scheduled_at must be in the future');
   });
+  if (connector.code === 'instagram') {
+    const mediaIssue = instagramMediaError(platformInput);
+    if (mediaIssue) validationErrors.push(mediaIssue);
+  }
 
   if (validationErrors.length > 0) {
     const message = validationErrors.join('; ');
@@ -634,7 +662,7 @@ async function executeFlow(job: any, connector: SocialConnectorCapability, input
     return executeLinkedInApiFlow(job, connector, platformInput, userId, operatorId);
   }
 
-  if (connector.code === 'meta') {
+  if (connector.code === 'meta' || isMetaChannel(connector.code)) {
     return executeMetaApiFlow(job, connector, platformInput, userId, operatorId);
   }
 
@@ -683,6 +711,7 @@ export async function optimizeSocialPublishInput(input: CreateSocialPublishReque
 export async function createSocialPublishJobs(input: CreateSocialPublishRequestInput, userId?: string | null, operatorId?: string | null) {
   const targets = Array.from(new Set((input.targets ?? []).map((t) => String(t).trim().toLowerCase()).filter(Boolean))) as SocialPlatformCode[];
   if (targets.length === 0) throw new Error('At least one target platform is required');
+  assertInstagramMediaForTargets(targets, input.post_input);
 
   const connectorMap = await assertSocialTargetsReady(targets, userId, operatorId);
   const request = await createOrGetRequest({ ...input, targets }, userId, operatorId);
@@ -762,6 +791,7 @@ export async function updateSocialPublishRequestJobs(params: {
   if (targets.length === 0) throw new Error('At least one target platform is required');
 
   const validationErrors = validateSocialPostInput(params.input.post_input);
+  assertInstagramMediaForTargets(targets, params.input.post_input);
   if (validationErrors.length > 0) throw new Error(validationErrors.join('; '));
 
   const role = String(params.role ?? '').toLowerCase();

@@ -6,6 +6,7 @@ import {
   disconnectPlatform,
   getConnectionStatuses,
   handlePlatformCallback,
+  recheckLinkedInIdentity,
   startPlatformConnect,
 } from '../services/social/socialAuth.service';
 import {
@@ -36,7 +37,7 @@ async function handleCallback(req: any, res: any, platformInput?: string) {
       state: String(req.query?.state ?? ''),
     });
 
-    res.redirect(socialOAuthSuccessUrl(platform, process.env, { operatorId: result.context.operatorId }));
+    res.redirect(socialOAuthSuccessUrl(result.context.requestedPlatform || platform, process.env, { operatorId: result.context.operatorId }));
   } catch (err: any) {
     const message = err?.message ?? 'connect_failed';
     const operatorId = String(err?.socialOAuthContext?.operatorId ?? '').trim();
@@ -93,6 +94,15 @@ router.post('/disconnect/:platform', async (req, res) => {
   } catch (err: any) {
     console.error('[SOCIAL DISCONNECT ERROR]', err?.message ?? err);
     res.status(400).json({ error: err?.message ?? 'Failed to disconnect social platform' });
+  }
+});
+
+router.post('/linkedin/recheck-identity', async (req, res) => {
+  try {
+    const result = await recheckLinkedInIdentity(req.auth?.user_id, resolveOperatorId(req));
+    res.json(result);
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? 'Failed to recheck LinkedIn identity' });
   }
 });
 

@@ -271,6 +271,18 @@ test('LinkedIn status reports identity required for connected token without acto
   assert.match(status.reason ?? '', /member identity was not resolved/i);
 });
 
+test('LinkedIn status replaces obsolete manual fallback advice from a saved connection', async () => {
+  const { checkLinkedInConnectionStatus } = await import('./linkedin.client.js');
+  const status = checkLinkedInConnectionStatus({
+    access_token_encrypted: 'encrypted-token', refresh_token_encrypted: null,
+    expires_at: null, scopes: ['w_member_social', 'r_profile_basicinfo'],
+    metadata: { actor_resolution_error: 'Enter the LinkedIn Member URN fallback, save, then reconnect LinkedIn.' },
+  });
+  assert.equal(status.status, 'identity_required');
+  assert.match(status.reason ?? '', /Recheck the saved authorization/);
+  assert.doesNotMatch(status.reason ?? '', /Enter the LinkedIn Member URN/);
+});
+
 test('LinkedIn status accepts comma-joined stored token scopes', async () => {
   const { checkLinkedInConnectionStatus } = await import('./linkedin.client.js');
   const status = checkLinkedInConnectionStatus({

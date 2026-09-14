@@ -4,6 +4,7 @@ import { supabase } from '../supabase';
 import { buildSelect } from '../utils/buildSelectQuery';
 import { resolveAfterRead } from './domain/readResolvers';
 import { runBeforeDelete } from './domain/runBeforeDelete';
+import { deleteCampaigns } from './campaignDelete.service';
 import { runBeforeWrite } from './domain/runBeforeWrite';
 import { transformForWrite, transformForRead } from './fieldTransform';
 type DbRow = Record<string, unknown>;
@@ -513,6 +514,10 @@ export async function deleteRow(
   id: string,
   auth?: CrudAuthContext
 ) {
+  if (table === 'campaigns') {
+    await deleteCampaigns([id], auth);
+    return;
+  }
   const operatorScoped = isOperatorScopedUser(auth);
   const isAdmin = isAdminRole(auth?.role);
   const operatorId = String(auth?.operator_id ?? '').trim();
@@ -521,11 +526,6 @@ export async function deleteRow(
   }
   if (operatorScoped && (table === 'sequences' || table === 'sequence_steps')) {
     throw createHttpError('Only admin can modify sequences', 403);
-  }
-  if (operatorScoped && table === 'campaigns') {
-    const { data: row, error } = await supabase.from('campaigns').select('id,operator_id').eq('id', id).maybeSingle();
-    if (error) throw error;
-    if (!row || String(row.operator_id ?? '') !== operatorId) throw createHttpError('Campaign not found', 404);
   }
   if (operatorScoped && table === 'leads') {
     const { data: row, error } = await supabase.from('leads').select('id,operator_id').eq('id', id).maybeSingle();
@@ -558,6 +558,11 @@ export async function deleteRowsBulk(
   ids: string[],
   auth?: CrudAuthContext
 ) {
+  if (table === 'campaigns') {
+    const uniqueIds = Array.from(new Set((ids ?? []).filter((id): id is string => typeof id === 'string' && id.trim().length > 0)));
+    const deletedCount = await deleteCampaigns(uniqueIds, auth);
+    return { deletedCount, requestedCount: uniqueIds.length, filteredCount: 0 };
+  }
   const operatorScoped = isOperatorScopedUser(auth);
   const isAdmin = isAdminRole(auth?.role);
   const operatorId = String(auth?.operator_id ?? '').trim();
@@ -579,10 +584,10 @@ export async function deleteRowsBulk(
     .in('id', uniqueIds);
 
   if (operatorScoped) {
-    if (!operatorId && (table === 'campaigns' || table === 'campaign_leads' || table === 'leads')) {
+    if (!operatorId && (table === 'campaign_leads' || table === 'leads')) {
       throw createHttpError('Operator access required', 403);
     }
-    if (table === 'campaigns' || table === 'leads') {
+    if (table === 'leads') {
       existingQuery = existingQuery.eq('operator_id', operatorId);
     }
     if (table === 'campaign_leads') {

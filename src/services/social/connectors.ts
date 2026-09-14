@@ -18,6 +18,8 @@ const DEFAULT_SOCIAL_TIMEZONE = 'Asia/Kolkata';
 const PLATFORM_LIMITS: Record<SocialPlatformCode, number> = {
   linkedin: 3000,
   meta: 2200,
+  facebook: 2200,
+  instagram: 2200,
   reddit: 40000,
   telegram: 4096,
   whatsapp: 1024,
@@ -94,7 +96,7 @@ function platformContent(platform: SocialPlatformCode, input: SocialPostInput): 
     const withCta = cta && !base.includes(cta) ? `${base}\n\nLearn more: ${cta}` : base;
     return appendTags(withCta, input.hashtags, PLATFORM_LIMITS.linkedin);
   }
-  if (platform === 'meta') {
+  if (platform === 'meta' || platform === 'facebook' || platform === 'instagram') {
     const withCta = cta && !base.includes(cta) ? `${base}\n\n${cta}` : base;
     return appendTags(withCta, input.hashtags, PLATFORM_LIMITS.meta);
   }
@@ -130,7 +132,10 @@ export function optimizeSocialPostInput(input: SocialPostInput, targets: SocialP
   for (const platform of targets) {
     const platformWarnings: string[] = [];
     if (platform === 'meta' && media.length === 0) {
-      platformWarnings.push('Instagram publishing requires at least one publicly reachable image or video URL; Facebook Page text publishing can continue without media.');
+      platformWarnings.push('Legacy Meta publishing needs a public image URL for Instagram; Facebook Page text publishing can continue without media.');
+    }
+    if (platform === 'instagram' && media.length === 0) {
+      validation_errors.push('Instagram requires a publicly reachable HTTPS image URL.');
     }
     if (platform === 'linkedin' && media.length > 0) {
       platformWarnings.push('LinkedIn v1 publisher currently posts text/link content; media URLs are retained for future media publishing but not uploaded.');

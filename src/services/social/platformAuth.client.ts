@@ -99,6 +99,18 @@ export async function fetchMetaPublishingAccounts(accessToken: string): Promise<
   return res.json();
 }
 
+export async function fetchMetaGrantedScopes(accessToken: string): Promise<string[]> {
+  const res = await fetch('https://graph.facebook.com/v22.0/me/permissions', {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) throw new Error(`Meta permission verification failed (${res.status})`);
+  const result = await res.json();
+  return (Array.isArray(result?.data) ? result.data : [])
+    .filter((item: any) => item?.status === 'granted')
+    .map((item: any) => String(item?.permission ?? '').trim())
+    .filter(Boolean);
+}
+
 function firstMetaPage(metadata: Record<string, any>): Record<string, any> | null {
   const pages = Array.isArray(metadata?.pages) ? metadata.pages : [];
   return pages.find((page) => String(page?.id ?? '').trim()) ?? null;
@@ -198,6 +210,23 @@ export async function publishMetaInstagramPost(
     external_post_id: id || creationId,
     external_post_url: `https://www.instagram.com/`,
   };
+}
+
+export async function publishMetaTarget(
+  target: 'meta' | 'facebook' | 'instagram',
+  conn: { access_token_encrypted: string; metadata?: Record<string, any> },
+  input: { content: string; media?: string[]; cta_url?: string },
+): Promise<{ external_post_id: string; external_post_url: string }[]> {
+  const media = Array.isArray(input.media) ? input.media.filter(Boolean) : [];
+  const results = [];
+  if (target !== 'facebook' && media.length > 0 && String(conn.metadata?.selected_instagram_account_id ?? '').trim()) {
+    results.push(await publishMetaInstagramPost(conn, { content: input.content, media }));
+  }
+  if (target !== 'instagram') {
+    results.push(await publishMetaFacebookPagePost(conn, input));
+  }
+  if (results.length === 0) throw new Error('Instagram requires a selected professional account and a public image URL.');
+  return results;
 }
 
 export function redditAuthorizeUrl(state: string, config: OAuthAppConfig): string {

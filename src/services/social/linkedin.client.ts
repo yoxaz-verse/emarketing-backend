@@ -56,9 +56,12 @@ export function checkLinkedInConnectionStatus(conn: LinkedInConnection | null): 
   }
 
   if (!String(conn.metadata?.actor_urn ?? '').trim()) {
+    const savedReason = String(conn.metadata?.actor_resolution_error ?? '').trim();
     return {
       status: 'identity_required',
-      reason: String(conn.metadata?.actor_resolution_error ?? '').trim() || 'LinkedIn token is saved, but member identity was not resolved. Check LinkedIn identity permissions and reconnect after correcting them.',
+      reason: /Enter the LinkedIn Member URN fallback/i.test(savedReason)
+        ? 'LinkedIn authorization was saved before detailed identity diagnostics were available. Recheck the saved authorization to identify the issue.'
+        : savedReason || 'LinkedIn token is saved, but member identity was not resolved. Recheck the saved authorization to identify the issue.',
     };
   }
 

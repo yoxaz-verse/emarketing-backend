@@ -1,4 +1,4 @@
-export type SocialPlatformCode = 'meta' | 'linkedin' | 'reddit' | 'telegram' | 'whatsapp';
+export type SocialPlatformCode = 'meta' | 'facebook' | 'instagram' | 'linkedin' | 'reddit' | 'telegram' | 'whatsapp';
 
 export type SocialConnectorStatus = 'manual_assisted' | 'api_enabled';
 export type SocialAuthType = 'none' | 'oauth2';

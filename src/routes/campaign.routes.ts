@@ -84,7 +84,7 @@ router.get('/:id/delete-preview', async (req, res) => {
   try {
     const campaignId = String(req.params.id ?? '').trim();
     await assertCampaignAccess(req, campaignId);
-    const preview = await getCampaignDeletePreview(campaignId);
+    const preview = await getCampaignDeletePreview(campaignId, req.auth);
     res.json(preview);
   } catch (error: any) {
     res.status(resolveStatusCode(error)).json({

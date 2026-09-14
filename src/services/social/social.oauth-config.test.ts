@@ -176,6 +176,22 @@ test('setup credential summary treats global LinkedIn app as one-click ready', a
   assert.equal(summary.fields.client_secret, '***');
 });
 
+test('Facebook and Instagram share configured Meta app credentials for one-click authorization', async () => {
+  const { summarizePlatformCredential } = await import('./socialSetup.service.js');
+  const globalRow = {
+    platform_code: 'meta', client_id: 'meta-app-id', client_secret_encrypted: 'encrypted-secret',
+    redirect_uri: 'https://example.com/social/callback/meta', scopes: ['pages_show_list', 'pages_manage_posts', 'instagram_basic', 'instagram_content_publish'],
+    metadata: {}, active: true,
+  };
+  for (const platform of ['facebook', 'instagram'] as const) {
+    const summary = summarizePlatformCredential({ platform, globalRow });
+    assert.equal(summary.configured, true);
+    assert.equal(summary.oneClickAvailable, true);
+    assert.equal(summary.source, 'global');
+    assert.equal(summary.fields.app_secret, '***');
+  }
+});
+
 test('setup credential summary prefers operator override over global app', async () => {
   const { summarizePlatformCredential } = await import('./socialSetup.service.js');
 

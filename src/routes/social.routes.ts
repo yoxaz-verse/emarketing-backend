@@ -154,6 +154,7 @@ router.post('/setup/account-selection', async (req, res) => {
   try {
     const operatorId = resolveOperatorId(req);
     const data = await saveMetaAccountSelection({
+      channel: req.body?.channel,
       userId: req.auth?.user_id,
       operatorId,
       pageId: req.body?.selected_page_id,

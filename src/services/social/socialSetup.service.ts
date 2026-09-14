@@ -5,7 +5,7 @@ import { bootstrapSocialPublishingAutomation } from '../agents/agentMissions.ser
 import { getConnectionStatuses, startPlatformConnect } from './socialAuth.service';
 import { listSocialConnectors } from './social.service';
 
-type SocialPlatform = 'linkedin' | 'meta' | 'reddit' | 'telegram' | 'whatsapp';
+type SocialPlatform = 'linkedin' | 'meta' | 'facebook' | 'instagram' | 'reddit' | 'telegram' | 'whatsapp';
 type CredentialSource = 'operator' | 'global' | 'env' | 'missing';
 type SocialSetupPreflightCode =
   | 'OK'
@@ -17,11 +17,13 @@ type SocialSetupPreflightCode =
   | 'PROVIDER_CONFIG_MISSING'
   | 'UNKNOWN';
 
-const SOCIAL_PLATFORMS: SocialPlatform[] = ['linkedin', 'meta', 'reddit', 'telegram', 'whatsapp'];
+const SOCIAL_PLATFORMS: SocialPlatform[] = ['linkedin', 'facebook', 'instagram', 'reddit', 'telegram', 'whatsapp'];
 const SECRET_PLACEHOLDER = '***';
 const DEFAULT_SCOPES: Record<SocialPlatform, string[]> = {
   linkedin: ['w_member_social'],
   meta: ['pages_show_list', 'pages_manage_posts', 'pages_read_engagement', 'business_management', 'instagram_basic', 'instagram_content_publish'],
+  facebook: ['pages_show_list', 'pages_manage_posts', 'pages_read_engagement', 'business_management', 'instagram_basic', 'instagram_content_publish'],
+  instagram: ['pages_show_list', 'pages_manage_posts', 'pages_read_engagement', 'business_management', 'instagram_basic', 'instagram_content_publish'],
   reddit: ['identity', 'submit'],
   telegram: [],
   whatsapp: [],
@@ -39,7 +41,7 @@ function normalizePlatform(input: unknown): SocialPlatform {
 
 function requiredFieldsByPlatform(platform: SocialPlatform): string[] {
   if (platform === 'linkedin') return ['client_id', 'client_secret', 'redirect_uri'];
-  if (platform === 'meta') return ['app_id', 'app_secret', 'redirect_uri'];
+  if (platform === 'meta' || platform === 'facebook' || platform === 'instagram') return ['app_id', 'app_secret', 'redirect_uri'];
   if (platform === 'reddit') return ['client_id', 'client_secret', 'redirect_uri', 'user_agent'];
   if (platform === 'telegram') return ['bot_token', 'chat_id'];
   return ['phone_number_id', 'business_account_id', 'access_token'];
@@ -71,7 +73,7 @@ function extractConfig(platform: SocialPlatform, input: Record<string, unknown>)
     };
   }
 
-  if (platform === 'meta') {
+  if (platform === 'meta' || platform === 'facebook' || platform === 'instagram') {
     return {
       client_id: trim(input.app_id),
       secret: trim(input.app_secret),
@@ -141,7 +143,7 @@ async function getOperatorCredentialRow(platform: SocialPlatform, operatorId: st
     .from('social_operator_oauth_apps')
     .select('*')
     .eq('operator_id', operatorId)
-    .eq('platform_code', platform)
+    .eq('platform_code', platform === 'facebook' || platform === 'instagram' ? 'meta' : platform)
     .eq('active', true)
     .maybeSingle();
 
@@ -153,7 +155,7 @@ async function getGlobalCredentialRow(platform: SocialPlatform) {
   const { data, error } = await supabase
     .from('social_global_oauth_apps')
     .select('*')
-    .eq('platform_code', platform)
+    .eq('platform_code', platform === 'facebook' || platform === 'instagram' ? 'meta' : platform)
     .eq('active', true)
     .maybeSingle();
 
@@ -187,7 +189,7 @@ function safeFields(platform: SocialPlatform, row: any | null): Record<string, s
       actor_urn: String(metadata.actor_urn ?? ''),
     };
   }
-  if (platform === 'meta') {
+  if (platform === 'meta' || platform === 'facebook' || platform === 'instagram') {
     return {
       app_id: String(row.client_id ?? ''),
       app_secret: secret,
@@ -220,13 +222,13 @@ function safeFields(platform: SocialPlatform, row: any | null): Record<string, s
 function credentialCheckMap(platform: SocialPlatform, row: any | null): Record<string, string> {
   const fields = safeFields(platform, row);
   if (platform === 'linkedin') return fields;
-  if (platform === 'meta') return fields;
+  if (platform === 'meta' || platform === 'facebook' || platform === 'instagram') return fields;
   if (platform === 'reddit') return fields;
   if (platform === 'telegram') return fields;
   return fields;
 }
 
-function metaAccountSelection(connection: any | null) {
+function metaAccountSelection(connection: any | null, channel?: 'facebook' | 'instagram') {
   const metadata = connection?.metadata && typeof connection.metadata === 'object' ? connection.metadata : {};
   const pages = Array.isArray(metadata.pages) ? metadata.pages : [];
   return {
@@ -235,10 +237,10 @@ function metaAccountSelection(connection: any | null) {
       name: String(page?.name ?? ''),
       instagram_business_account: page?.instagram_business_account ?? null,
     })).filter((page: any) => page.id),
-    selected_page_id: String(metadata.selected_page_id ?? ''),
+    selected_page_id: String(channel === 'facebook' ? metadata.selected_facebook_page_id ?? '' : channel === 'instagram' ? metadata.selected_instagram_page_id ?? '' : metadata.selected_page_id ?? ''),
     selected_page_name: String(metadata.selected_page_name ?? ''),
-    selected_instagram_account_id: String(metadata.selected_instagram_account_id ?? ''),
-    selected_instagram_username: String(metadata.selected_instagram_username ?? ''),
+    selected_instagram_account_id: String(channel === 'instagram' ? metadata.selected_instagram_channel_account_id ?? '' : metadata.selected_instagram_account_id ?? ''),
+    selected_instagram_username: String(channel === 'instagram' ? metadata.selected_instagram_channel_username ?? '' : metadata.selected_instagram_username ?? ''),
     discovery_error: metadata.account_discovery_error ?? null,
   };
 }
@@ -292,7 +294,7 @@ export function summarizePlatformCredential(params: {
     fields,
     missing: configured ? [] : missing,
     configured,
-    oneClickAvailable: params.platform === 'linkedin' && configured,
+    oneClickAvailable: (params.platform === 'linkedin' || params.platform === 'facebook' || params.platform === 'instagram') && configured,
   };
 }
 
@@ -348,7 +350,7 @@ export async function preflightSocialSetupConnect(params: {
   if (!userId || !operatorId) {
     return preflightFailure({
       code: 'OPERATOR_CONTEXT_REQUIRED',
-      message: 'Select an operator before connecting LinkedIn.',
+      message: 'Select an operator before connecting a social account.',
       statusCode: 400,
       details: { has_user: Boolean(userId), has_operator: Boolean(operatorId) },
     });
@@ -372,7 +374,7 @@ export async function preflightSocialSetupConnect(params: {
         code: 'PROVIDER_CONFIG_MISSING',
         message: platform === 'linkedin'
           ? 'LinkedIn one-click connect is not ready. Configure the global OBAOL LinkedIn app credentials first.'
-          : `${platform} credentials are required before connect.`,
+          : `${platform} app credentials are required before connect.`,
         statusCode: 400,
         details: {
           platform,
@@ -401,7 +403,7 @@ export async function preflightSocialSetupConnect(params: {
         ? 'Supabase is unreachable right now. Check backend network/Supabase availability, then retry.'
         : code === 'SOCIAL_OAUTH_SCHEMA_MISSING'
           ? 'Social OAuth schema is not ready. Apply Backend/sql/20260618_fix_social_app_oauth_schema.sql and restart backend.'
-          : formatted.message || 'LinkedIn one-click preflight failed.';
+          : formatted.message || 'Social account one-click preflight failed.';
 
     return preflightFailure({
       code,
@@ -424,7 +426,8 @@ export async function saveOperatorSocialCredentials(params: {
   operatorId?: string | null;
   input: Record<string, unknown>;
 }) {
-  const platform = normalizePlatform(params.platform);
+  const requestedPlatform = normalizePlatform(params.platform);
+  const platform = requestedPlatform === 'facebook' || requestedPlatform === 'instagram' ? 'meta' : requestedPlatform;
   const operatorId = String(params.operatorId ?? '').trim();
   if (!operatorId) throw new Error('operator_id is required');
 
@@ -535,10 +538,11 @@ export async function getSocialSetupStatus(userId?: string | null, operatorId?: 
   }
 
   const platforms = SOCIAL_PLATFORMS.map((platform) => {
+    const credentialKey = platform === 'facebook' || platform === 'instagram' ? 'meta' : platform;
     const credentialSummary = summarizePlatformCredential({
       platform,
-      operatorRow: operatorCredentialByPlatform.get(platform) ?? null,
-      globalRow: globalCredentialByPlatform.get(platform) ?? null,
+      operatorRow: operatorCredentialByPlatform.get(credentialKey) ?? null,
+      globalRow: globalCredentialByPlatform.get(credentialKey) ?? null,
     });
     const credential = credentialSummary.row;
     const connection = connectionByPlatform.get(platform) ?? null;
@@ -546,8 +550,8 @@ export async function getSocialSetupStatus(userId?: string | null, operatorId?: 
     const credentialConfigured = credentialSummary.configured;
     const connected = connection?.status === 'connected';
     const authorizationSaved = connection !== null;
-    const accountSelection = platform === 'meta' ? metaAccountSelection(connection) : null;
-    const needsAccountSelection = platform === 'meta' && connected && !String(accountSelection?.selected_page_id ?? '').trim();
+    const accountSelection = platform === 'facebook' || platform === 'instagram' ? metaAccountSelection(connection, platform) : null;
+    const needsAccountSelection = (platform === 'facebook' || platform === 'instagram') && authorizationSaved && !connected && connection?.status === 'identity_required';
 
     return {
       platform_code: platform,
@@ -567,10 +571,10 @@ export async function getSocialSetupStatus(userId?: string | null, operatorId?: 
       setup_ready: credentialConfigured && connected && !needsAccountSelection,
       next_action: !credentialConfigured
         ? 'configure_credentials'
-        : !connected
-          ? 'connect_account'
-          : needsAccountSelection
-            ? 'select_account'
+        : needsAccountSelection
+          ? 'select_account'
+          : !connected
+            ? 'connect_account'
             : 'ready',
     };
   });
@@ -639,6 +643,7 @@ export async function startSocialSetupConnect(params: {
 }
 
 export async function saveMetaAccountSelection(params: {
+  channel?: string | null;
   userId?: string | null;
   operatorId?: string | null;
   pageId?: string | null;
@@ -648,6 +653,8 @@ export async function saveMetaAccountSelection(params: {
   const operatorId = String(params.operatorId ?? '').trim();
   const pageId = String(params.pageId ?? '').trim();
   const instagramAccountId = String(params.instagramAccountId ?? '').trim();
+  const channel = String(params.channel ?? 'meta').toLowerCase();
+  if (!['meta', 'facebook', 'instagram'].includes(channel)) throw new Error('Unsupported Meta channel');
   if (!userId || !operatorId) throw new Error('User/operator context is required');
   if (!pageId) throw new Error('selected_page_id is required');
 
@@ -665,22 +672,30 @@ export async function saveMetaAccountSelection(params: {
   const pages = Array.isArray(metadata.pages) ? metadata.pages : [];
   const selectedPage = pages.find((page: any) => String(page?.id ?? '').trim() === pageId);
   if (!selectedPage) throw new Error('Selected Meta page was not discovered for this connection');
+  if (!selectedPage.access_token_encrypted) throw new Error('Selected Page has no publishing access token. Reconnect Meta with Page permissions.');
 
   const instagram = selectedPage.instagram_business_account;
   const selectedInstagram = instagramAccountId
     ? String(instagram?.id ?? '').trim() === instagramAccountId ? instagram : null
     : instagram ?? null;
   if (instagramAccountId && !selectedInstagram) throw new Error('Selected Instagram account is not linked to the selected Meta page');
+  if (channel === 'instagram' && !selectedInstagram) throw new Error('Select a Page linked to an Instagram professional account.');
 
-  const nextMetadata = {
-    ...metadata,
-    selected_page_id: pageId,
-    selected_page_name: selectedPage.name ?? null,
-    selected_instagram_account_id: selectedInstagram?.id ?? null,
-    selected_instagram_username: selectedInstagram?.username ?? selectedInstagram?.name ?? null,
-    selected_page_access_token_encrypted: selectedPage.access_token_encrypted ??
-      (String(metadata.selected_page_id ?? '').trim() === pageId ? metadata.selected_page_access_token_encrypted : null),
-  };
+  const nextMetadata: Record<string, any> = { ...metadata };
+  if (channel === 'meta') {
+    nextMetadata.selected_page_id = pageId;
+    nextMetadata.selected_page_name = selectedPage.name ?? null;
+    nextMetadata.selected_instagram_account_id = selectedInstagram?.id ?? null;
+    nextMetadata.selected_instagram_username = selectedInstagram?.username ?? selectedInstagram?.name ?? null;
+    nextMetadata.selected_page_access_token_encrypted = selectedPage.access_token_encrypted;
+  }
+  if (channel === 'facebook') {
+    nextMetadata.selected_facebook_page_id = pageId;
+  } else if (channel === 'instagram') {
+    nextMetadata.selected_instagram_page_id = pageId;
+    nextMetadata.selected_instagram_channel_account_id = selectedInstagram?.id ?? null;
+    nextMetadata.selected_instagram_channel_username = selectedInstagram?.username ?? selectedInstagram?.name ?? null;
+  }
 
   const update = await supabase
     .from('social_oauth_connections')
@@ -698,7 +713,7 @@ export async function saveMetaAccountSelection(params: {
   return {
     success: true,
     platform_code: 'meta',
-    account_selection: metaAccountSelection(update.data),
+    account_selection: metaAccountSelection(update.data, channel === 'facebook' || channel === 'instagram' ? channel : undefined),
   };
 }
 

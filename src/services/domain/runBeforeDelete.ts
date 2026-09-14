@@ -1,6 +1,5 @@
 import { AllowedTable } from '../../config/allowedTables';
 import { supabase } from '../../supabase';
-import { deleteCampaignDependents } from '../campaignDelete.service';
 import { handleUserBeforeDelete } from './userLifeCycle';
 import { handleVoiceAgentsBeforeDelete } from './voiceAgentLifeCycle';
 
@@ -19,9 +18,6 @@ export async function runBeforeDelete(
   }
   if (table === 'users') {
     await handleUserBeforeDelete(id);
-  }
-  if (table === 'campaigns') {
-    await deleteCampaignDependents(id);
   }
   if (table === 'sequences') {
     const { data: linkedCampaigns, error } = await supabase

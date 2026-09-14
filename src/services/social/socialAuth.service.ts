@@ -14,6 +14,7 @@ import {
   exchangeRedditCode,
   fetchMetaPublishingAccounts,
   fetchMetaIdentity,
+  fetchMetaGrantedScopes,
   fetchRedditIdentity,
   metaAuthorizeUrl,
   redditAuthorizeUrl,
@@ -22,6 +23,7 @@ import {
   type OAuthAppConfig,
 } from './platformAuth.client';
 import { socialOAuthSuccessUrl } from './oauthRedirect';
+import { isMetaChannel, metaChannelStatus } from './metaChannels';
 
 const STATE_TTL_MINUTES = 15;
 
@@ -62,6 +64,7 @@ type OAuthAppRow = {
 
 export type SocialOAuthCallbackContext = {
   platform: string;
+  requestedPlatform?: string;
   userId: string;
   operatorId: string;
 };
@@ -176,6 +179,7 @@ async function resolveOAuthAppConfig(platform: string, operatorId?: string | nul
 }
 
 export async function hasOAuthAppConfig(platform: string, operatorId?: string | null): Promise<boolean> {
+  if (isMetaChannel(platform)) platform = 'meta';
   const op = await getOperatorOAuthAppRow(platform, operatorId);
   if (op) return true;
   const global = await getGlobalOAuthAppRow(platform);
@@ -198,7 +202,7 @@ export async function getConnectionStatuses(userId?: string | null, operatorId?:
     throw error;
   }
 
-  return (data ?? []).map((row: ConnectionRow) => {
+  const statuses = (data ?? []).map((row: ConnectionRow) => {
     if (row.platform_code === 'linkedin') {
       const status = checkLinkedInConnectionStatus({
         access_token_encrypted: row.access_token_encrypted,
@@ -232,6 +236,15 @@ export async function getConnectionStatuses(userId?: string | null, operatorId?:
       metadata: row.metadata ?? {},
     };
   });
+  const meta = (data ?? []).find((row: ConnectionRow) => row.platform_code === 'meta') as ConnectionRow | undefined;
+  if (meta) {
+    for (const channel of ['facebook', 'instagram'] as const) {
+      const result = metaChannelStatus(channel, meta);
+      statuses.push({ platform_code: channel, status: result.status, reason: result.reason,
+        scopes: meta.scopes ?? [], expires_at: meta.expires_at, metadata: meta.metadata ?? {} });
+    }
+  }
+  return statuses;
 }
 
 async function upsertConnection(params: {
@@ -289,7 +302,8 @@ async function upsertConnection(params: {
 export async function startPlatformConnect(platform: string, userId?: string | null, operatorId?: string | null) {
   if (!userId || !operatorId) throw new Error('User/operator context is required');
 
-  const normalized = String(platform || '').trim().toLowerCase();
+  const requested = String(platform || '').trim().toLowerCase();
+  const normalized = isMetaChannel(requested) ? 'meta' : requested;
   const appConfig = await resolveOAuthAppConfig(normalized, operatorId);
 
   if (OAUTH_PLATFORMS.has(normalized)) {
@@ -302,6 +316,7 @@ export async function startPlatformConnect(platform: string, userId?: string | n
       .insert({
         state_hash: stateHash,
         platform_code: normalized,
+        requested_platform: requested,
         user_id: userId,
         operator_id: operatorId,
         expires_at: expiresAt,
@@ -392,6 +407,7 @@ async function consumeOauthState(stateRaw: string, platform: string) {
 function oauthContextFromStateRow(stateRow: any, platform: string): SocialOAuthCallbackContext {
   return {
     platform,
+    requestedPlatform: String(stateRow.requested_platform ?? platform),
     userId: String(stateRow.user_id),
     operatorId: String(stateRow.operator_id),
   };
@@ -415,7 +431,7 @@ export async function getPendingOAuthStateContext(params: {
   const stateHash = stateDigest(stateRaw);
   const { data, error } = await supabase
     .from('social_oauth_states')
-    .select('platform_code,user_id,operator_id,expires_at')
+    .select('platform_code,requested_platform,user_id,operator_id,expires_at')
     .eq('state_hash', stateHash)
     .eq('platform_code', normalized)
     .maybeSingle();
@@ -480,12 +496,13 @@ export async function handlePlatformCallback(params: {
 
     if (normalized === 'meta') {
       const token = await exchangeMetaCode(code, appConfig);
-      const [profile, publishingAccounts] = await Promise.all([
+      const [profile, publishingAccounts, grantedScopes] = await Promise.all([
         fetchMetaIdentity(token.access_token),
         fetchMetaPublishingAccounts(token.access_token).catch((err) => ({
           data: [],
           discovery_error: err instanceof Error ? err.message : String(err),
         })),
+        fetchMetaGrantedScopes(token.access_token),
       ]);
       const pages = Array.isArray((publishingAccounts as any)?.data) ? (publishingAccounts as any).data : [];
       const selectedPage = pages.find((page: any) => String(page?.id ?? '').trim()) ?? null;
@@ -497,7 +514,7 @@ export async function handlePlatformCallback(params: {
         operatorId: context.operatorId,
         accessToken: token.access_token,
         expiresInSeconds: token.expires_in,
-        scopes: normalizeScopes(appConfig.scopes, normalized),
+        scopes: grantedScopes,
         metadata: {
           profile,
           pages: pages.map((page: any) => ({
@@ -553,6 +570,27 @@ export async function handlePlatformCallback(params: {
 export async function disconnectPlatform(platform: string, userId?: string | null, operatorId?: string | null) {
   if (!userId || !operatorId) throw new Error('User/operator context is required');
 
+  if (isMetaChannel(platform)) {
+    const connection = await getOperatorPlatformConnection('meta', userId, operatorId);
+    if (!connection) return { success: true };
+    const metadata = { ...(connection.metadata ?? {}) };
+    if (platform === 'facebook') {
+      delete metadata.selected_facebook_page_id;
+    } else {
+      delete metadata.selected_instagram_page_id;
+      delete metadata.selected_instagram_channel_account_id;
+      delete metadata.selected_instagram_channel_username;
+    }
+    if (metadata.selected_facebook_page_id || metadata.selected_instagram_page_id) {
+      const { error } = await supabase.from('social_oauth_connections')
+        .update({ metadata, updated_at: nowIso() })
+        .eq('id', connection.id).eq('user_id', userId).eq('operator_id', operatorId);
+      if (error) throw error;
+      return { success: true };
+    }
+    platform = 'meta';
+  }
+
   const { error } = await supabase
     .from('social_oauth_connections')
     .delete()
@@ -581,6 +619,39 @@ export async function disconnectPlatform(platform: string, userId?: string | nul
   if (connectorUpdate.error) throw connectorUpdate.error;
 
   return { success: true };
+}
+
+export async function recheckLinkedInIdentity(userId?: string | null, operatorId?: string | null) {
+  if (!userId || !operatorId) throw new Error('User/operator context is required');
+  const connection = await getOperatorPlatformConnection('linkedin', userId, operatorId);
+  if (!connection?.access_token_encrypted) throw new Error('No saved LinkedIn authorization found. Connect LinkedIn first.');
+  if (connection.expires_at && new Date(connection.expires_at).getTime() <= Date.now() + 60_000) {
+    throw new Error('LinkedIn authorization has expired. Reconnect LinkedIn.');
+  }
+
+  const previous = connection.metadata && typeof connection.metadata === 'object' ? connection.metadata : {};
+  const checked = await buildLinkedInConnectionMetadata({
+    accessToken: decryptSocialSecret(connection.access_token_encrypted),
+    scopes: connection.scopes,
+  });
+  const metadata = { ...previous, ...checked };
+  delete metadata.actor_urn;
+  if (checked.actor_urn) {
+    metadata.actor_urn = checked.actor_urn;
+    delete metadata.actor_resolution_error;
+    delete metadata.actor_resolution_error_code;
+    delete metadata.actor_urn_required;
+  }
+
+  const { error } = await supabase
+    .from('social_oauth_connections')
+    .update({ metadata, updated_at: nowIso() })
+    .eq('id', connection.id)
+    .eq('platform_code', 'linkedin')
+    .eq('user_id', userId)
+    .eq('operator_id', operatorId);
+  if (error) throw error;
+  return { status: checked.actor_urn ? 'connected' : 'identity_required', reason: checked.actor_resolution_error ?? null };
 }
 
 export async function getOperatorPlatformConnection(platform: string, userId?: string | null, operatorId?: string | null) {
