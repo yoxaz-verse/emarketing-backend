@@ -451,10 +451,12 @@ export async function handlePlatformCallback(params: {
 
     if (normalized === 'linkedin') {
       const token = await exchangeLinkedInCode(code, appConfig as LinkedInOAuthAppConfig);
+      const grantedScopes = normalizeLinkedInTokenScopes(token.scope, appConfig.scopes);
       const metadata = await buildLinkedInConnectionMetadata({
         accessToken: token.access_token,
         idToken: token.id_token,
         manualActorUrn: String(appConfig.metadata?.actor_urn ?? ''),
+        scopes: grantedScopes,
         refreshTokenExpiresIn: token.refresh_token_expires_in ?? null,
       });
 
@@ -465,7 +467,7 @@ export async function handlePlatformCallback(params: {
         accessToken: token.access_token,
         refreshToken: token.refresh_token,
         expiresInSeconds: token.expires_in,
-        scopes: normalizeLinkedInTokenScopes(token.scope, appConfig.scopes),
+        scopes: grantedScopes,
         metadata,
       });
       console.info('[SOCIAL_OAUTH_CALLBACK_CONNECTED]', {
@@ -564,9 +566,10 @@ export async function disconnectPlatform(platform: string, userId?: string | nul
     .from('social_oauth_connections')
     .select('id', { count: 'exact', head: true })
     .eq('platform_code', platform);
+  if (remaining.error) throw remaining.error;
 
   const stillConnected = Number(remaining.count ?? 0) > 0;
-  await supabase
+  const connectorUpdate = await supabase
     .from('social_connectors')
     .update({
       credentials_active: stillConnected,
@@ -575,6 +578,7 @@ export async function disconnectPlatform(platform: string, userId?: string | nul
       updated_at: nowIso(),
     })
     .eq('code', platform);
+  if (connectorUpdate.error) throw connectorUpdate.error;
 
   return { success: true };
 }

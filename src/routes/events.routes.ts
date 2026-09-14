@@ -174,6 +174,9 @@ router.post('/ingest/run', requireAuth('user'), async (req, res) => {
     const sourceIds = Array.isArray(req.body?.source_ids)
       ? req.body.source_ids.map((item: unknown) => String(item).trim()).filter(Boolean)
       : [];
+    if (Array.isArray(req.body?.source_ids) && sourceIds.length === 0) {
+      return res.status(400).json({ error: 'Select at least one active source before scraping.' });
+    }
     const data = await runEventIngestion(req.auth?.user_id, { sourceIds });
     res.json(data);
   } catch (err: any) {

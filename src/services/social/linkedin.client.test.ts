@@ -1,25 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-function makeUnsignedJwt(payload: Record<string, unknown>): string {
-  const header = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url');
-  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  return `${header}.${body}.`;
-}
-
-test('LinkedIn actor URN uses OIDC id_token subject without profile fetch', async () => {
+test('LinkedIn actor URN ignores an unverified id_token and uses OIDC userinfo', async () => {
   const { fetchLinkedInActorUrn } = await import('./linkedin.client.js');
   const originalFetch = globalThis.fetch;
-  let called = false;
-  globalThis.fetch = (async () => {
-    called = true;
-    throw new Error('fetch should not be called when id_token contains sub');
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    assert.equal(String(input), 'https://api.linkedin.com/v2/userinfo');
+    return new Response(JSON.stringify({ sub: 'verified-member-id' }), { status: 200 });
   }) as typeof fetch;
 
   try {
-    const urn = await fetchLinkedInActorUrn('access-token', makeUnsignedJwt({ sub: 'oidc-member-id' }));
-    assert.equal(urn, 'urn:li:person:oidc-member-id');
-    assert.equal(called, false);
+    const urn = await fetchLinkedInActorUrn('access-token', 'unverified.jwt.value', null, ['openid', 'profile']);
+    assert.equal(urn, 'urn:li:person:verified-member-id');
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -45,8 +37,8 @@ test('LinkedIn actor URN uses OIDC userinfo before legacy profile endpoint', asy
   }
 });
 
-test('LinkedIn actor URN uses JWT access token before failing on legacy profile permissions', async () => {
-  const { fetchLinkedInActorUrn } = await import('./linkedin.client.js');
+test('LinkedIn actor URN never uses an unverified access token subject', async () => {
+  const { tryFetchLinkedInActorUrn } = await import('./linkedin.client.js');
   const originalFetch = globalThis.fetch;
   const urls: string[] = [];
   globalThis.fetch = (async (input: RequestInfo | URL) => {
@@ -55,13 +47,125 @@ test('LinkedIn actor URN uses JWT access token before failing on legacy profile 
     if (url === 'https://api.linkedin.com/v2/userinfo') {
       return new Response(JSON.stringify({ message: 'missing OIDC product' }), { status: 403 });
     }
-    throw new Error('legacy profile endpoint should not be called when access token contains sub');
+    assert.equal(url, 'https://api.linkedin.com/v2/me');
+    return new Response(JSON.stringify({ message: 'missing legacy profile product' }), { status: 403 });
   }) as typeof fetch;
 
   try {
-    const urn = await fetchLinkedInActorUrn(makeUnsignedJwt({ sub: 'access-token-member-id' }));
-    assert.equal(urn, 'urn:li:person:access-token-member-id');
-    assert.deepEqual(urls, ['https://api.linkedin.com/v2/userinfo']);
+    const result = await tryFetchLinkedInActorUrn('header.eyJzdWIiOiJmb3JnZWQifQ.signature');
+    assert.equal(result.actorUrn, null);
+    assert.deepEqual(urls, ['https://api.linkedin.com/v2/userinfo', 'https://api.linkedin.com/v2/me']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('LinkedIn identityMe resolves a member for r_profile_basicinfo and saves the URN', async () => {
+  const { buildLinkedInConnectionMetadata, checkLinkedInConnectionStatus } = await import('./linkedin.client.js');
+  const originalFetch = globalThis.fetch;
+  const originalVersion = process.env.LINKEDIN_IDENTITY_API_VERSION;
+  process.env.LINKEDIN_IDENTITY_API_VERSION = '202510.03';
+  const urls: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    urls.push(String(input));
+    assert.equal(String(input), 'https://api.linkedin.com/rest/identityMe');
+    assert.equal((init?.headers as Record<string, string>)?.['LinkedIn-Version'], '202510.03');
+    return new Response(JSON.stringify({ id: 'member_123' }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const metadata = await buildLinkedInConnectionMetadata({
+      accessToken: 'access-token',
+      scopes: ['w_member_social,r_profile_basicinfo'],
+    });
+    assert.equal(metadata.actor_urn, 'urn:li:person:member_123');
+    assert.equal(metadata.identity_source, 'identity_me');
+    assert.deepEqual(urls, ['https://api.linkedin.com/rest/identityMe']);
+    assert.equal(checkLinkedInConnectionStatus({
+      access_token_encrypted: 'encrypted-token', refresh_token_encrypted: null,
+      expires_at: null, scopes: ['w_member_social', 'r_profile_basicinfo'], metadata,
+    }).status, 'connected');
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalVersion === undefined) delete process.env.LINKEDIN_IDENTITY_API_VERSION;
+    else process.env.LINKEDIN_IDENTITY_API_VERSION = originalVersion;
+  }
+});
+
+for (const scenario of [
+  { name: 'permission denied', status: 403, body: { message: 'secret provider detail' }, code: 'permission' },
+  { name: 'unsupported version', status: 400, body: { message: 'Unsupported LinkedIn version' }, code: 'version' },
+  { name: 'missing ID', status: 200, body: { basicInfo: {} }, code: 'malformed_response' },
+  { name: 'invalid ID', status: 200, body: { id: 'not a valid/id' }, code: 'malformed_response' },
+] as const) {
+  test(`LinkedIn identityMe ${scenario.name} stays unresolved with safe diagnostics`, async () => {
+    const { buildLinkedInConnectionMetadata, checkLinkedInConnectionStatus } = await import('./linkedin.client.js');
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      if (String(input) === 'https://api.linkedin.com/rest/identityMe') {
+        return new Response(JSON.stringify(scenario.body), { status: scenario.status });
+      }
+      return new Response(JSON.stringify({ message: 'legacy unavailable' }), { status: 403 });
+    }) as typeof fetch;
+    try {
+      const metadata = await buildLinkedInConnectionMetadata({ accessToken: 'access-token', scopes: ['w_member_social', 'r_profile_basicinfo'] });
+      assert.equal(metadata.actor_urn, undefined);
+      assert.equal(metadata.actor_resolution_error_code, scenario.code);
+      assert.doesNotMatch(String(metadata.actor_resolution_error), /secret provider detail|access-token/);
+      assert.equal(checkLinkedInConnectionStatus({
+        access_token_encrypted: 'encrypted-token', refresh_token_encrypted: null,
+        expires_at: null, scopes: ['w_member_social', 'r_profile_basicinfo'], metadata,
+      }).status, 'identity_required');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+}
+
+test('LinkedIn identityMe network failure gives retry guidance without claiming readiness', async () => {
+  const { buildLinkedInConnectionMetadata } = await import('./linkedin.client.js');
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => { throw new Error('private network detail'); }) as typeof fetch;
+  try {
+    const metadata = await buildLinkedInConnectionMetadata({ accessToken: 'access-token', scopes: ['w_member_social', 'r_profile_basicinfo'] });
+    assert.equal(metadata.actor_resolution_error_code, 'network');
+    assert.match(String(metadata.actor_resolution_error), /Check connectivity/);
+    assert.doesNotMatch(String(metadata.actor_resolution_error), /private network detail/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('LinkedIn reports a missing identity scope without exposing provider details', async () => {
+  const { buildLinkedInConnectionMetadata, checkLinkedInConnectionStatus } = await import('./linkedin.client.js');
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response('private provider detail', { status: 403 })) as typeof fetch;
+  try {
+    const metadata = await buildLinkedInConnectionMetadata({ accessToken: 'private-access-token', scopes: ['w_member_social'] });
+    assert.equal(metadata.actor_resolution_error_code, 'missing_identity_scope');
+    assert.match(String(metadata.actor_resolution_error), /r_profile_basicinfo/);
+    assert.doesNotMatch(String(metadata.actor_resolution_error), /private/);
+    assert.equal(checkLinkedInConnectionStatus({
+      access_token_encrypted: 'encrypted-token', refresh_token_encrypted: null,
+      expires_at: null, scopes: ['w_member_social'], metadata,
+    }).status, 'identity_required');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('LinkedIn identifies an unavailable app product from a sanitized provider failure', async () => {
+  const { buildLinkedInConnectionMetadata } = await import('./linkedin.client.js');
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => new Response(
+    String(input).endsWith('/identityMe') ? 'No valid API product assigned; private detail' : 'forbidden',
+    { status: 403 },
+  )) as typeof fetch;
+  try {
+    const metadata = await buildLinkedInConnectionMetadata({ accessToken: 'private-access-token', scopes: ['w_member_social', 'r_profile_basicinfo'] });
+    assert.equal(metadata.actor_resolution_error_code, 'product');
+    assert.match(String(metadata.actor_resolution_error), /Verified on LinkedIn/);
+    assert.doesNotMatch(String(metadata.actor_resolution_error), /private/);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -121,7 +225,7 @@ test('LinkedIn actor URN reports action when profile permissions block all ident
   try {
     await assert.rejects(
       () => fetchLinkedInActorUrn('access-token'),
-      /advanced Member URN fallback/
+      /Enable the matching identity\/profile product/
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -146,7 +250,8 @@ test('LinkedIn actor URN try helper returns actionable unresolved result instead
     const result = await tryFetchLinkedInActorUrn('access-token');
     assert.equal(result.actorUrn, null);
     assert.equal(result.source, 'unresolved');
-    assert.match(result.error ?? '', /member identity could not be resolved automatically/);
+    assert.equal(result.errorCode, 'permission');
+    assert.match(result.error ?? '', /LinkedIn denied the member profile lookup/);
   } finally {
     globalThis.fetch = originalFetch;
   }

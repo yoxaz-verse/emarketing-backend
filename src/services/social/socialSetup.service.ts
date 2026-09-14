@@ -545,6 +545,7 @@ export async function getSocialSetupStatus(userId?: string | null, operatorId?: 
     const connector = connectorByPlatform.get(platform) ?? null;
     const credentialConfigured = credentialSummary.configured;
     const connected = connection?.status === 'connected';
+    const authorizationSaved = connection !== null;
     const accountSelection = platform === 'meta' ? metaAccountSelection(connection) : null;
     const needsAccountSelection = platform === 'meta' && connected && !String(accountSelection?.selected_page_id ?? '').trim();
 
@@ -558,6 +559,7 @@ export async function getSocialSetupStatus(userId?: string | null, operatorId?: 
       credential_fields: credentialSummary.fields,
       connection_status: connection?.status ?? 'disconnected',
       connection_reason: connection?.reason ?? null,
+      authorization_saved: authorizationSaved,
       connected,
       can_schedule: Boolean(connector?.can_schedule),
       can_publish: Boolean(connector?.can_publish),

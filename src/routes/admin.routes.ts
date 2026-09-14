@@ -557,11 +557,9 @@ async function handleGetLinkedInDiagnostics(req: any, res: any) {
     const connectionHasActorUrn = Boolean(String(connectionMetadata?.actor_urn ?? '').trim());
     const actorResolutionStatus = connectionHasActorUrn || actorUrnConfigured
       ? 'resolved'
-      : connectionMetadata?.actor_urn_required
-        ? 'advanced_fallback_required'
-        : connectionRow
-          ? 'auto_resolution_unresolved'
-          : 'pending_connect';
+      : connectionRow
+        ? 'auto_resolution_unresolved'
+        : 'pending_connect';
 
     return res.json({
       platform_code: 'linkedin',

@@ -58,7 +58,7 @@ export function checkLinkedInConnectionStatus(conn: LinkedInConnection | null): 
   if (!String(conn.metadata?.actor_urn ?? '').trim()) {
     return {
       status: 'identity_required',
-      reason: 'LinkedIn token is saved, but member identity was not resolved. Enter the LinkedIn Member URN fallback, save, then reconnect LinkedIn.',
+      reason: String(conn.metadata?.actor_resolution_error ?? '').trim() || 'LinkedIn token is saved, but member identity was not resolved. Check LinkedIn identity permissions and reconnect after correcting them.',
     };
   }
 
@@ -166,20 +166,6 @@ export async function exchangeLinkedInCode(code: string, config: LinkedInOAuthAp
   return res.json();
 }
 
-function subjectUrnFromJwt(tokenInput?: string | null): string | null {
-  const token = String(tokenInput ?? '').trim();
-  const payload = token.split('.')[1];
-  if (!payload) return null;
-
-  try {
-    const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    const sub = String(parsed?.sub ?? '').trim();
-    return sub ? `urn:li:person:${sub}` : null;
-  } catch {
-    return null;
-  }
-}
-
 export function normalizeLinkedInActorUrn(value?: string | null): string | null {
   const raw = String(value ?? '').trim();
   if (!raw) return null;
@@ -188,111 +174,142 @@ export function normalizeLinkedInActorUrn(value?: string | null): string | null 
   return null;
 }
 
-async function fetchLinkedInOidcActorUrn(accessToken: string): Promise<string | null> {
-  const res = await fetch('https://api.linkedin.com/v2/userinfo', {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-  });
+type IdentityFailureCode = 'permission' | 'product' | 'missing_identity_scope' | 'version' | 'malformed_response' | 'network';
+type IdentityResult = { urn: string | null; failure?: IdentityFailureCode };
 
-  if (!res.ok) return null;
-
-  const data = await res.json();
-  const sub = String(data?.sub ?? '').trim();
-  return sub ? `urn:li:person:${sub}` : null;
+function identityFailureMessage(code: IdentityFailureCode): string {
+  const actions: Record<IdentityFailureCode, string> = {
+    permission: 'LinkedIn denied the member profile lookup. Enable the matching identity/profile product for this app, confirm its granted scope, then reconnect.',
+    product: 'LinkedIn denied the member lookup because the app does not have an identity product. Add Verified on LinkedIn to the app, then reconnect.',
+    missing_identity_scope: 'The LinkedIn token has no member identity scope. Add r_profile_basicinfo to the app configuration and ensure the app has the matching LinkedIn product, then reconnect.',
+    version: 'LinkedIn rejected the identity API version. Update LINKEDIN_IDENTITY_API_VERSION to a supported version, then reconnect.',
+    malformed_response: 'LinkedIn returned no valid member ID. Check the app identity product and backend diagnostics before reconnecting.',
+    network: 'The backend could not reach LinkedIn for the member lookup. Check connectivity, then retry connecting.',
+  };
+  return `LinkedIn token is saved, but member identity was not resolved. ${actions[code]}`;
 }
 
-async function fetchLinkedInLegacyActorUrn(accessToken: string): Promise<string> {
-  const linkedinVersion = process.env.LINKEDIN_API_VERSION || '202504';
-  const res = await fetch('https://api.linkedin.com/v2/me', {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'X-Restli-Protocol-Version': '2.0.0',
-      'LinkedIn-Version': linkedinVersion,
-    },
-  });
+function classifyIdentityResponse(res: Response, body: string): IdentityFailureCode {
+  if (res.status === 403 && /no valid api product|product (?:not enabled|not assigned|unavailable)/i.test(body)) return 'product';
+  if (res.status === 401 || res.status === 403 || res.status === 404) return 'permission';
+  if (res.status === 426 || /(?:unsupported|invalid|deprecated).*version|version.*(?:unsupported|invalid|deprecated)/i.test(body)) return 'version';
+  if (res.status === 429 || res.status >= 500) return 'network';
+  return 'malformed_response';
+}
 
-  if (!res.ok) {
-    const raw = await res.text().catch(() => '');
-    throw new Error(`LinkedIn profile fetch failed (${res.status}): ${raw}`);
+async function fetchLinkedInIdentityMeActorUrn(accessToken: string): Promise<IdentityResult> {
+  let res: Response;
+  try {
+    res = await fetch('https://api.linkedin.com/rest/identityMe', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'LinkedIn-Version': process.env.LINKEDIN_IDENTITY_API_VERSION || '202510.03',
+        'X-Restli-Protocol-Version': '2.0.0',
+      },
+    });
+  } catch {
+    return { urn: null, failure: 'network' };
   }
+  if (!res.ok) return { urn: null, failure: classifyIdentityResponse(res, await res.text().catch(() => '')) };
+  const data = await res.json().catch(() => null);
+  const urn = normalizeLinkedInActorUrn(data?.id);
+  return urn ? { urn } : { urn: null, failure: 'malformed_response' };
+}
 
-  const data = await res.json();
-  const id = String(data?.id ?? '').trim();
-  if (!id) throw new Error('LinkedIn profile id missing');
-  return `urn:li:person:${id}`;
+async function fetchLinkedInOidcActorUrn(accessToken: string): Promise<IdentityResult> {
+  let res: Response;
+  try {
+    res = await fetch('https://api.linkedin.com/v2/userinfo', {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+  } catch {
+    return { urn: null, failure: 'network' };
+  }
+  if (!res.ok) return { urn: null, failure: classifyIdentityResponse(res, await res.text().catch(() => '')) };
+  const data = await res.json().catch(() => null);
+  const urn = normalizeLinkedInActorUrn(data?.sub);
+  return urn ? { urn } : { urn: null, failure: 'malformed_response' };
+}
+
+async function fetchLinkedInLegacyActorUrn(accessToken: string): Promise<IdentityResult> {
+  const linkedinVersion = process.env.LINKEDIN_API_VERSION || '202504';
+  let res: Response;
+  try {
+    res = await fetch('https://api.linkedin.com/v2/me', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'X-Restli-Protocol-Version': '2.0.0',
+        'LinkedIn-Version': linkedinVersion,
+      },
+    });
+  } catch {
+    return { urn: null, failure: 'network' };
+  }
+  if (!res.ok) return { urn: null, failure: classifyIdentityResponse(res, await res.text().catch(() => '')) };
+  const data = await res.json().catch(() => null);
+  const urn = normalizeLinkedInActorUrn(data?.id);
+  return urn ? { urn } : { urn: null, failure: 'malformed_response' };
 }
 
 export async function fetchLinkedInActorUrn(
   accessToken: string,
   idToken?: string | null,
-  manualActorUrn?: string | null
+  manualActorUrn?: string | null,
+  scopes?: string[] | null,
 ): Promise<string> {
-  const fromConfig = normalizeLinkedInActorUrn(manualActorUrn);
-  if (fromConfig) return fromConfig;
-
-  const fromIdToken = subjectUrnFromJwt(idToken);
-  if (fromIdToken) return fromIdToken;
-
-  const fromUserInfo = await fetchLinkedInOidcActorUrn(accessToken);
-  if (fromUserInfo) return fromUserInfo;
-
-  const fromAccessToken = subjectUrnFromJwt(accessToken);
-  if (fromAccessToken) return fromAccessToken;
-
-  try {
-    return await fetchLinkedInLegacyActorUrn(accessToken);
-  } catch (err: any) {
-    throw new Error(
-      `LinkedIn member identity could not be resolved automatically. Confirm LinkedIn callback/scopes and reconnect; use the advanced Member URN fallback only if diagnostics asks for it. Technical detail: ${err?.message ?? err}`
-    );
-  }
+  const result = await tryFetchLinkedInActorUrn(accessToken, idToken, manualActorUrn, scopes);
+  if (result.actorUrn) return result.actorUrn;
+  throw new Error(result.error);
 }
 
 export async function tryFetchLinkedInActorUrn(
   accessToken: string,
   idToken?: string | null,
-  manualActorUrn?: string | null
+  manualActorUrn?: string | null,
+  scopes?: string[] | null,
 ): Promise<{
   actorUrn: string | null;
-  source: 'manual_config' | 'oidc_id_token' | 'oidc_userinfo_or_token' | 'legacy_profile' | 'unresolved';
+  source: 'manual_config' | 'identity_me' | 'oidc_userinfo' | 'legacy_profile' | 'unresolved';
   error?: string;
+  errorCode?: IdentityFailureCode;
 }> {
   const fromConfig = normalizeLinkedInActorUrn(manualActorUrn);
   if (fromConfig) return { actorUrn: fromConfig, source: 'manual_config' };
+  void idToken; // Do not trust unverified JWT claims as a posting identity.
+  const granted = new Set((scopes ?? []).flatMap((scope) => String(scope).split(/[,\s]+/)));
+  const missingIdentityScope = scopes != null && !granted.has('r_profile_basicinfo') && !(granted.has('openid') && granted.has('profile'));
+  const attempts: { source: 'identity_me' | 'oidc_userinfo' | 'legacy_profile'; run: () => Promise<IdentityResult> }[] = [];
+  if (granted.has('r_profile_basicinfo')) attempts.push({ source: 'identity_me', run: () => fetchLinkedInIdentityMeActorUrn(accessToken) });
+  if (granted.has('openid') && granted.has('profile')) attempts.push({ source: 'oidc_userinfo', run: () => fetchLinkedInOidcActorUrn(accessToken) });
+  // Older configurations may not report token scopes. Preserve the existing lookup path for those connections.
+  if (scopes == null) attempts.push({ source: 'oidc_userinfo', run: () => fetchLinkedInOidcActorUrn(accessToken) });
+  attempts.push({ source: 'legacy_profile', run: () => fetchLinkedInLegacyActorUrn(accessToken) });
 
-  const fromIdToken = subjectUrnFromJwt(idToken);
-  if (fromIdToken) return { actorUrn: fromIdToken, source: 'oidc_id_token' };
-
-  const fromUserInfo = await fetchLinkedInOidcActorUrn(accessToken);
-  if (fromUserInfo) return { actorUrn: fromUserInfo, source: 'oidc_userinfo_or_token' };
-
-  const fromAccessToken = subjectUrnFromJwt(accessToken);
-  if (fromAccessToken) return { actorUrn: fromAccessToken, source: 'oidc_userinfo_or_token' };
-
-  try {
-    return { actorUrn: await fetchLinkedInLegacyActorUrn(accessToken), source: 'legacy_profile' };
-  } catch (err: any) {
-    return {
-      actorUrn: null,
-      source: 'unresolved',
-      error: `LinkedIn token was saved, but member identity could not be resolved automatically. Confirm LinkedIn callback/scopes and reconnect; use the advanced Member URN fallback only if diagnostics asks for it. Technical detail: ${err?.message ?? err}`,
-    };
+  let primaryFailure: IdentityFailureCode | undefined;
+  for (const attempt of attempts) {
+    const result = await attempt.run();
+    if (result.urn) return { actorUrn: result.urn, source: attempt.source };
+    primaryFailure ??= result.failure;
   }
+  const errorCode = missingIdentityScope ? 'missing_identity_scope' : primaryFailure ?? 'malformed_response';
+  return { actorUrn: null, source: 'unresolved', errorCode, error: identityFailureMessage(errorCode) };
 }
 
 export async function buildLinkedInConnectionMetadata(params: {
   accessToken: string;
   idToken?: string | null;
   manualActorUrn?: string | null;
+  scopes?: string[] | null;
   refreshTokenExpiresIn?: number | null;
 }): Promise<Record<string, unknown>> {
   const actor = await tryFetchLinkedInActorUrn(
     params.accessToken,
     params.idToken,
-    params.manualActorUrn
+    params.manualActorUrn,
+    params.scopes,
   );
   const metadata: Record<string, unknown> = {
     identity_source: actor.source,
@@ -303,6 +320,7 @@ export async function buildLinkedInConnectionMetadata(params: {
     metadata.actor_urn = actor.actorUrn;
   } else {
     metadata.actor_resolution_error = actor.error ?? 'Actor/member URN required';
+    metadata.actor_resolution_error_code = actor.errorCode;
     metadata.actor_urn_required = true;
   }
 
