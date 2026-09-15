@@ -887,6 +887,29 @@ export async function updateSocialPublishRequestJobs(params: {
 
 export async function processDueSocialPublishJobs(limit = 25) {
   const now = nowIso();
+  // A process restart can leave a claimed job in draft_created. Its provider
+  // outcome may be unknown, so surface it for review instead of sending twice.
+  const staleBefore = new Date(Date.now() - 15 * 60_000).toISOString();
+  const stale = await supabase.from('social_publish_jobs')
+    .select('id,timeline')
+    .eq('status', 'draft_created')
+    .not('scheduled_at', 'is', null)
+    .lte('scheduled_at', now)
+    .lt('updated_at', staleBefore)
+    .limit(100);
+  if (stale.error) throw stale.error;
+  for (const job of stale.data ?? []) {
+    const timeline = Array.isArray(job.timeline) ? job.timeline : [];
+    const failure = await supabase.from('social_publish_jobs').update({
+      status: 'failed',
+      phase: 'PUBLISH',
+      error_code: 'PUBLISH_OUTCOME_UNKNOWN',
+      error_message: 'Publish worker stopped before confirming the platform result. Check the platform before retrying.',
+      timeline: [...timeline, makeEvent('PUBLISH', 'failed', 'Publish outcome unknown after worker interruption', 'PUBLISH_OUTCOME_UNKNOWN')],
+      updated_at: nowIso(),
+    }).eq('id', job.id).eq('status', 'draft_created').lt('updated_at', staleBefore);
+    if (failure.error) throw failure.error;
+  }
   const { data, error } = await supabase
     .from('social_publish_jobs')
     .select('*, social_publish_requests(*)')
@@ -900,32 +923,60 @@ export async function processDueSocialPublishJobs(limit = 25) {
   const processed: any[] = [];
   for (const job of data ?? []) {
     if (terminalJobStatus(job.status)) continue;
-    const claimed = await patchJob(job.id, {
-      status: 'draft_created',
-      phase: 'DRAFT_CREATE',
-      attempts: Number(job.attempts ?? 0) + 1,
-      timeline: [
-        ...(Array.isArray(job.timeline) ? job.timeline : []),
-        makeEvent('DRAFT_CREATE', 'draft_created', 'Due scheduled job claimed by social publish runner'),
-      ],
-    });
-
-    const { data: connector, error: connectorError } = await supabase
-      .from('social_connectors')
+    const claim = await supabase
+      .from('social_publish_jobs')
+      .update({
+        status: 'draft_created',
+        phase: 'DRAFT_CREATE',
+        attempts: Number(job.attempts ?? 0) + 1,
+        timeline: [
+          ...(Array.isArray(job.timeline) ? job.timeline : []),
+          makeEvent('DRAFT_CREATE', 'draft_created', 'Due scheduled job claimed by social publish runner'),
+        ],
+        updated_at: nowIso(),
+      })
+      .eq('id', job.id)
+      .eq('status', 'scheduled')
+      .lte('scheduled_at', now)
       .select('*')
-      .eq('code', claimed.platform_code)
-      .single();
-    if (connectorError) throw connectorError;
+      .maybeSingle();
+    if (claim.error) throw claim.error;
+    const claimed = claim.data;
+    if (!claimed) continue;
 
-    const request = (job as any).social_publish_requests ?? {};
-    const executed = await executeFlow(
-      claimed,
-      connector as SocialConnectorCapability,
-      claimed.post_input as SocialPostInput,
-      claimed.created_by as string | null,
-      claimed.operator_id ?? request.operator_id ?? null
-    );
-    processed.push(executed);
+    try {
+      const { data: connector, error: connectorError } = await supabase
+        .from('social_connectors')
+        .select('*')
+        .eq('code', claimed.platform_code)
+        .single();
+      if (connectorError) throw connectorError;
+
+      const request = (job as any).social_publish_requests ?? {};
+      const executed = await executeFlow(
+        claimed,
+        connector as SocialConnectorCapability,
+        claimed.post_input as SocialPostInput,
+        claimed.created_by as string | null,
+        claimed.operator_id ?? request.operator_id ?? null
+      );
+      processed.push(executed);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      const failure = await supabase.from('social_publish_jobs').update({
+        status: 'failed',
+        phase: 'PUBLISH',
+        error_code: 'PUBLISH_RUNNER_ERROR',
+        error_message: `Publish runner stopped: ${message}. Check the platform before retrying.`,
+        timeline: [
+          ...(Array.isArray(claimed.timeline) ? claimed.timeline : []),
+          makeEvent('PUBLISH', 'failed', `Publish runner stopped: ${message}`, 'PUBLISH_RUNNER_ERROR'),
+        ],
+        updated_at: nowIso(),
+      }).eq('id', claimed.id).eq('status', 'draft_created').select('*').maybeSingle();
+      if (failure.error) throw failure.error;
+      if (failure.data) processed.push(failure.data);
+    }
   }
 
   return {
