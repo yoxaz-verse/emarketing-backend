@@ -5,6 +5,7 @@ export type SocialOAuthErrorCode =
   | 'backend_unavailable'
   | 'auth_service_misconfigured'
   | 'auth_service_unavailable'
+  | 'social_oauth_schema_missing'
   | 'provider_permission_denied'
   | 'provider_config_error'
   | 'oauth_state_error'
@@ -67,6 +68,14 @@ export function socialOAuthSuccessUrl(
 
 export function classifySocialOAuthError(message: string): SocialOAuthErrorCode {
   const lower = String(message || '').toLowerCase();
+
+  if (
+    lower.includes('social_oauth_schema_missing') ||
+    (lower.includes('social_oauth_states') &&
+      (lower.includes('requested_platform') || lower.includes('schema cache')))
+  ) {
+    return 'social_oauth_schema_missing';
+  }
 
   if (
     lower.includes('backend unavailable') ||

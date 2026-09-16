@@ -110,3 +110,10 @@ test('social OAuth classifier surfaces Supabase auth misconfiguration', () => {
     'auth_service_misconfigured'
   );
 });
+
+test('social OAuth classifier converts a missing requested platform column into a stable schema error', () => {
+  assert.equal(
+    classifySocialOAuthError("Could not find the 'requested_platform' column of 'social_oauth_states' in the schema cache"),
+    'social_oauth_schema_missing'
+  );
+});

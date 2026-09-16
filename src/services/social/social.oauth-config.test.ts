@@ -379,3 +379,12 @@ test('social OAuth schema migration is idempotent and creates required tables', 
   assert.match(sql, /social_oauth_states_state_hash_uidx/i);
   assert.match(sql, /social_oauth_connections_status_check/i);
 });
+
+test('Meta channel split migration adds OAuth routing state and reloads PostgREST schema', () => {
+  const sql = readFileSync('sql/20260915_split_meta_channels.sql', 'utf8');
+
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS requested_platform text/i);
+  assert.match(sql, /'facebook',\s*'Facebook'/i);
+  assert.match(sql, /'instagram',\s*'Instagram'/i);
+  assert.match(sql, /NOTIFY pgrst,\s*'reload schema'/i);
+});

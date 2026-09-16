@@ -1,6 +1,39 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { DEFAULT_LINKEDIN_API_VERSION, linkedInApiVersion } from './linkedin.client.js';
+
+test('LinkedIn API version defaults to the current supported release and remains configurable', () => {
+  assert.equal(DEFAULT_LINKEDIN_API_VERSION, '202608');
+  assert.equal(linkedInApiVersion({} as NodeJS.ProcessEnv), '202608');
+  assert.equal(linkedInApiVersion({ LINKEDIN_API_VERSION: '202607' } as NodeJS.ProcessEnv), '202607');
+});
+
+test('LinkedIn publishing uses the supported version and sanitizes version rejection details', async () => {
+  const { publishLinkedInTextLink } = await import('./linkedin.client.js');
+  const originalFetch = globalThis.fetch;
+  const originalKey = process.env.SOCIAL_INTEGRATION_ENCRYPTION_KEY;
+  process.env.SOCIAL_INTEGRATION_ENCRYPTION_KEY = 'test-social-integration-key-32-bytes';
+  const { encryptSocialSecret } = await import('../../utils/socialIntegrationEncryption.js');
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    assert.equal((init?.headers as Record<string, string>)?.['LinkedIn-Version'], '202608');
+    return new Response('{"code":"NONEXISTENT_VERSION","message":"private provider detail"}', { status: 426 });
+  }) as typeof fetch;
+  try {
+    await assert.rejects(
+      publishLinkedInTextLink({
+        access_token_encrypted: encryptSocialSecret('token'), refresh_token_encrypted: null, expires_at: null,
+        scopes: ['w_member_social'], metadata: { actor_urn: 'urn:li:person:member_1' },
+      }, { content: 'test' }),
+      (error: any) => error.httpStatus === 426 && /version 202608/.test(error.message) && !/private provider detail/.test(error.message),
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.SOCIAL_INTEGRATION_ENCRYPTION_KEY;
+    else process.env.SOCIAL_INTEGRATION_ENCRYPTION_KEY = originalKey;
+  }
+});
+
 test('LinkedIn actor URN ignores an unverified id_token and uses OIDC userinfo', async () => {
   const { fetchLinkedInActorUrn } = await import('./linkedin.client.js');
   const originalFetch = globalThis.fetch;

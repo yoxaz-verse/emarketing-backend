@@ -1,5 +1,11 @@
 import { decryptSocialSecret } from '../../utils/socialIntegrationEncryption';
 
+export const DEFAULT_LINKEDIN_API_VERSION = '202608';
+
+export function linkedInApiVersion(env: NodeJS.ProcessEnv = process.env): string {
+  return String(env.LINKEDIN_API_VERSION || DEFAULT_LINKEDIN_API_VERSION).trim();
+}
+
 type LinkedInConnection = {
   access_token_encrypted: string;
   refresh_token_encrypted: string | null;
@@ -79,7 +85,7 @@ export async function publishLinkedInTextLink(conn: LinkedInConnection, input: P
   if (!actorUrn) throw new Error('LinkedIn actor URN missing. Reconnect LinkedIn account.');
 
   const apiUrl = 'https://api.linkedin.com/rest/posts';
-  const linkedinVersion = process.env.LINKEDIN_API_VERSION || '202504';
+  const linkedinVersion = linkedInApiVersion();
 
   const payload: Record<string, any> = {
     author: actorUrn,
@@ -115,8 +121,13 @@ export async function publishLinkedInTextLink(conn: LinkedInConnection, input: P
 
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    const err = new Error(`LinkedIn publish failed (${res.status}): ${body}`);
+    const versionRejected = res.status === 426 || /NONEXISTENT_VERSION|version.+not active|deprecated.+version/i.test(body);
+    const message = versionRejected
+      ? `LinkedIn rejected API version ${linkedinVersion}. Configure a supported LINKEDIN_API_VERSION and retry.`
+      : `LinkedIn publish failed (${res.status}). Check the connection permissions and retry.`;
+    const err = new Error(message);
     (err as any).httpStatus = res.status;
+    (err as any).providerCode = versionRejected ? 'LINKEDIN_API_VERSION_REJECTED' : 'LINKEDIN_PUBLISH_FAILED';
     throw err;
   }
 
@@ -237,7 +248,7 @@ async function fetchLinkedInOidcActorUrn(accessToken: string): Promise<IdentityR
 }
 
 async function fetchLinkedInLegacyActorUrn(accessToken: string): Promise<IdentityResult> {
-  const linkedinVersion = process.env.LINKEDIN_API_VERSION || '202504';
+  const linkedinVersion = linkedInApiVersion();
   let res: Response;
   try {
     res = await fetch('https://api.linkedin.com/v2/me', {

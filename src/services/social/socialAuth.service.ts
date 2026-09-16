@@ -323,7 +323,16 @@ export async function startPlatformConnect(platform: string, userId?: string | n
         created_at: nowIso(),
       });
 
-    if (error) throw error;
+    if (error) {
+      const message = String(error.message ?? '').toLowerCase();
+      if (error.code === 'PGRST204' || (message.includes('requested_platform') && message.includes('schema cache'))) {
+        const schemaError: any = new Error('Social OAuth schema is outdated. Apply the social connector database migration, then try again.');
+        schemaError.code = 'social_oauth_schema_missing';
+        schemaError.statusCode = 503;
+        throw schemaError;
+      }
+      throw error;
+    }
 
     console.info('[SOCIAL_OAUTH_STATE_CREATED]', {
       platform: normalized,
@@ -431,7 +440,7 @@ export async function getPendingOAuthStateContext(params: {
   const stateHash = stateDigest(stateRaw);
   const { data, error } = await supabase
     .from('social_oauth_states')
-    .select('platform_code,requested_platform,user_id,operator_id,expires_at')
+    .select('*')
     .eq('state_hash', stateHash)
     .eq('platform_code', normalized)
     .maybeSingle();

@@ -531,6 +531,12 @@ async function executeLinkedInApiFlow(job: any, connector: SocialConnectorCapabi
       cta_url: input.cta_url,
     });
 
+    await supabase
+      .from('social_oauth_connections')
+      .update({ status: 'connected', last_error: null, updated_at: nowIso() })
+      .eq('id', conn.id)
+      .eq('platform_code', 'linkedin');
+
     timeline.push(makeEvent('API_CONFIRMED', 'published', 'LinkedIn API confirmed post creation'));
     const published = publishedResult(result);
     return patchJob(job.id, {
