@@ -188,6 +188,17 @@ export function manualFallback(connector: SocialConnectorCapability, input: Soci
 export function normalizeProviderError(err: unknown): { code: string; message: string; retryable: boolean } {
   const raw = err instanceof Error ? err.message : String(err);
   const status = Number((err as any)?.httpStatus ?? 0);
+  const providerCode = String((err as any)?.providerCode ?? '').trim();
+
+  if (providerCode === 'LINKEDIN_API_VERSION_REJECTED' || status === 426) {
+    return {
+      code: 'LINKEDIN_API_VERSION_REJECTED',
+      message: /^LinkedIn rejected API version \d{6}\./.test(raw)
+        ? raw
+        : 'LinkedIn rejected the configured API version. Update LINKEDIN_API_VERSION and retry.',
+      retryable: false,
+    };
+  }
 
   if (status === 429 || status >= 500) {
     return {

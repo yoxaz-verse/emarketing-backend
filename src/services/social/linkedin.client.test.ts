@@ -1,12 +1,30 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { DEFAULT_LINKEDIN_API_VERSION, linkedInApiVersion } from './linkedin.client.js';
+import { assertSupportedLinkedInApiVersion, DEFAULT_LINKEDIN_API_VERSION, linkedInApiVersion } from './linkedin.client.js';
+import { normalizeProviderError } from './connectors.js';
 
 test('LinkedIn API version defaults to the current supported release and remains configurable', () => {
   assert.equal(DEFAULT_LINKEDIN_API_VERSION, '202608');
   assert.equal(linkedInApiVersion({} as NodeJS.ProcessEnv), '202608');
   assert.equal(linkedInApiVersion({ LINKEDIN_API_VERSION: '202607' } as NodeJS.ProcessEnv), '202607');
+});
+
+test('LinkedIn API version validation rejects retired and malformed deployment values', () => {
+  assert.equal(assertSupportedLinkedInApiVersion({} as NodeJS.ProcessEnv), '202608');
+  assert.throws(() => assertSupportedLinkedInApiVersion({ LINKEDIN_API_VERSION: '202504' } as NodeJS.ProcessEnv), /retired.*202608/i);
+  assert.throws(() => assertSupportedLinkedInApiVersion({ LINKEDIN_API_VERSION: '2026.08' } as NodeJS.ProcessEnv), /YYYYMM/);
+});
+
+test('LinkedIn HTTP 426 keeps a stable code and never exposes raw provider JSON', () => {
+  const error = Object.assign(new Error('{"code":"NONEXISTENT_VERSION","message":"private provider detail"}'), {
+    httpStatus: 426,
+    providerCode: 'LINKEDIN_API_VERSION_REJECTED',
+  });
+  const normalized = normalizeProviderError(error);
+  assert.equal(normalized.code, 'LINKEDIN_API_VERSION_REJECTED');
+  assert.equal(normalized.retryable, false);
+  assert.doesNotMatch(normalized.message, /private provider detail|NONEXISTENT_VERSION/);
 });
 
 test('LinkedIn publishing uses the supported version and sanitizes version rejection details', async () => {
@@ -93,16 +111,16 @@ test('LinkedIn actor URN never uses an unverified access token subject', async (
   }
 });
 
-test('LinkedIn identityMe resolves a member for r_profile_basicinfo and saves the URN', async () => {
+test('LinkedIn identityMe uses the centralized version and resolves a member for r_profile_basicinfo', async () => {
   const { buildLinkedInConnectionMetadata, checkLinkedInConnectionStatus } = await import('./linkedin.client.js');
   const originalFetch = globalThis.fetch;
-  const originalVersion = process.env.LINKEDIN_IDENTITY_API_VERSION;
-  process.env.LINKEDIN_IDENTITY_API_VERSION = '202510.03';
+  const originalVersion = process.env.LINKEDIN_API_VERSION;
+  process.env.LINKEDIN_API_VERSION = '202608';
   const urls: string[] = [];
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     urls.push(String(input));
     assert.equal(String(input), 'https://api.linkedin.com/rest/identityMe');
-    assert.equal((init?.headers as Record<string, string>)?.['LinkedIn-Version'], '202510.03');
+    assert.equal((init?.headers as Record<string, string>)?.['LinkedIn-Version'], '202608');
     return new Response(JSON.stringify({ id: 'member_123' }), { status: 200 });
   }) as typeof fetch;
 
@@ -120,8 +138,8 @@ test('LinkedIn identityMe resolves a member for r_profile_basicinfo and saves th
     }).status, 'connected');
   } finally {
     globalThis.fetch = originalFetch;
-    if (originalVersion === undefined) delete process.env.LINKEDIN_IDENTITY_API_VERSION;
-    else process.env.LINKEDIN_IDENTITY_API_VERSION = originalVersion;
+    if (originalVersion === undefined) delete process.env.LINKEDIN_API_VERSION;
+    else process.env.LINKEDIN_API_VERSION = originalVersion;
   }
 });
 

@@ -1,9 +1,21 @@
 import { decryptSocialSecret } from '../../utils/socialIntegrationEncryption';
 
 export const DEFAULT_LINKEDIN_API_VERSION = '202608';
+const RETIRED_LINKEDIN_API_VERSIONS = new Set(['202504']);
 
 export function linkedInApiVersion(env: NodeJS.ProcessEnv = process.env): string {
   return String(env.LINKEDIN_API_VERSION || DEFAULT_LINKEDIN_API_VERSION).trim();
+}
+
+export function assertSupportedLinkedInApiVersion(env: NodeJS.ProcessEnv = process.env): string {
+  const version = linkedInApiVersion(env);
+  if (!/^\d{6}$/.test(version)) {
+    throw new Error(`LINKEDIN_API_VERSION must use YYYYMM format; received "${version}".`);
+  }
+  if (RETIRED_LINKEDIN_API_VERSIONS.has(version)) {
+    throw new Error(`LINKEDIN_API_VERSION=${version} is retired. Set LINKEDIN_API_VERSION=${DEFAULT_LINKEDIN_API_VERSION} and redeploy.`);
+  }
+  return version;
 }
 
 type LinkedInConnection = {
@@ -212,13 +224,14 @@ function classifyIdentityResponse(res: Response, body: string): IdentityFailureC
 }
 
 async function fetchLinkedInIdentityMeActorUrn(accessToken: string): Promise<IdentityResult> {
+  const linkedinVersion = linkedInApiVersion();
   let res: Response;
   try {
     res = await fetch('https://api.linkedin.com/rest/identityMe', {
       method: 'GET',
       headers: {
         Authorization: `Bearer ${accessToken}`,
-        'LinkedIn-Version': process.env.LINKEDIN_IDENTITY_API_VERSION || '202510.03',
+        'LinkedIn-Version': linkedinVersion,
         'X-Restli-Protocol-Version': '2.0.0',
       },
     });

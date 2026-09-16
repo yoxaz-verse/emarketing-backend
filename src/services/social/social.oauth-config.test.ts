@@ -192,6 +192,23 @@ test('Facebook and Instagram share configured Meta app credentials for one-click
   }
 });
 
+test('Reddit uses configured global app credentials for one-click authorization', async () => {
+  const { summarizePlatformCredential } = await import('./socialSetup.service.js');
+  const summary = summarizePlatformCredential({
+    platform: 'reddit',
+    globalRow: {
+      platform_code: 'reddit', client_id: 'reddit-client-id', client_secret_encrypted: 'encrypted-secret',
+      redirect_uri: 'https://example.com/social/callback/reddit', scopes: ['identity', 'submit'],
+      metadata: { user_agent: 'obaol-social-connector/1.0 by u_obaol' }, active: true,
+    },
+  });
+  assert.equal(summary.configured, true);
+  assert.equal(summary.oneClickAvailable, true);
+  assert.equal(summary.source, 'global');
+  assert.equal(summary.fields.client_secret, '***');
+  assert.equal(summary.fields.user_agent, 'obaol-social-connector/1.0 by u_obaol');
+});
+
 test('setup credential summary prefers operator override over global app', async () => {
   const { summarizePlatformCredential } = await import('./socialSetup.service.js');
 

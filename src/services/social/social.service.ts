@@ -1020,10 +1020,14 @@ export async function retrySocialPublishJob(jobId: string) {
 
   if (connectorError) throw connectorError;
 
+  if (job.status !== 'failed') {
+    throw new Error(`Only failed social publish jobs can be retried. Current status: ${job.status}.`);
+  }
+
   const timeline = Array.isArray(job.timeline) ? [...job.timeline] : [];
   timeline.push(makeEvent('DRAFT_CREATE', 'draft_created', 'Retry initiated from panel'));
 
-  const patched = await patchJob(job.id, {
+  const claim = await supabase.from('social_publish_jobs').update({
     attempts: Number(job.attempts ?? 0) + 1,
     status: 'draft_created',
     phase: 'DRAFT_CREATE',
@@ -1032,7 +1036,11 @@ export async function retrySocialPublishJob(jobId: string) {
     error_message: null,
     provider_error_code: null,
     provider_error_message: null,
-  });
+    updated_at: nowIso(),
+  }).eq('id', job.id).eq('status', 'failed').select('*').maybeSingle();
+  if (claim.error) throw claim.error;
+  const patched = claim.data;
+  if (!patched) throw new Error('This publish job is already being retried. Refresh to see its current status.');
 
   return executeFlow(
     patched,

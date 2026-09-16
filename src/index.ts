@@ -54,6 +54,7 @@ import { supabase } from './supabase';
 import { supabaseAdmin } from './utils/supabaseAdmin';
 import { securityHeaders } from './middleware/security';
 import { formatUnknownError, isConnectivityError, isSchemaDriftError, isSupabaseAuthConfigError } from './utils/errorFormat';
+import { assertSupportedLinkedInApiVersion, linkedInApiVersion } from './services/social/linkedin.client';
 
 dotenv.config();
 
@@ -83,6 +84,8 @@ const entrypoint = process.argv[1] ?? 'unknown';
 const runtimeMode = entrypoint.includes('/dist/') ? 'compiled-js' : 'typescript-source';
 const schemaGuardVersion = 'attach-schema-guard-v1';
 const socialOAuthContextVersion = 'operator-context-actor-urn-v2';
+const deploymentVersion = process.env.DEPLOYMENT_VERSION ?? process.env.CAPROVER_GIT_COMMIT_SHA ?? 'unset';
+const linkedinApiVersion = linkedInApiVersion();
 const bootFingerprint = {
   startedAt: new Date().toISOString(),
   node: process.version,
@@ -94,6 +97,8 @@ const bootFingerprint = {
   operatorRouteGuard: "requireAuth('viewer')",
   socialOAuthRedirectConfigured: isSocialOAuthRedirectConfigured(),
   socialOAuthContextVersion,
+  deploymentVersion,
+  linkedinApiVersion,
 };
 
 console.info('[BACKEND_RUNTIME]', {
@@ -154,6 +159,8 @@ app.get('/ping', (_req, res) => {
     startedAt: bootFingerprint.startedAt,
     pid: process.pid,
     socialOAuthRedirectConfigured: isSocialOAuthRedirectConfigured(),
+    deploymentVersion,
+    linkedinApiVersion,
   });
 });
 
@@ -791,6 +798,7 @@ async function checkReplyTrackingSchemaReadiness() {
 }
 
 async function boot() {
+  assertSupportedLinkedInApiVersion();
   await checkSupabaseConnectivity();
   const authReadiness = await getSupabaseAuthReadiness();
   if (!authReadiness.ok) {

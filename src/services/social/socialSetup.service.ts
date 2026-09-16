@@ -294,7 +294,7 @@ export function summarizePlatformCredential(params: {
     fields,
     missing: configured ? [] : missing,
     configured,
-    oneClickAvailable: (params.platform === 'linkedin' || params.platform === 'facebook' || params.platform === 'instagram') && configured,
+    oneClickAvailable: (params.platform === 'linkedin' || params.platform === 'facebook' || params.platform === 'instagram' || params.platform === 'reddit') && configured,
   };
 }
 
@@ -374,7 +374,9 @@ export async function preflightSocialSetupConnect(params: {
         code: 'PROVIDER_CONFIG_MISSING',
         message: platform === 'linkedin'
           ? 'LinkedIn one-click connect is not ready. Configure the global OBAOL LinkedIn app credentials first.'
-          : `${platform} app credentials are required before connect.`,
+          : platform === 'reddit'
+            ? 'Reddit one-click connect is not ready. Configure the global OBAOL Reddit app credentials first.'
+            : `${platform} app credentials are required before connect.`,
         statusCode: 400,
         details: {
           platform,
