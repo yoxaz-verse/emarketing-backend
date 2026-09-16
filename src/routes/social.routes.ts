@@ -10,6 +10,8 @@ import {
   listSocialConnectors,
   optimizeSocialPublishInput,
   retrySocialPublishJob,
+  rescheduleSocialPublishRequest,
+  SocialPublishConflictError,
   SocialTargetReadinessError,
   updateSocialPublishRequestJobs,
 } from '../services/social/social.service';
@@ -225,7 +227,7 @@ router.post('/publish-jobs', async (req, res) => {
   } catch (err: any) {
     console.error('[SOCIAL PUBLISH CREATE ERROR]', err?.message ?? err);
     if (err instanceof SocialTargetReadinessError) {
-      return res.status(err.status).json({ error: err.message, code: err.code, details: err.details });
+      return res.status(err.status).json({ error: err.message, code: err.code, ...('details' in err ? { details: err.details } : {}) });
     }
     res.status(400).json({ error: err?.message ?? 'Failed to create social publish jobs' });
   }
@@ -292,10 +294,34 @@ router.patch('/publish-requests/:id', async (req, res) => {
     res.json(data);
   } catch (err: any) {
     console.error('[SOCIAL PUBLISH UPDATE ERROR]', err?.message ?? err);
-    if (err instanceof SocialTargetReadinessError) {
-      return res.status(err.status).json({ error: err.message, code: err.code, details: err.details });
+    if (err instanceof SocialTargetReadinessError || err instanceof SocialPublishConflictError) {
+      return res.status(err.status).json({ error: err.message, code: err.code, ...('details' in err ? { details: err.details } : {}) });
     }
     res.status(400).json({ error: err?.message ?? 'Failed to update social publish jobs' });
+  }
+});
+
+router.post('/publish-requests/:id/reschedule', async (req, res) => {
+  try {
+    const operatorId = resolveOperatorId(req);
+    const data = await rescheduleSocialPublishRequest({
+      requestId: req.params.id,
+      input: {
+        idempotency_key: req.body?.idempotency_key,
+        targets: req.body?.targets,
+        post_input: req.body?.post_input,
+      },
+      userId: req.auth?.user_id,
+      operatorId,
+      role: req.auth?.role,
+    });
+    res.json(data);
+  } catch (err: any) {
+    console.error('[SOCIAL PUBLISH RESCHEDULE ERROR]', err?.message ?? err);
+    if (err instanceof SocialTargetReadinessError || err instanceof SocialPublishConflictError) {
+      return res.status(err.status).json({ error: err.message, code: err.code, ...('details' in err ? { details: err.details } : {}) });
+    }
+    res.status(400).json({ error: err?.message ?? 'Reschedule failed' });
   }
 });
 

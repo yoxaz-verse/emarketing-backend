@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { supabase } from '../../supabase';
-import { processDueSocialPublishJobs, retrySocialPublishJob } from './social.service';
+import { processDueSocialPublishJobs, rescheduleSocialPublishRequest, retrySocialPublishJob } from './social.service';
 
 function query(result: () => unknown) {
   const q: any = {};
@@ -61,4 +61,35 @@ test('retry uses an atomic failed-status claim to prevent duplicate publication'
 
   await assert.rejects(retrySocialPublishJob(failed.id), /already being retried/i);
   assert.equal(jobCalls, 2);
+});
+
+test('reschedule rejects an already published channel before creating new jobs', async (t) => {
+  t.mock.method(supabase, 'from', (table: string) => {
+    if (table === 'social_publish_requests') {
+      return query(() => ({ data: { id: 'request-1', operator_id: 'operator-1' }, error: null }));
+    }
+    assert.equal(table, 'social_publish_jobs');
+    return query(() => ({
+      data: [{ id: 'job-1', platform_code: 'linkedin', status: 'published' }],
+      error: null,
+    }));
+  });
+
+  await assert.rejects(
+    rescheduleSocialPublishRequest({
+      requestId: 'request-1',
+      input: {
+        idempotency_key: 'reschedule-1',
+        targets: ['linkedin'],
+        post_input: {
+          content: 'Already published', media: [], hashtags: [], timezone: 'Asia/Kolkata',
+          scheduled_at: new Date(Date.now() + 60_000).toISOString(),
+        },
+      },
+      userId: 'user-1',
+      operatorId: 'operator-1',
+      role: 'admin',
+    }),
+    (error: any) => error.status === 409 && error.code === 'SOCIAL_PUBLISHED_TARGET_IMMUTABLE',
+  );
 });

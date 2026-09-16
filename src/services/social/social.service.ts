@@ -50,6 +50,17 @@ export class SocialTargetReadinessError extends Error {
   }
 }
 
+export class SocialPublishConflictError extends Error {
+  code: string;
+  status = 409;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = 'SocialPublishConflictError';
+    this.code = code;
+  }
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -825,7 +836,9 @@ export async function updateSocialPublishRequestJobs(params: {
 
   const jobs = existingJobs ?? [];
   const locked = jobs.filter((job: any) => !canEditJobStatus(job.status));
-  if (locked.length > 0) throw new Error('Published jobs cannot be edited');
+  if (locked.length > 0) {
+    throw new SocialPublishConflictError('SOCIAL_PUBLISHED_IMMUTABLE', 'Published jobs cannot be edited. Reschedule only the unpublished channels.');
+  }
 
   const operatorId = params.operatorId ?? request.operator_id ?? null;
   const connectorMap = await assertSocialTargetsReady(targets, params.userId, operatorId);
@@ -889,6 +902,66 @@ export async function updateSocialPublishRequestJobs(params: {
     request_id: params.requestId,
     jobs: out,
   };
+}
+
+export async function rescheduleSocialPublishRequest(params: {
+  requestId: string;
+  input: CreateSocialPublishRequestInput;
+  userId?: string | null;
+  operatorId?: string | null;
+  role?: string | null;
+}) {
+  const targets = Array.from(new Set((params.input.targets ?? []).map((target) => String(target).trim().toLowerCase()).filter(Boolean))) as SocialPlatformCode[];
+  if (targets.length === 0) throw new Error('Select at least one unpublished channel to reschedule.');
+  if (!String(params.input.idempotency_key ?? '').trim()) throw new Error('idempotency_key is required for rescheduling');
+  if (!isFutureSchedule(params.input.post_input)) throw new Error('Rescheduled posts must use a future scheduled_at value.');
+
+  const role = String(params.role ?? '').toLowerCase();
+  const isAdmin = role === 'admin' || role === 'superadmin';
+  if (isAdmin && !params.operatorId) throw new Error('operator_id is required for admin rescheduling');
+
+  let requestQuery = supabase.from('social_publish_requests').select('*').eq('id', params.requestId);
+  if (isAdmin) requestQuery = requestQuery.eq('operator_id', params.operatorId!);
+  else requestQuery = requestQuery.eq('created_by', params.userId ?? '');
+  const { data: sourceRequest, error: requestError } = await requestQuery.maybeSingle();
+  if (requestError && requestError.code !== 'PGRST116') throw requestError;
+  if (!sourceRequest) throw new Error('Social publish request not found');
+
+  const { data: sourceJobs, error: jobsError } = await supabase
+    .from('social_publish_jobs')
+    .select('id,platform_code,status,scheduled_at')
+    .eq('request_id', params.requestId);
+  if (jobsError) throw jobsError;
+
+  const jobsByPlatform = new Map<string, any>((sourceJobs ?? []).map((job: any) => [String(job.platform_code), job]));
+  const unknownTargets = targets.filter((target) => !jobsByPlatform.has(target));
+  if (unknownTargets.length > 0) throw new Error(`Only channels from the original schedule can be rescheduled: ${unknownTargets.join(', ')}.`);
+  const publishedTargets = targets.filter((target) => jobsByPlatform.get(target)?.status === 'published');
+  if (publishedTargets.length > 0) {
+    throw new SocialPublishConflictError(
+      'SOCIAL_PUBLISHED_TARGET_IMMUTABLE',
+      `Already published channels cannot be rescheduled: ${publishedTargets.map(platformLabel).join(', ')}.`,
+    );
+  }
+  const now = Date.now();
+  const unavailableTargets = targets.filter((target) => {
+    const job = jobsByPlatform.get(target);
+    if (job?.status === 'failed' || job?.status === 'manual_action_required') return false;
+    const scheduledAt = new Date(String(job?.scheduled_at ?? '')).getTime();
+    return Number.isFinite(scheduledAt) && scheduledAt > now;
+  });
+  if (unavailableTargets.length > 0) {
+    throw new SocialPublishConflictError(
+      'SOCIAL_RESCHEDULE_NOT_AVAILABLE',
+      `Future scheduled channels should be edited instead of rescheduled: ${unavailableTargets.map(platformLabel).join(', ')}.`,
+    );
+  }
+
+  const operatorId = params.operatorId ?? sourceRequest.operator_id ?? null;
+  return createSocialPublishJobs({
+    ...params.input,
+    targets,
+  }, params.userId, operatorId);
 }
 
 export async function processDueSocialPublishJobs(limit = 25) {
