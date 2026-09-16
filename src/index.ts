@@ -593,7 +593,7 @@ async function checkSocialAppsSchemaReadiness() {
         table,
         code,
         message,
-        fix: 'Apply social app OAuth schema migration 20260618_fix_social_app_oauth_schema.sql and restart backend.',
+        fix: 'Follow Backend/sql/README.md to apply the current social schema migrations, then restart backend.',
       });
       return;
     }

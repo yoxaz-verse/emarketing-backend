@@ -15,7 +15,12 @@ drop trigger if exists communication_reject_deleted_campaign on communication_it
 create trigger communication_reject_deleted_campaign before insert or update on communication_items
 for each row execute function communication_reject_deleted_campaign();
 
-alter function communication_append(jsonb,jsonb,jsonb,boolean) rename to communication_append_unchecked;
+do $$
+begin
+  if to_regprocedure('public.communication_append_unchecked(jsonb,jsonb,jsonb,boolean)') is null then
+    alter function communication_append(jsonb,jsonb,jsonb,boolean) rename to communication_append_unchecked;
+  end if;
+end $$;
 create function communication_append(p_item jsonb,p_conversation jsonb,p_message jsonb,p_historical boolean)
 returns void language plpgsql security definer set search_path=public as $$
 begin

@@ -311,7 +311,7 @@ test('parseHtmlEventItems handles ITPO, CEPCI, and IPGA parser keys', async () =
 });
 
 test('predefined agri source migration is idempotent and unique by source_url', () => {
-  const sql = readFileSync('sql/20260713_add_predefined_agri_event_sources.sql', 'utf8');
+  const sql = readFileSync('sql/archive/20260713_add_predefined_agri_event_sources.sql', 'utf8');
   const urls = Array.from(sql.matchAll(/'https:\/\/[^']+'/g)).map((match) => match[0]);
 
   assert.match(sql, /ADD COLUMN IF NOT EXISTS parser_key/);
@@ -322,7 +322,7 @@ test('predefined agri source migration is idempotent and unique by source_url', 
 });
 
 test('expanded event source migration includes startup, AI, and AgriTech sources', () => {
-  const sql = readFileSync('sql/20260715_expand_event_intelligence_sources.sql', 'utf8');
+  const sql = readFileSync('sql/archive/20260715_expand_event_intelligence_sources.sql', 'utf8');
   const urls = Array.from(sql.matchAll(/'https:\/\/[^']+'/g)).map((match) => match[0]);
   const requiredParserKeys = [
     'startup_india_challenges',
@@ -342,7 +342,7 @@ test('expanded event source migration includes startup, AI, and AgriTech sources
 });
 
 test('events integration migration creates operational tables and expanded source health', () => {
-  const sql = readFileSync('sql/20260906_harden_events_intelligence_integration.sql', 'utf8');
+  const sql = readFileSync('sql/archive/20260906_harden_events_intelligence_integration.sql', 'utf8');
   const sourcePack = sql.slice(sql.indexOf('from (\n  values'));
   const urls = Array.from(sourcePack.matchAll(/'https:\/\/[^']+'/g)).map((match) => match[0]);
 

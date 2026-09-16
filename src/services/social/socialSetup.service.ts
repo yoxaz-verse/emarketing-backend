@@ -402,7 +402,7 @@ export async function preflightSocialSetupConnect(params: {
       : code === 'AUTH_SERVICE_UNAVAILABLE'
         ? 'Supabase is unreachable right now. Check backend network/Supabase availability, then retry.'
         : code === 'SOCIAL_OAUTH_SCHEMA_MISSING'
-          ? 'Social OAuth schema is not ready. Apply Backend/sql/20260618_fix_social_app_oauth_schema.sql and restart backend.'
+          ? 'Social OAuth schema is not ready. Follow Backend/sql/README.md, apply the current migrations, and restart backend.'
           : formatted.message || 'Social account one-click preflight failed.';
 
     return preflightFailure({

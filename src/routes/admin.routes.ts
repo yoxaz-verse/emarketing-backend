@@ -381,7 +381,7 @@ function isSocialAppSchemaMismatch(error: any): boolean {
 }
 
 const SOCIAL_APP_SCHEMA_ERROR =
-  'Social app OAuth schema is not ready. Apply Backend/sql/20260618_fix_social_app_oauth_schema.sql and restart backend.';
+  'Social app OAuth schema is not ready. Follow Backend/sql/README.md, apply the current migrations, and restart backend.';
 
 async function getExistingSocialAppSecretEncrypted(platform: SocialPlatform, operatorId: string, isGlobalScope: boolean): Promise<string> {
   const query = isGlobalScope

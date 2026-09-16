@@ -21,7 +21,7 @@ try {
     insert into email_logs values ('historical-email','original',now()-interval '2 days');
     insert into reply_ingest_events values ('historical-reply','reply',now()-interval '1 day');
   `);
-  const migration = await readFile(new URL('../sql/20260906_unified_communications.sql', import.meta.url), 'utf8');
+  const migration = await readFile(new URL('../sql/current/20260906_unified_communications.sql', import.meta.url), 'utf8');
   await db.exec(migration);
   await db.exec(migration); // Safe to resume installation before the backfill completes.
   assert.equal((await db.query('select count(*)::int n from communication_queue')).rows[0].n, 2);

@@ -362,7 +362,7 @@ test('LinkedIn one-click preflight reports missing provider config', async (t) =
 });
 
 test('social OAuth schema migration is idempotent and creates required tables', () => {
-  const sql = readFileSync('sql/20260618_fix_social_app_oauth_schema.sql', 'utf8');
+  const sql = readFileSync('sql/archive/20260618_fix_social_app_oauth_schema.sql', 'utf8');
 
   assert.match(sql, /CREATE TABLE IF NOT EXISTS public\.social_operator_oauth_apps/i);
   assert.match(sql, /CREATE TABLE IF NOT EXISTS public\.social_oauth_states/i);
@@ -380,9 +380,12 @@ test('social OAuth schema migration is idempotent and creates required tables', 
   assert.match(sql, /social_oauth_connections_status_check/i);
 });
 
-test('Meta channel split migration adds OAuth routing state and reloads PostgREST schema', () => {
-  const sql = readFileSync('sql/20260915_split_meta_channels.sql', 'utf8');
+test('social connector alignment migration updates constraints, routing state, and PostgREST schema', () => {
+  const sql = readFileSync('sql/current/20260916_align_social_connector_schema.sql', 'utf8');
 
+  assert.match(sql, /DROP CONSTRAINT IF EXISTS social_connectors_code_check/i);
+  assert.match(sql, /ADD CONSTRAINT social_connectors_code_check/i);
+  assert.match(sql, /'meta'[\s\S]*'facebook'[\s\S]*'instagram'[\s\S]*'linkedin'[\s\S]*'reddit'[\s\S]*'telegram'[\s\S]*'whatsapp'/i);
   assert.match(sql, /ADD COLUMN IF NOT EXISTS requested_platform text/i);
   assert.match(sql, /'facebook',\s*'Facebook'/i);
   assert.match(sql, /'instagram',\s*'Instagram'/i);
