@@ -240,7 +240,7 @@ app.get('/ping/auth-readiness', async (_req, res) => {
 
 async function handlePublicSocialOAuthCallback(req: any, res: any, platformInput?: string) {
   const platform = String(platformInput ?? req.params?.platform ?? req.query?.platform ?? 'linkedin');
-  let callbackContext: { operatorId?: string | null } | null = null;
+  let callbackContext: { operatorId?: string | null; requestedPlatform?: string | null } | null = null;
   const providerError =
     String(req.query?.error_message ?? '').trim() ||
     String(req.query?.error_description ?? '').trim() ||
@@ -266,14 +266,15 @@ async function handlePublicSocialOAuthCallback(req: any, res: any, platformInput
       code: String(req.query?.code ?? ''),
       state: String(req.query?.state ?? ''),
     });
-    callbackContext = { operatorId: result.context.operatorId };
+    callbackContext = { operatorId: result.context.operatorId, requestedPlatform: result.context.requestedPlatform };
 
-    res.redirect(socialOAuthSuccessUrl(platform, process.env, callbackContext));
+    res.redirect(socialOAuthSuccessUrl(result.context.requestedPlatform || platform, process.env, callbackContext));
   } catch (err: any) {
     const message = err?.message ?? 'connect_failed';
     const operatorId = String(err?.socialOAuthContext?.operatorId ?? callbackContext?.operatorId ?? '').trim();
+    const requestedPlatform = String(err?.socialOAuthContext?.requestedPlatform ?? callbackContext?.requestedPlatform ?? platform).trim();
     console.error('[SOCIAL CONNECT PUBLIC CALLBACK ERROR]', message);
-    res.redirect(socialOAuthErrorUrl(message, process.env, classifySocialOAuthError(message), { operatorId }));
+    res.redirect(socialOAuthErrorUrl(message, process.env, classifySocialOAuthError(message), { operatorId, platform: requestedPlatform }));
   }
 }
 

@@ -13,6 +13,7 @@ export type SocialOAuthErrorCode =
 
 export type SocialOAuthRedirectContext = {
   operatorId?: string | null;
+  platform?: string | null;
 };
 
 function normalizeBaseUrl(value: string): string {
@@ -148,6 +149,7 @@ export function socialOAuthErrorUrl(
   return appendRedirectParams(socialOAuthRedirectBase(env), {
     social_connect_error: message,
     social_connect_error_code: errorCode,
+    social_connect_platform: context?.platform,
     operator_id: context?.operatorId,
   });
 }

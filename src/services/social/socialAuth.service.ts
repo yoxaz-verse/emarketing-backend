@@ -23,7 +23,7 @@ import {
   type OAuthAppConfig,
 } from './platformAuth.client';
 import { socialOAuthSuccessUrl } from './oauthRedirect';
-import { isMetaChannel, metaChannelStatus } from './metaChannels';
+import { isMetaChannel, mergeMetaConnectionMetadata, metaChannelStatus } from './metaChannels';
 
 const STATE_TTL_MINUTES = 15;
 
@@ -514,8 +514,20 @@ export async function handlePlatformCallback(params: {
         fetchMetaGrantedScopes(token.access_token),
       ]);
       const pages = Array.isArray((publishingAccounts as any)?.data) ? (publishingAccounts as any).data : [];
-      const selectedPage = pages.find((page: any) => String(page?.id ?? '').trim()) ?? null;
-      const selectedInstagram = selectedPage?.instagram_business_account ?? null;
+      const existing = await getOperatorPlatformConnection('meta', context.userId, context.operatorId);
+      const encryptedPages = pages.map((page: any) => ({
+        id: page.id,
+        name: page.name ?? null,
+        instagram_business_account: page.instagram_business_account ?? null,
+        access_token_encrypted: page.access_token ? encryptSocialSecret(String(page.access_token)) : null,
+      }));
+      const metadata = mergeMetaConnectionMetadata({
+        previous: existing?.metadata ?? null,
+        pages: encryptedPages,
+        requestedPlatform: context.requestedPlatform,
+        profile,
+        discoveryError: (publishingAccounts as any)?.discovery_error ?? null,
+      });
 
       const connection = await upsertConnection({
         platform: normalized,
@@ -524,21 +536,7 @@ export async function handlePlatformCallback(params: {
         accessToken: token.access_token,
         expiresInSeconds: token.expires_in,
         scopes: grantedScopes,
-        metadata: {
-          profile,
-          pages: pages.map((page: any) => ({
-            id: page.id,
-            name: page.name ?? null,
-            instagram_business_account: page.instagram_business_account ?? null,
-            access_token_encrypted: page.access_token ? encryptSocialSecret(String(page.access_token)) : null,
-          })),
-          selected_page_id: selectedPage?.id ?? null,
-          selected_page_name: selectedPage?.name ?? null,
-          selected_instagram_account_id: selectedInstagram?.id ?? null,
-          selected_instagram_username: selectedInstagram?.username ?? selectedInstagram?.name ?? null,
-          selected_page_access_token_encrypted: selectedPage?.access_token ? encryptSocialSecret(String(selectedPage.access_token)) : null,
-          account_discovery_error: (publishingAccounts as any)?.discovery_error ?? null,
-        },
+        metadata,
       });
       console.info('[SOCIAL_OAUTH_CALLBACK_CONNECTED]', {
         platform: normalized,

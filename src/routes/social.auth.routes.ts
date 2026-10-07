@@ -41,8 +41,9 @@ async function handleCallback(req: any, res: any, platformInput?: string) {
   } catch (err: any) {
     const message = err?.message ?? 'connect_failed';
     const operatorId = String(err?.socialOAuthContext?.operatorId ?? '').trim();
+    const requestedPlatform = String(err?.socialOAuthContext?.requestedPlatform ?? platformInput ?? req.params?.platform ?? req.query?.platform ?? '').trim();
     console.error('[SOCIAL CONNECT CALLBACK ERROR]', message);
-    res.redirect(socialOAuthErrorUrl(message, process.env, classifySocialOAuthError(message), { operatorId }));
+    res.redirect(socialOAuthErrorUrl(message, process.env, classifySocialOAuthError(message), { operatorId, platform: requestedPlatform }));
   }
 }
 

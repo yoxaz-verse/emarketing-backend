@@ -231,18 +231,46 @@ function credentialCheckMap(platform: SocialPlatform, row: any | null): Record<s
 function metaAccountSelection(connection: any | null, channel?: 'facebook' | 'instagram') {
   const metadata = connection?.metadata && typeof connection.metadata === 'object' ? connection.metadata : {};
   const pages = Array.isArray(metadata.pages) ? metadata.pages : [];
-  return {
-    pages: pages.map((page: any) => ({
+  const selectedPageId = String(channel === 'facebook' ? metadata.selected_facebook_page_id ?? '' : channel === 'instagram' ? metadata.selected_instagram_page_id ?? '' : metadata.selected_page_id ?? '');
+  const safePages = pages.map((page: any) => ({
       id: String(page?.id ?? ''),
       name: String(page?.name ?? ''),
       instagram_business_account: page?.instagram_business_account ?? null,
-    })).filter((page: any) => page.id),
-    selected_page_id: String(channel === 'facebook' ? metadata.selected_facebook_page_id ?? '' : channel === 'instagram' ? metadata.selected_instagram_page_id ?? '' : metadata.selected_page_id ?? ''),
-    selected_page_name: String(metadata.selected_page_name ?? ''),
+    })).filter((page: any) => page.id);
+  const selectedPage = safePages.find((page: any) => page.id === selectedPageId) ?? null;
+  return {
+    pages: safePages,
+    selected_page_id: selectedPageId,
+    selected_page_name: String(selectedPage?.name ?? ''),
     selected_instagram_account_id: String(channel === 'instagram' ? metadata.selected_instagram_channel_account_id ?? '' : metadata.selected_instagram_account_id ?? ''),
     selected_instagram_username: String(channel === 'instagram' ? metadata.selected_instagram_channel_username ?? '' : metadata.selected_instagram_username ?? ''),
     discovery_error: metadata.account_discovery_error ?? null,
   };
+}
+
+function connectedIdentity(platform: SocialPlatform, connection: any | null, accountSelection: ReturnType<typeof metaAccountSelection> | null) {
+  if (!connection) return null;
+  if (platform === 'facebook') {
+    return accountSelection?.selected_page_id ? {
+      id: accountSelection.selected_page_id,
+      display_name: accountSelection.selected_page_name || 'Facebook Page',
+      username: null,
+      kind: 'page',
+    } : null;
+  }
+  if (platform === 'instagram') {
+    return accountSelection?.selected_instagram_account_id ? {
+      id: accountSelection.selected_instagram_account_id,
+      display_name: accountSelection.selected_instagram_username ? `@${accountSelection.selected_instagram_username}` : 'Instagram professional account',
+      username: accountSelection.selected_instagram_username || null,
+      kind: 'professional_account',
+    } : null;
+  }
+  const metadata = connection.metadata && typeof connection.metadata === 'object' ? connection.metadata : {};
+  const profile = metadata.profile && typeof metadata.profile === 'object' ? metadata.profile : {};
+  const id = String(profile.id ?? metadata.actor_urn ?? metadata.bot_username ?? metadata.phone_number_id ?? '').trim();
+  const name = String(profile.name ?? profile.display_name ?? profile.username ?? metadata.bot_username ?? '').trim();
+  return id || name ? { id: id || null, display_name: name || platform, username: profile.username ?? null, kind: 'account' } : null;
 }
 
 function envCredentialRow(platform: SocialPlatform) {
@@ -546,7 +574,6 @@ export async function getSocialSetupStatus(userId?: string | null, operatorId?: 
       operatorRow: operatorCredentialByPlatform.get(credentialKey) ?? null,
       globalRow: globalCredentialByPlatform.get(credentialKey) ?? null,
     });
-    const credential = credentialSummary.row;
     const connection = connectionByPlatform.get(platform) ?? null;
     const connector = connectorByPlatform.get(platform) ?? null;
     const credentialConfigured = credentialSummary.configured;
@@ -554,6 +581,16 @@ export async function getSocialSetupStatus(userId?: string | null, operatorId?: 
     const authorizationSaved = connection !== null;
     const accountSelection = platform === 'facebook' || platform === 'instagram' ? metaAccountSelection(connection, platform) : null;
     const needsAccountSelection = (platform === 'facebook' || platform === 'instagram') && authorizationSaved && !connected && connection?.status === 'identity_required';
+    const connectionStatus = connection?.status ?? 'disconnected';
+    const uiState = connected
+      ? 'connected'
+      : needsAccountSelection
+        ? 'action_required'
+        : connectionStatus === 'expired' || connectionStatus === 'missing_scope'
+          ? 'reconnect'
+          : credentialConfigured
+            ? 'connect'
+            : 'unavailable';
 
     return {
       platform_code: platform,
@@ -562,14 +599,17 @@ export async function getSocialSetupStatus(userId?: string | null, operatorId?: 
       credential_missing_fields: credentialSummary.missing,
       credential_source: credentialSummary.source,
       one_click_available: credentialSummary.oneClickAvailable,
-      credential_fields: credentialSummary.fields,
-      connection_status: connection?.status ?? 'disconnected',
+      connection_status: connectionStatus,
       connection_reason: connection?.reason ?? null,
+      reconnect_reason: uiState === 'reconnect' ? connection?.reason ?? 'Authorization needs to be renewed.' : null,
       authorization_saved: authorizationSaved,
       connected,
       can_schedule: Boolean(connector?.can_schedule),
       can_publish: Boolean(connector?.can_publish),
       account_selection: accountSelection,
+      connected_identity: connectedIdentity(platform, connection, accountSelection),
+      selection_required: needsAccountSelection,
+      ui_state: uiState,
       setup_ready: credentialConfigured && connected && !needsAccountSelection,
       next_action: !credentialConfigured
         ? 'configure_credentials'

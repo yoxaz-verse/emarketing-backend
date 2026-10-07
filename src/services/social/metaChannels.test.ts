@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { metaChannelPublishingConnection, metaChannelStatus } from './metaChannels.js';
+import { mergeMetaConnectionMetadata, metaChannelPublishingConnection, metaChannelStatus } from './metaChannels.js';
 import { instagramMediaError } from './social.service.js';
 import { supabase } from '../../supabase.js';
 import { disconnectPlatform, getPendingOAuthStateContext } from './socialAuth.service.js';
@@ -34,6 +34,68 @@ test('Facebook and Instagram readiness use separate selected destinations', () =
   assert.equal(metaChannelStatus('instagram', { ...connection, scopes: ['pages_show_list', 'pages_manage_posts'] }).status, 'missing_scope');
   assert.equal(metaChannelStatus('facebook', { ...connection, scopes: ['pages_show_list', 'pages_manage_posts'] }).status, 'connected');
   assert.equal(metaChannelStatus('facebook', { ...connection, expires_at: new Date(Date.now() - 1000).toISOString() }).status, 'expired');
+});
+
+test('a sole eligible Instagram account is selected automatically', () => {
+  const metadata = mergeMetaConnectionMetadata({
+    requestedPlatform: 'instagram',
+    pages: [
+      { id: 'facebook-only', access_token_encrypted: 'token-1' },
+      { id: 'instagram-page', name: 'Brand', access_token_encrypted: 'token-2', instagram_business_account: { id: 'ig-1', username: 'brand' } },
+    ],
+  });
+  assert.equal(metadata.selected_instagram_page_id, 'instagram-page');
+  assert.equal(metadata.selected_instagram_channel_account_id, 'ig-1');
+  assert.equal(metadata.selected_instagram_channel_username, 'brand');
+});
+
+test('no eligible Instagram account remains unselected', () => {
+  const metadata = mergeMetaConnectionMetadata({
+    requestedPlatform: 'instagram',
+    pages: [{ id: 'facebook-only', access_token_encrypted: 'token-1' }],
+  });
+  assert.equal(metadata.selected_instagram_page_id, undefined);
+  assert.equal(metadata.selected_instagram_channel_account_id, undefined);
+});
+
+test('a transient account discovery error does not erase valid saved destinations', () => {
+  const metadata = mergeMetaConnectionMetadata({
+    requestedPlatform: 'instagram',
+    discoveryError: 'Meta unavailable',
+    previous: connection.metadata,
+    pages: [],
+  });
+  assert.equal(metadata.selected_facebook_page_id, 'facebook-page');
+  assert.equal(metadata.selected_instagram_page_id, 'instagram-page');
+});
+
+test('multiple Instagram accounts require selection and reconnect preserves valid sibling destinations', () => {
+  const metadata = mergeMetaConnectionMetadata({
+    requestedPlatform: 'instagram',
+    previous: { selected_facebook_page_id: 'facebook-page', selected_instagram_page_id: 'old-instagram', selected_instagram_channel_account_id: 'old-ig' },
+    pages: [
+      { id: 'facebook-page', access_token_encrypted: 'token-1' },
+      { id: 'instagram-one', access_token_encrypted: 'token-2', instagram_business_account: { id: 'ig-1' } },
+      { id: 'instagram-two', access_token_encrypted: 'token-3', instagram_business_account: { id: 'ig-2' } },
+    ],
+  });
+  assert.equal(metadata.selected_facebook_page_id, 'facebook-page');
+  assert.equal(metadata.selected_instagram_page_id, undefined);
+  assert.equal(metadata.selected_instagram_channel_account_id, undefined);
+});
+
+test('reconnecting one Meta channel retains both valid channel selections', () => {
+  const metadata = mergeMetaConnectionMetadata({
+    requestedPlatform: 'instagram',
+    previous: { selected_facebook_page_id: 'facebook-page', selected_instagram_page_id: 'instagram-page', selected_instagram_channel_account_id: 'ig-1' },
+    pages: [
+      { id: 'facebook-page', access_token_encrypted: 'token-1' },
+      { id: 'instagram-page', access_token_encrypted: 'token-2', instagram_business_account: { id: 'ig-1', username: 'brand' } },
+    ],
+  });
+  assert.equal(metadata.selected_facebook_page_id, 'facebook-page');
+  assert.equal(metadata.selected_instagram_page_id, 'instagram-page');
+  assert.equal(metadata.selected_instagram_channel_account_id, 'ig-1');
 });
 
 test('publishing projections cannot switch the legacy Meta destination', () => {

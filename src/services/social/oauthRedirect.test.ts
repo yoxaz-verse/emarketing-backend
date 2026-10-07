@@ -93,6 +93,14 @@ test('social OAuth error URL can preserve operator context with stable error cod
   );
 });
 
+test('social OAuth error URL preserves the platform needed to reopen the connector modal', () => {
+  const env = { SOCIAL_OAUTH_SUCCESS_REDIRECT: 'https://emarketing.obaol.com/dashboard/social-connectors' } as NodeJS.ProcessEnv;
+  assert.equal(
+    socialOAuthErrorUrl('Access denied', env, 'provider_permission_denied', { operatorId: 'operator-123', platform: 'instagram' }),
+    'https://emarketing.obaol.com/dashboard/social-connectors?social_connect_error=Access%20denied&social_connect_error_code=provider_permission_denied&social_connect_platform=instagram&operator_id=operator-123'
+  );
+});
+
 test('social OAuth classifier treats LinkedIn 403 access denied as provider permission failure', () => {
   assert.equal(
     classifySocialOAuthError('LinkedIn profile fetch failed (403): {"code":"ACCESS_DENIED","message":"Not enough permissions"}'),
