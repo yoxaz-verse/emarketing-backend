@@ -9,6 +9,7 @@ test('current production SQL runbook lists the executable migration order', () =
     'current/20260915_atomic_campaign_delete.sql',
     'current/20260917_verify_and_repair_production_schema.sql',
     'current/20261008_campaign_dynamic_fields.sql',
+    'current/20261009_reply_capture_rebuild.sql',
   ];
   let previous = -1;
   for (const path of expected) {
@@ -17,6 +18,16 @@ test('current production SQL runbook lists the executable migration order', () =
     previous = position;
     assert.doesNotThrow(() => readFileSync(`sql/${path}`, 'utf8'));
   }
+});
+
+test('reply capture rebuild is guarded and preserves old campaigns from resending', () => {
+  const sql = readFileSync('sql/current/20261009_reply_capture_rebuild.sql', 'utf8');
+  assert.match(sql, /create table if not exists public\.reply_capture_cursors/i);
+  assert.match(sql, /on conflict do nothing/i);
+  assert.match(sql, /if not found then/i);
+  assert.match(sql, /set status = 'completed', status_reason = 'reply_history_reset'/i);
+  assert.match(sql, /delete from public\.email_tracking_events where event_type = 'reply'/i);
+  assert.match(sql, /delete from public\.reply_ingest_events/i);
 });
 
 test('schema cleanup audit is read-only and current excludes confirmed-applied repairs', () => {

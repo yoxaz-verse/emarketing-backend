@@ -10,8 +10,9 @@ Run these files in Supabase SQL Editor in this order:
 2. `current/20260915_atomic_campaign_delete.sql`
 3. `current/20260917_verify_and_repair_production_schema.sql`
 4. `current/20261008_campaign_dynamic_fields.sql`
+5. `current/20261009_reply_capture_rebuild.sql`
 
-These four scripts are designed to be rerunnable and are the complete run-now list for the supplied production schema. The first two restore function/trigger contracts omitted from the schema export, the third adds the confirmed-missing `social_publish_requests.updated_at` column and verifies shared runtime dependencies, and the fourth adds campaign-scoped dynamic-field mappings.
+The first four scripts are rerunnable schema repairs. The fifth creates durable reply-capture cursors and performs one guarded reply-history reset; its destructive block executes only once for its reset key. Disable reply capture before applying it, deploy the matching backend, configure `REPLY_CAPTURE_IMAP_HOST=chocobo.mxrouting.net`, port `993`, TLS enabled, and then re-enable capture.
 
 Expected final results:
 
@@ -23,6 +24,7 @@ Expected final results:
 - Facebook and Instagram connector rows exist while the legacy Meta row is retained.
 - Scheduled requests have `updated_at`, and required functions and indexes pass the final audit.
 - Campaign dynamic-field mappings are stored with reviewed sequence signatures.
+- Reply capture resumes from a durable per-inbox UID cursor and rebuilds only the configured backfill window.
 
 ## Review before cleanup
 

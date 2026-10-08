@@ -133,9 +133,25 @@ export async function ingestInboundReply(input: InboundReplyPayload) {
 
   if (ingestInsertError) {
     if (String((ingestInsertError as any)?.code ?? '') === '23505') {
-      return { success: true, matched: Boolean(resolvedLeadId), lead_id: resolvedLeadId || undefined, deduped: true };
+      const { data: existing, error: existingError } = await supabase
+        .from('reply_ingest_events')
+        .select('processed_at,matched,lead_id')
+        .eq('dedupe_key', dedupeKey)
+        .maybeSingle();
+      if (existingError) throw existingError;
+      if ((existing as any)?.processed_at) {
+        return {
+          success: true,
+          matched: Boolean((existing as any)?.matched),
+          lead_id: String((existing as any)?.lead_id ?? '') || undefined,
+          deduped: true,
+        };
+      }
+      // A previous attempt inserted the durable inbox event but failed during
+      // projection. Resume the idempotent updates instead of losing the reply.
+    } else {
+      throw ingestInsertError;
     }
-    throw ingestInsertError;
   }
 
   const finalLeadId = resolvedLeadId;
@@ -152,7 +168,12 @@ export async function ingestInboundReply(input: InboundReplyPayload) {
         dedupe_key: dedupeKey,
       },
     });
-    return { success: true, matched: false, deduped: false, campaign_lead_id: campaignLeadId ?? undefined };
+    const { error: processedError } = await supabase
+      .from('reply_ingest_events')
+      .update({ processed_at: new Date().toISOString() })
+      .eq('dedupe_key', dedupeKey);
+    if (processedError) throw processedError;
+    return { success: true, matched: false, deduped: Boolean(ingestInsertError), campaign_lead_id: campaignLeadId ?? undefined };
   }
 
   // Mark lead replied and keep manual review queue.
@@ -246,7 +267,13 @@ export async function ingestInboundReply(input: InboundReplyPayload) {
     },
   });
 
-  return { success: true, matched: true, lead_id: finalLeadId, campaign_lead_id: campaignLeadId ?? undefined, deduped: false };
+  const { error: processedError } = await supabase
+    .from('reply_ingest_events')
+    .update({ processed_at: new Date().toISOString() })
+    .eq('dedupe_key', dedupeKey);
+  if (processedError) throw processedError;
+
+  return { success: true, matched: true, lead_id: finalLeadId, campaign_lead_id: campaignLeadId ?? undefined, deduped: Boolean(ingestInsertError) };
 }
 
 // Backward-compat wrapper for existing internal routes.
