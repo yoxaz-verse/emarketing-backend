@@ -1,7 +1,7 @@
+-- Archived 2026-10-08 after the production schema export confirmed the
+-- seven-code constraint, requested_platform, and Facebook/Instagram rows.
 begin;
 
--- Facebook and Instagram use separate scheduler targets while sharing the
--- existing Meta OAuth application and authorization row.
 alter table public.social_connectors
   drop constraint if exists social_connectors_code_check;
 
@@ -35,13 +35,10 @@ on conflict (code) do update set
   deep_link_url = excluded.deep_link_url,
   updated_at = now();
 
--- The notification is delivered when this transaction commits.
 notify pgrst, 'reload schema';
 
 commit;
 
--- Verification results should show one constraint, the requested_platform
--- column, all seven connectors, and the due-job index.
 select pg_get_constraintdef(oid) as social_connectors_code_check
 from pg_constraint
 where conrelid = 'public.social_connectors'::regclass

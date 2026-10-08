@@ -21,7 +21,7 @@ begin
     alter function communication_append(jsonb,jsonb,jsonb,boolean) rename to communication_append_unchecked;
   end if;
 end $$;
-create function communication_append(p_item jsonb,p_conversation jsonb,p_message jsonb,p_historical boolean)
+create or replace function communication_append(p_item jsonb,p_conversation jsonb,p_message jsonb,p_historical boolean)
 returns void language plpgsql security definer set search_path=public as $$
 begin
   if p_conversation->>'campaign_id' is not null and not exists
@@ -45,7 +45,11 @@ begin
   end if;
   d:=jsonb_build_object('campaigns',1);
   foreach t in array array['campaign_leads','campaign_inboxes','campaign_voice_agents','voice_calls'] loop
-    execute format('select count(*) from %I where campaign_id::text=$1',t) into n using p_campaign_id;
+    if to_regclass('public.' || t) is null then
+      n:=0;
+    else
+      execute format('select count(*) from %I where campaign_id::text=$1',t) into n using p_campaign_id;
+    end if;
     d:=d||jsonb_build_object(t,n);
   end loop;
   select count(*) into n from email_logs e where e.campaign_id::text=p_campaign_id
@@ -130,7 +134,9 @@ begin
   delete from email_logs where campaign_id::text=any(ids)
     or campaign_lead_id::text in (select id::text from campaign_leads where campaign_id::text=any(ids));
   delete from voice_calls where campaign_id::text=any(ids);
-  delete from campaign_voice_agents where campaign_id::text=any(ids);
+  if to_regclass('public.campaign_voice_agents') is not null then
+    execute 'delete from campaign_voice_agents where campaign_id::text=any($1)' using ids;
+  end if;
   delete from campaign_inboxes where campaign_id::text=any(ids);
   delete from campaign_leads where campaign_id::text=any(ids);
   delete from system_events where (entity_id::text=any(ids) and entity in ('campaign','campaigns'))

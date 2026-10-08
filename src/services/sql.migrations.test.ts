@@ -7,9 +7,8 @@ test('current production SQL runbook lists the executable migration order', () =
   const expected = [
     'current/20260906_unified_communications.sql',
     'current/20260915_atomic_campaign_delete.sql',
-    'current/20260915_repair_social_publish_job_outcomes.sql',
-    'current/20260916_align_social_connector_schema.sql',
     'current/20260917_verify_and_repair_production_schema.sql',
+    'current/20261008_campaign_dynamic_fields.sql',
   ];
   let previous = -1;
   for (const path of expected) {
@@ -18,6 +17,15 @@ test('current production SQL runbook lists the executable migration order', () =
     previous = position;
     assert.doesNotThrow(() => readFileSync(`sql/${path}`, 'utf8'));
   }
+});
+
+test('schema cleanup audit is read-only and current excludes confirmed-applied repairs', () => {
+  const readme = readFileSync('sql/README.md', 'utf8');
+  const audit = readFileSync('sql/review/20261008_schema_cleanup_audit.sql', 'utf8');
+  assert.doesNotMatch(audit, /^\s*(drop|alter|update|delete|truncate|insert)\b/im);
+  assert.doesNotMatch(readme, /current\/20260915_repair_social_publish_job_outcomes\.sql/);
+  assert.doesNotMatch(readme, /current\/20260916_align_social_connector_schema\.sql/);
+  assert.match(readme, /review\/20261008_schema_cleanup_audit\.sql/);
 });
 
 test('production schema repair is idempotent and audits every runtime dependency', () => {
@@ -37,5 +45,7 @@ test('campaign delete migration preserves its original append function on rerun'
   const sql = readFileSync('sql/current/20260915_atomic_campaign_delete.sql', 'utf8');
   assert.match(sql, /to_regprocedure\('public\.communication_append_unchecked\(jsonb,jsonb,jsonb,boolean\)'\) is null/i);
   assert.match(sql, /rename to communication_append_unchecked/i);
-  assert.match(sql, /create function communication_append\(p_item jsonb,p_conversation jsonb,p_message jsonb,p_historical boolean\)/i);
+  assert.match(sql, /create or replace function communication_append\(p_item jsonb,p_conversation jsonb,p_message jsonb,p_historical boolean\)/i);
+  assert.match(sql, /to_regclass\('public\.' \|\| t\) is null/i);
+  assert.match(sql, /to_regclass\('public\.campaign_voice_agents'\) is not null/i);
 });
