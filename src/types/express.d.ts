@@ -9,6 +9,7 @@ declare global {
         user_id?: string;
         operator_id?: string | null;
         access_flags?: Record<string, boolean>;
+        email?: string | null;
         api_key_id?: string;
       };
     }

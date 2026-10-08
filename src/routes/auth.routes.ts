@@ -69,7 +69,7 @@ router.post('/login', rateLimit({ name: 'login', windowMs: 15 * 60_000, max: 10 
     // 2️⃣ Load app-level user
     const { data: user, error: userError } = await supabase
       .from('users')
-      .select('id, role, operator_id, access_flags, active')
+      .select('id, role, operator_id, access_flags, email, active')
       .eq('auth_user_id', authUserId)
       .single();
 
@@ -99,6 +99,7 @@ router.post('/login', rateLimit({ name: 'login', windowMs: 15 * 60_000, max: 10 
         role: user.role,
         operator_id: user.operator_id,
         access_flags: normalizeModuleAccessFlags(user.access_flags, user.role),
+        email: user.email,
       },
     });
   } catch (err: any) {
@@ -178,28 +179,16 @@ export function assertAuth(
 
 router.get('/me', requireAuthLite(), async (req, res) => {
   assertAuth(req); // ✅ TS now knows req.auth exists
-
-  const userId = req.auth.user_id;
-  if (!userId) {
-    return res.status(401).json({ error: 'UNAUTHORIZED' });
-  }
-
-  const { data: user, error } = await supabase
-    .from('users')
-    .select('id, role, operator_id, access_flags, email, active')
-    .eq('id', userId)
-    .single();
-
-  if (error || !user || user.active !== true) {
+  if (!req.auth.user_id) {
     return res.status(401).json({ error: 'UNAUTHORIZED' });
   }
 
   return res.json({
-    id: user.id,
-    role: user.role,
-    operator_id: user.operator_id,
-    access_flags: normalizeModuleAccessFlags(user.access_flags, user.role),
-    email: user.email,
+    id: req.auth.user_id,
+    role: req.auth.role,
+    operator_id: req.auth.operator_id ?? null,
+    access_flags: req.auth.access_flags ?? {},
+    email: req.auth.email ?? null,
   });
 });
 

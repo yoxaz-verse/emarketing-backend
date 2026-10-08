@@ -5,6 +5,7 @@ import { verifyToken } from '../utils/jwt';
 import { Role, hasPermission } from '../auth/roles.js';
 import { normalizeModuleAccessFlags } from '../auth/moduleAccess';
 import { formatUnknownError, isConnectivityError, isSupabaseAuthConfigError } from '../utils/errorFormat';
+import { userAuthorizationCache } from '../auth/userAuthorizationCache';
 
 type JwtPayload = {
   user_id: string;
@@ -111,26 +112,9 @@ export function requireAuth(
           return res.status(401).json({ error: 'Invalid token' });
         }
       
-        const { data: dbUser, error } = await supabase
-          .from('users')
-          .select('id, role, operator_id, access_flags, active')
-          .eq('id', jwtUser.user_id)
-          .maybeSingle();
-      
-        if (error) {
-          const authFailure = authServiceFailureResponse(error);
-          if (authFailure) {
-            console.error('[AUTH_REJECT_SERVICE_ERROR]', {
-              tokenSource,
-              userId: jwtUser.user_id,
-              ...authMeta(req),
-              error: formatUnknownError(error),
-            });
-            return res.status(authFailure.status).json(authFailure.body);
-          }
-        }
+        const dbUser = await userAuthorizationCache.get(jwtUser.user_id);
 
-        if (error || !dbUser) {
+        if (!dbUser) {
           console.warn('[AUTH_REJECT] JWT user is not provisioned', { tokenSource, userId: jwtUser.user_id, ...authMeta(req) });
           return res.status(401).json({ error: 'User is not provisioned' });
         }
@@ -168,6 +152,7 @@ export function requireAuth(
           role: dbUser.role,
           operator_id: dbUser.operator_id ?? null,
           access_flags: normalizeModuleAccessFlags(dbUser.access_flags, dbUser.role),
+          email: dbUser.email ?? null,
         };
 
         console.info('[AUTH_ALLOW] JWT auth accepted', { tokenSource, userId: dbUser.id, role: dbUser.role, ...authMeta(req) });

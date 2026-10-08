@@ -3,6 +3,8 @@ import jwt from 'jsonwebtoken';
 import { Role } from '../auth/roles';
 import { JWT_SECRET } from '../utils/jwt';
 import { normalizeModuleAccessFlags } from '../auth/moduleAccess';
+import { userAuthorizationCache } from '../auth/userAuthorizationCache';
+import { formatUnknownError, isSupabaseAuthConfigError } from '../utils/errorFormat';
 
 type JwtPayload = {
   user_id: string;
@@ -47,23 +49,30 @@ export function requireAuthLite() {
       return;
     }
 
+    let payload: JwtPayload;
     try {
-      const payload = jwt.verify(
+      payload = jwt.verify(
         token,
         JWT_SECRET
       ) as JwtPayload;
+    } catch (err) {
+      console.log('[requireAuthLite] Token verification failed:', {
+        tokenSource,
+        message: err instanceof Error ? err.message : 'unknown',
+        ...authMeta(req),
+      });
+      res.status(401).json({ error: 'UNAUTHORIZED' });
+      return;
+    }
 
-      if (!payload.user_id || !payload.role) {
-        res.status(401).json({ error: 'UNAUTHORIZED' });
-        return;
-      }
+    if (!payload.user_id || !payload.role) {
+      res.status(401).json({ error: 'UNAUTHORIZED' });
+      return;
+    }
 
-      const { data: user, error } = await (await import('../supabase.js')).supabase
-        .from('users')
-        .select('id,role,operator_id,access_flags,active')
-        .eq('id', payload.user_id)
-        .maybeSingle();
-      if (error || !user || user.active !== true) {
+    try {
+      const user = await userAuthorizationCache.get(payload.user_id);
+      if (!user || user.active !== true) {
         res.status(401).json({ error: 'UNAUTHORIZED' });
         return;
       }
@@ -75,16 +84,22 @@ export function requireAuthLite() {
         user_id: user.id,
         operator_id: user.operator_id ?? null,
         access_flags: normalizeModuleAccessFlags(user.access_flags, user.role),
+        email: user.email ?? null,
       };
 
       next();
     } catch (err) {
-      console.log('[requireAuthLite] Token verification failed:', {
+      console.error('[requireAuthLite] User authorization lookup failed:', {
         tokenSource,
-        message: err instanceof Error ? err.message : 'unknown',
+        userId: payload.user_id,
+        error: formatUnknownError(err),
         ...authMeta(req),
       });
-      res.status(401).json({ error: 'UNAUTHORIZED' });
+      const misconfigured = isSupabaseAuthConfigError(err);
+      res.status(503).json({
+        error: misconfigured ? 'Authentication service is misconfigured' : 'Authentication service unavailable',
+        code: misconfigured ? 'AUTH_SERVICE_MISCONFIGURED' : 'AUTH_SERVICE_UNAVAILABLE',
+      });
     }
   };
 }
