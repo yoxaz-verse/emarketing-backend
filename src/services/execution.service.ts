@@ -32,6 +32,11 @@ import {
 } from './campaign.domain';
 import { CAMPAIGN_UNSUBSCRIBE_REASON, isLeadSuppressed } from './leadSuppression';
 import { canPassPreSendEligibility } from './sending/preSendGate.service';
+import {
+  loadCampaignMergeMappings,
+  renderMergeTemplate,
+  resolveMappingValues,
+} from './campaignPersonalization.service';
 
 const RUNNER_WINDOW_TIMEZONE = 'Asia/Kolkata';
 const RUNNER_WINDOW_START_HOUR = 9;
@@ -2034,6 +2039,19 @@ export async function sendCampaignEmail(campaignLeadId: string) {
       leads:lead_id (
         id,
         email,
+        first_name,
+        last_name,
+        company,
+        job_title,
+        country,
+        phone,
+        linkedin_url,
+        website,
+        company_description,
+        industry,
+        employee_size,
+        source,
+        notes,
         email_eligibility,
         is_suppressed,
         suppression_reason
@@ -2208,7 +2226,23 @@ export async function sendCampaignEmail(campaignLeadId: string) {
     throw new Error('Sequence step not found');
   }
 
-  const bodyRaw = String(step.body ?? '');
+  const hasDynamicFields = String(step.subject ?? '').includes('{{') || String(step.body ?? '').includes('{{');
+  const mergeMappings = hasDynamicFields ? await loadCampaignMergeMappings(campaignId) : [];
+  const mergeValues = resolveMappingValues(mergeMappings, (campaignLead as any)?.leads ?? {});
+  if (mergeValues.missing.length > 0) {
+    await requeueCampaignLeadForSkip({
+      campaignLeadId,
+      nextStatus: 'paused',
+      statusReason: 'missing_dynamic_field',
+    });
+    return {
+      skipped: true,
+      reason: 'missing_dynamic_field',
+      missing: mergeValues.missing,
+    };
+  }
+  const subjectRaw = renderMergeTemplate(step.subject ?? '', mergeValues.values);
+  const bodyRaw = renderMergeTemplate(step.body ?? '', mergeValues.values);
   const bodyLower = bodyRaw.toLowerCase();
   const blockedMarker = FORBIDDEN_SIGNOFF_MARKERS.find((marker) => bodyLower.includes(marker));
   const personalSignoffWarning = blockedMarker && !bodyLower.includes('obaol team')
@@ -2230,7 +2264,7 @@ export async function sendCampaignEmail(campaignLeadId: string) {
     recipientEmail,
     firstTouch: isFirstTouch,
     senderDisplayName: campaignSenderDisplayName || FIXED_CAMPAIGN_SENDER_NAME,
-    subject: String(step.subject ?? ''),
+    subject: subjectRaw,
     body: bodyRaw,
     providerSafeAuth: authSnapshot,
   });

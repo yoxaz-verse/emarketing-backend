@@ -1,5 +1,6 @@
 import { supabase } from "../supabase";
 import { isLeadSuppressed } from './leadSuppression';
+import { prepareCampaignPersonalization } from './campaignPersonalization.service';
 type AuthContext = {
   role?: string | null;
   operator_id?: string | null;
@@ -59,6 +60,7 @@ const PROTECTED_STARTUP_REQUEUE_REASONS = new Set([
   'user_unsubscribed_campaign',
   'sequence_delay_not_elapsed',
   'temporary_pause_undelivered_1h',
+  'missing_dynamic_field',
 ]);
 
 export function isStartupRequeueableCampaignLead(input: {
@@ -528,7 +530,8 @@ export async function startCampaign(campaignId: string, _auth?: AuthContext) {
     throw createHttpError('Campaign not found', 404);
   }
 
-  // 2️⃣ Idempotency guard
+  // Preserve idempotent recovery for an already-running campaign. Mapping
+  // changes are forbidden while running, so launch validation cannot become stale here.
   if (campaign.status === 'running') {
     await requeueStartupCampaignLeads(campaignId);
     return;
@@ -557,6 +560,8 @@ export async function startCampaign(campaignId: string, _auth?: AuthContext) {
   if (!campaignLeadCount || campaignLeadCount === 0) {
     throw createHttpError('Cannot start campaign without attached campaign leads', 409);
   }
+
+  await prepareCampaignPersonalization(campaignId);
 
   // 3️⃣ Transition campaign to running
   const { error: startUpdateError } = await supabase

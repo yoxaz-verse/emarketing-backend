@@ -8,6 +8,7 @@ import { handleLeadsBeforeWrite } from './leadLifeCycle';
 import { handleSmtpAccountBeforeWrite } from './smtpAccountsLifeCycle';
 import { handleUserBeforeWrite } from './userLifeCycle';
 import { handleVoiceAgentsBeforeWrite } from './voiceAgentLifeCycle';
+import { extractSequencePlaceholders } from '../campaignPersonalization.service';
 
 export async function runBeforeWrite(
   table: AllowedTable,
@@ -40,6 +41,19 @@ export async function runBeforeWrite(
   }
   if (table === 'campaign_leads') {
     return handleCampaignLeadsBeforeWrite(payload, mode);
+  }
+  if (table === 'sequence_steps') {
+    try {
+      extractSequencePlaceholders([{
+        subject: payload.subject,
+        body: payload.body,
+        step_number: payload.step_number,
+      }]);
+    } catch (error) {
+      const invalidTemplate = new Error(error instanceof Error ? error.message : 'Invalid dynamic field syntax.') as Error & { statusCode?: number };
+      invalidTemplate.statusCode = 400;
+      throw invalidTemplate;
+    }
   }
 
   return payload;

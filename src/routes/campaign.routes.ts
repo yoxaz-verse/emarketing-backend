@@ -14,6 +14,10 @@ import { getCampaignDeletePreview } from '../services/campaignDelete.service';
 import { getCampaignRepliesFeed, getCampaignReplyOpenAnalytics } from '../services/emailTracking.service.js';
 import { getSendingLimitsConfig } from '../services/sendingLimitsConfig.service';
 import { normalizePagination } from '../utils/pagination';
+import {
+  getCampaignPersonalizationState,
+  saveCampaignMergeMappings,
+} from '../services/campaignPersonalization.service';
 
 const router = Router();
 router.use(requireAuth('viewer'));
@@ -78,6 +82,14 @@ function createHttpError(message: string, statusCode: number) {
   const error = new Error(message) as Error & { statusCode?: number };
   error.statusCode = statusCode;
   return error;
+}
+
+function personalizationErrorBody(err: any, fallback: string) {
+  return {
+    error: err?.message ?? fallback,
+    ...(err?.code ? { code: err.code } : {}),
+    ...(err?.details ? { details: err.details } : {}),
+  };
 }
 
 router.get('/:id/delete-preview', async (req, res) => {
@@ -338,6 +350,7 @@ router.get('/:id/workspace', async (req, res) => {
     const firstError = [operatorResult, inboxResult, campaignInboxesResult, sequenceResult, stepsResult, foldersResult]
       .find((result: any) => result?.error)?.error;
     if (firstError) throw firstError;
+    const personalization = await getCampaignPersonalizationState(campaignId, stepsResult.data ?? []);
 
     const inboxes = inboxResult.data ?? [];
     const inboxIds = inboxes.map((row: any) => String(row.id)).filter(Boolean);
@@ -379,6 +392,7 @@ router.get('/:id/workspace', async (req, res) => {
         warning: senderWarningForName(senderDisplayName),
         schema_ready: true,
       },
+      personalization,
       mutation_health: { ok: true, routeContractVersion: 'campaign-mutations-v1' },
     });
   } catch (err: any) {
@@ -604,6 +618,17 @@ router.patch('/:id/sender-settings', async (req, res) => {
     });
   } catch (err: any) {
     return res.status(resolveStatusCode(err)).json({ error: err?.message ?? 'Failed to update sender settings' });
+  }
+});
+
+router.put('/:id/dynamic-fields', async (req, res) => {
+  try {
+    const campaignId = String(req.params.id ?? '');
+    await assertCampaignAccess(req, campaignId);
+    const state = await saveCampaignMergeMappings(campaignId, req.body?.mappings);
+    return res.json({ success: true, ...state });
+  } catch (err: any) {
+    return res.status(resolveStatusCode(err)).json(personalizationErrorBody(err, 'Failed to save dynamic field mappings'));
   }
 });
 
@@ -982,7 +1007,7 @@ router.post('/:id/start', async (req, res) => {
       statusCode,
       message: err?.message ?? 'Failed to start campaign',
     });
-    res.status(statusCode).json({ error: err.message ?? 'Failed to start campaign' });
+    res.status(statusCode).json(personalizationErrorBody(err, 'Failed to start campaign'));
   }
 });
 

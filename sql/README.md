@@ -11,8 +11,9 @@ Run these files in Supabase SQL Editor in this order:
 3. `current/20260915_repair_social_publish_job_outcomes.sql`
 4. `current/20260916_align_social_connector_schema.sql`
 5. `current/20260917_verify_and_repair_production_schema.sql`
+6. `current/20261008_campaign_dynamic_fields.sql`
 
-All five scripts are designed to be rerunnable. The fourth script replaces the failed `20260915_split_meta_channels.sql`; do not run the archived version again. The fifth repairs objects omitted from table-only schema exports and finishes with an audit query. Its missing-object result must contain zero rows.
+All six scripts are designed to be rerunnable. The fourth script replaces the failed `20260915_split_meta_channels.sql`; do not run the archived version again. The fifth repairs objects omitted from table-only schema exports and finishes with an audit query. Its missing-object result must contain zero rows. The sixth adds campaign-scoped dynamic-field mappings.
 
 Expected final results:
 
@@ -23,6 +24,7 @@ Expected final results:
 - `social_oauth_states.requested_platform` exists and PostgREST reloads its schema cache.
 - Facebook and Instagram connector rows exist while the legacy Meta row is retained.
 - Scheduled requests have `updated_at`, and required functions and indexes pass the final audit.
+- Campaign dynamic-field mappings are stored with reviewed sequence signatures.
 
 ## Archived migrations
 

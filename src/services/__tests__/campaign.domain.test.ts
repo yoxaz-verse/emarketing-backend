@@ -92,6 +92,15 @@ test('startup requeue restores retired deliverability pauses but protects unsubs
     }),
     false
   );
+  assert.equal(
+    isStartupRequeueableCampaignLead({
+      status: 'paused',
+      status_reason: 'missing_dynamic_field',
+      last_sent_at: null,
+      current_step: 1,
+    }),
+    false
+  );
 });
 
 test('startup requeue blocks already-sent paused leads', () => {
