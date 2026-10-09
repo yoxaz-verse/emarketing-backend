@@ -431,3 +431,81 @@ export function getReplyCaptureHealth(): ReplyCaptureHealth {
     inboxes: [...health.inboxes],
   };
 }
+
+/**
+ * Returns a deployment-wide health snapshot. The in-memory snapshot only
+ * describes the process that answered the HTTP request, which is misleading
+ * after a restart or when API traffic and the worker run on different
+ * instances. Durable cursor rows are the source of truth for the last poll.
+ */
+export async function getReplyCaptureHealthSnapshot(): Promise<ReplyCaptureHealth> {
+  const snapshot = getReplyCaptureHealth();
+  if (!ENABLED) return { ...snapshot, stale: false };
+
+  const { data: cursorRows, error } = await supabase
+    .from('reply_capture_cursors')
+    .select('inbox_id,last_uid,uid_validity,last_success_at,last_error_at,last_error_code,last_error_message,updated_at');
+  if (error) throw error;
+
+  const rows = Array.isArray(cursorRows) ? cursorRows : [];
+  const inboxIds = rows.map((row: any) => String(row?.inbox_id ?? '')).filter(Boolean);
+  const emailByInboxId = new Map<string, string>();
+  if (inboxIds.length > 0) {
+    const { data: inboxRows, error: inboxError } = await supabase
+      .from('inboxes')
+      .select('id,email_address,status')
+      .in('id', inboxIds)
+      .eq('status', 'active');
+    if (inboxError) throw inboxError;
+    for (const row of inboxRows ?? []) {
+      emailByInboxId.set(String((row as any).id), String((row as any).email_address ?? '').toLowerCase());
+    }
+  }
+
+  const activeRows = rows.filter((row: any) => emailByInboxId.has(String(row?.inbox_id ?? '')));
+  const latestSuccess = activeRows
+    .map((row: any) => String(row?.last_success_at ?? ''))
+    .filter(Boolean)
+    .sort()
+    .at(-1) ?? null;
+  const nowMs = Date.now();
+  const lastPollMs = latestSuccess ? new Date(latestSuccess).getTime() : 0;
+  const stale = activeRows.length > 0
+    ? (!lastPollMs || (nowMs - lastPollMs) > STALE_THRESHOLD_MINUTES * 60 * 1000)
+    : false;
+
+  const durableInboxes = activeRows.map((row: any) => {
+    const lastError = String(row?.last_error_message ?? '') || null;
+    const succeededAfterError = row?.last_success_at && row?.last_error_at
+      ? new Date(row.last_success_at).getTime() >= new Date(row.last_error_at).getTime()
+      : Boolean(row?.last_success_at) && !row?.last_error_at;
+    return {
+      inbox_email: emailByInboxId.get(String(row?.inbox_id ?? '')) ?? '',
+      connect_ok: succeededAfterError,
+      auth_ok: succeededAfterError,
+      mailbox_open_ok: succeededAfterError,
+      last_poll_at: row?.last_success_at ?? null,
+      last_error_at: row?.last_error_at ?? null,
+      last_uid: Number(row?.last_uid ?? 0),
+      uid_validity: String(row?.uid_validity ?? '') || null,
+      phase: (succeededAfterError ? 'complete' : 'idle') as ReplyCapturePhase,
+      last_success_at: row?.last_success_at ?? null,
+      scanned: 0,
+      ingested: 0,
+      unmatched: 0,
+      parser_failures: 0,
+      last_error: succeededAfterError ? null : lastError,
+      last_error_code: succeededAfterError ? null : (String(row?.last_error_code ?? '') || null),
+    };
+  });
+
+  return {
+    ...snapshot,
+    running: snapshot.running || Boolean(latestSuccess),
+    last_poll_at: latestSuccess ?? snapshot.last_poll_at,
+    stale,
+    active_inbox_count: activeRows.length,
+    failed_inbox_count: durableInboxes.filter((row) => Boolean(row.last_error)).length,
+    inboxes: durableInboxes,
+  };
+}

@@ -11,8 +11,9 @@ Run these files in Supabase SQL Editor in this order:
 3. `current/20260917_verify_and_repair_production_schema.sql`
 4. `current/20261008_campaign_dynamic_fields.sql`
 5. `current/20261009_reply_capture_rebuild.sql`
+6. `current/20261009_cleanup_sequence_delay_notifications.sql`
 
-The first four scripts are rerunnable schema repairs. The fifth creates durable reply-capture cursors and performs one guarded reply-history reset; its destructive block executes only once for its reset key. Disable reply capture before applying it, deploy the matching backend, configure `REPLY_CAPTURE_IMAP_HOST=chocobo.mxrouting.net`, port `993`, TLS enabled, and then re-enable capture.
+The first four scripts are rerunnable schema repairs. The fifth creates durable reply-capture cursors and performs one guarded reply-history reset; its destructive block executes only once for its reset key. The sixth is a rerunnable, narrowly scoped cleanup that removes routine sequence-delay items from Communications while preserving their source audit events. Disable reply capture before applying the fifth script, deploy the matching backend, configure `REPLY_CAPTURE_IMAP_HOST=chocobo.mxrouting.net`, port `993`, TLS enabled, and then re-enable capture.
 
 Expected final results:
 
@@ -25,6 +26,7 @@ Expected final results:
 - Scheduled requests have `updated_at`, and required functions and indexes pass the final audit.
 - Campaign dynamic-field mappings are stored with reviewed sequence signatures.
 - Reply capture resumes from a durable per-inbox UID cursor and rebuilds only the configured backfill window.
+- Routine sequence-delay checks no longer appear in Communications or inflate unread counts.
 
 ## Review before cleanup
 

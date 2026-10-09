@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { messageId, replySubject, sendFailureStatus, scopeForEvent } from './model';
+import { shouldProjectSystemEvent } from './projector';
 test('thread IDs preserve case and reject injected headers',()=>{
   assert.equal(messageId('<Reply-ABC@example.com>'),'Reply-ABC@example.com');
   assert.equal(messageId('id\r\nBcc: victim@example.com'),null);
@@ -21,4 +22,8 @@ test('events with unresolved ownership are admin only',()=>{
   const c=scopeForEvent({entity:'campaign',entity_id:'campaign-1'});
   assert.equal(c.scope_table,'campaigns');assert.equal(c.scope_id,'campaign-1');
   assert.equal(scopeForEvent({entity:'agent_tasks',entity_id:'a'}).module,'openflow_ai');
+});
+test('routine delay checks do not become notifications',()=>{
+  assert.equal(shouldProjectSystemEvent('CAMPAIGN_SEQUENCE_DELAY_BLOCKED'),false);
+  assert.equal(shouldProjectSystemEvent('CAMPAIGN_BATCH_EXECUTION_FATAL'),true);
 });

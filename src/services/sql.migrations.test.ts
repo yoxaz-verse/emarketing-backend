@@ -10,6 +10,7 @@ test('current production SQL runbook lists the executable migration order', () =
     'current/20260917_verify_and_repair_production_schema.sql',
     'current/20261008_campaign_dynamic_fields.sql',
     'current/20261009_reply_capture_rebuild.sql',
+    'current/20261009_cleanup_sequence_delay_notifications.sql',
   ];
   let previous = -1;
   for (const path of expected) {
@@ -18,6 +19,14 @@ test('current production SQL runbook lists the executable migration order', () =
     previous = position;
     assert.doesNotThrow(() => readFileSync(`sql/${path}`, 'utf8'));
   }
+});
+
+test('sequence delay notification cleanup is narrow and preserves audit events', () => {
+  const sql = readFileSync('sql/current/20261009_cleanup_sequence_delay_notifications.sql', 'utf8');
+  assert.match(sql, /delete from public\.communication_queue/i);
+  assert.match(sql, /delete from public\.communication_items/i);
+  assert.match(sql, /CAMPAIGN_SEQUENCE_DELAY_BLOCKED/i);
+  assert.doesNotMatch(sql, /delete from public\.system_events/i);
 });
 
 test('reply capture rebuild is guarded and preserves old campaigns from resending', () => {

@@ -22,7 +22,7 @@ import {
 import { supabase } from '../supabase';
 import { ingestInboundReply } from '../services/replyIngestService.js';
 import { initiateCampaignVoiceCall } from '../services/voice/voiceExecution.service';
-import { getReplyCaptureHealth } from '../worker/replyCapture.worker.js';
+import { getReplyCaptureHealthSnapshot } from '../worker/replyCapture.worker.js';
 
 const router = Router();
 
@@ -281,7 +281,7 @@ router.get('/system/wake-check', async (req, res) => {
 
 router.get('/system/reply-capture-health', async (_req, res) => {
   try {
-    const health = getReplyCaptureHealth();
+    const health = await getReplyCaptureHealthSnapshot();
     return res.json(health);
   } catch (err: any) {
     return res.status(500).json({ error: err?.message ?? 'Failed to read reply capture health' });

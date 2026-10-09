@@ -235,6 +235,124 @@ export async function reviewLeadInterest(params: {
   return { success: true };
 }
 
+export async function deleteReply(params: {
+  leadId?: string | null;
+  replyEventId?: string | null;
+  operatorId?: string | null;
+}) {
+  const leadId = String(params.leadId ?? '').trim();
+  const replyEventId = String(params.replyEventId ?? '').trim();
+  if (!leadId && !replyEventId) throw new Error('leadId or replyEventId is required');
+
+  if (leadId && params.operatorId) {
+    const { data: ownedLead, error } = await supabase
+      .from('leads')
+      .select('id')
+      .eq('id', leadId)
+      .eq('operator_id', params.operatorId)
+      .maybeSingle();
+    if (error) throw error;
+    if (!ownedLead) throw new Error('Reply not found');
+  }
+
+  let resolvedLeadId = leadId;
+  let campaignLeadId = '';
+  if (replyEventId) {
+    const { data: event, error: eventError } = await supabase
+      .from('email_tracking_events')
+      .select('id,lead_id,campaign_lead_id')
+      .eq('id', replyEventId)
+      .eq('event_type', 'reply')
+      .maybeSingle();
+    if (eventError) throw eventError;
+    if (!event) throw new Error('Reply not found');
+    if (params.operatorId && leadId && String((event as any).lead_id ?? '') !== leadId) {
+      throw new Error('Reply not found');
+    }
+    resolvedLeadId = String((event as any).lead_id ?? resolvedLeadId).trim();
+    campaignLeadId = String((event as any).campaign_lead_id ?? '').trim();
+
+    const { error: deleteError } = await supabase
+      .from('email_tracking_events')
+      .delete()
+      .eq('id', replyEventId)
+      .eq('event_type', 'reply');
+    if (deleteError) throw deleteError;
+  }
+
+  if (campaignLeadId) {
+    const { error } = await supabase
+      .from('campaign_leads')
+      .update({ status: 'completed', status_reason: 'reply_deleted_by_user' })
+      .eq('id', campaignLeadId)
+      .eq('status', 'replied');
+    if (error) throw error;
+  } else if (resolvedLeadId) {
+    const { error } = await supabase
+      .from('campaign_leads')
+      .update({ status: 'completed', status_reason: 'reply_deleted_by_user' })
+      .eq('lead_id', resolvedLeadId)
+      .eq('status', 'replied');
+    if (error) throw error;
+  }
+
+  if (resolvedLeadId) {
+    const { count, error: remainingError } = await supabase
+      .from('email_tracking_events')
+      .select('id', { count: 'exact', head: true })
+      .eq('event_type', 'reply')
+      .eq('lead_id', resolvedLeadId);
+    if (remainingError) throw remainingError;
+    if (Number(count ?? 0) === 0) {
+      const { error } = await supabase
+        .from('leads')
+        .update({
+          status: 'pending',
+          replied_at: null,
+          reply_message: null,
+          interest_status: null,
+          interest_note: null,
+          interest_reviewed_at: null,
+          interest_reviewed_by: null,
+        })
+        .eq('id', resolvedLeadId);
+      if (error) throw error;
+    }
+  }
+
+  return { success: true };
+}
+
+export async function deleteUnmatchedReply(replyEventId: string, operatorId?: string | null) {
+  const eventId = String(replyEventId ?? '').trim();
+  if (!eventId) throw new Error('replyEventId is required');
+  if (operatorId) {
+    const { data: event, error: eventError } = await supabase
+      .from('reply_ingest_events')
+      .select('inbox_email')
+      .eq('id', eventId)
+      .eq('matched', false)
+      .maybeSingle();
+    if (eventError) throw eventError;
+    const inboxEmail = String((event as any)?.inbox_email ?? '').trim().toLowerCase();
+    const { data: ownedInbox, error: inboxError } = await supabase
+      .from('inboxes')
+      .select('id')
+      .eq('operator_id', operatorId)
+      .eq('email_address', inboxEmail)
+      .maybeSingle();
+    if (inboxError) throw inboxError;
+    if (!event || !ownedInbox) throw new Error('Reply not found');
+  }
+  const { error } = await supabase
+    .from('reply_ingest_events')
+    .delete()
+    .eq('id', eventId)
+    .eq('matched', false);
+  if (error) throw error;
+  return { success: true };
+}
+
 export async function getUnmatchedReplyEvents(
   operatorId: string | null,
   options?: { campaignId?: string | null }

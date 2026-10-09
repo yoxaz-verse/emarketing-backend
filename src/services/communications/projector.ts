@@ -2,6 +2,14 @@ import { randomUUID } from 'crypto';
 import { supabase as defaultDb } from '../../supabase';
 import { messageId, scopeForEvent } from './model';
 
+export function shouldProjectSystemEvent(type: unknown): boolean {
+  return ![
+    'LEAD_REPLIED',
+    'UNMATCHED_REPLY_RECEIVED',
+    'CAMPAIGN_SEQUENCE_DELAY_BLOCKED',
+  ].includes(String(type ?? ''));
+}
+
 export function createCommunicationProjector(db: any = defaultDb) {
 async function result(query: any): Promise<any> { const {data,error}=await query; if(error) throw error; return data; }
 async function row(table: string, id: string) { return id ? result(db.from(table).select('*').eq('id',id).maybeSingle()) : null; }
@@ -63,8 +71,9 @@ async function project(q:any) {
   const r=q.payload;
   let scope:any; let title:string; let preview:string;
   if(q.source_table==='system_events') {
-    // Replies already have their own conversation item.
-    if(['LEAD_REPLIED','UNMATCHED_REPLY_RECEIVED'].includes(r.type)) return;
+    // Reply events already have conversation items; expected delay checks are
+    // runner diagnostics, not user-facing notifications.
+    if(!shouldProjectSystemEvent(r.type)) return;
     scope=scopeForEvent(r);title=String(r.type || 'System update').replace(/_/g,' ');preview=String(r.message || '');
   } else {
     const social=q.source_table==='social_publish_jobs'; const voice=q.source_table==='voice_calls';

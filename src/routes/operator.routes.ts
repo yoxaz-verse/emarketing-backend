@@ -11,13 +11,15 @@ import {
   getOperatorReplies,
   getUnmatchedReplyEvents,
   mapUnmatchedReplyToLead,
-  reviewLeadInterest
+  reviewLeadInterest,
+  deleteReply,
+  deleteUnmatchedReply
 } from '../services/operatorRepliesService.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 import { requireWriteRole } from '../middleware/security.js';
 import { getEffectiveOperatorId } from '../utils/getEffectiveOperatorId.js';
 import { supabase } from '../supabase.js';
-import { getReplyCaptureHealth } from '../worker/replyCapture.worker.js';
+import { getReplyCaptureHealthSnapshot } from '../worker/replyCapture.worker.js';
 
 const router = Router();
 
@@ -168,7 +170,7 @@ router.get('/replies', async (req, res) => {
       else mappingConfidenceBreakdown.unknown += 1;
     }
 
-    const workerHealth = getReplyCaptureHealth();
+    const workerHealth = await getReplyCaptureHealthSnapshot();
     return res.json({
       replies: repliesPage.rows,
       unmatched,
@@ -310,6 +312,30 @@ router.patch('/replies/unmatched/:replyEventId/map', async (req, res) => {
     return res.json(result);
   } catch (err: any) {
     return res.status(400).json({ error: err?.message ?? 'Failed to map unmatched reply' });
+  }
+});
+
+router.delete('/replies/unmatched/:replyEventId', async (req, res) => {
+  try {
+    const role = String(req?.auth?.role ?? '').toLowerCase();
+    const operatorId = role === 'admin' || role === 'superadmin' ? null : getEffectiveOperatorId(req);
+    if (!(role === 'admin' || role === 'superadmin') && !operatorId) return res.status(403).json({ error: 'Operator scope required' });
+    return res.json(await deleteUnmatchedReply(String(req.params.replyEventId ?? ''), operatorId));
+  } catch (err: any) {
+    return res.status(400).json({ error: err?.message ?? 'Failed to delete unmatched reply' });
+  }
+});
+
+router.delete('/replies/:leadId', async (req, res) => {
+  try {
+    const leadId = String(req.params.leadId ?? '');
+    const replyEventId = req.body?.reply_event_id ? String(req.body.reply_event_id) : null;
+    const role = String(req?.auth?.role ?? '').toLowerCase();
+    const operatorId = role === 'admin' || role === 'superadmin' ? null : getEffectiveOperatorId(req);
+    if (!(role === 'admin' || role === 'superadmin') && !operatorId) return res.status(403).json({ error: 'Operator scope required' });
+    return res.json(await deleteReply({ leadId, replyEventId, operatorId }));
+  } catch (err: any) {
+    return res.status(400).json({ error: err?.message ?? 'Failed to delete reply' });
   }
 });
 

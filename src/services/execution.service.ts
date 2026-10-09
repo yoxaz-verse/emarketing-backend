@@ -766,19 +766,6 @@ async function applyClaimDelayGate(input: {
       .eq('status', 'processing');
     if (requeueError) throw requeueError;
 
-    await insertSystemEvent({
-      type: 'CAMPAIGN_SEQUENCE_DELAY_BLOCKED',
-      entity: 'campaigns',
-      entity_id: input.campaignId,
-      message: `Sequence delay blocked ${blockedLeadIds.length} claimed lead(s); requeued for future eligibility.`,
-      meta: {
-        campaign_id: input.campaignId,
-        blocked_count: blockedLeadIds.length,
-        blocked_campaign_lead_ids: blockedLeadIds,
-        next_delay_eligible_at: nextDelayEligibleAt,
-        reason: 'sequence_delay_not_elapsed',
-      },
-    });
   }
 
   return {
