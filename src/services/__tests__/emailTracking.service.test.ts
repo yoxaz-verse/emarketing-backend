@@ -6,6 +6,7 @@ import {
   buildEffectiveDeliveredSets,
   buildEffectiveReplyCounts,
   classifyTrackingEventType,
+  groupCampaignEngagement,
   normalizeProviderEmailEvent,
 } from '../emailTracking.service';
 
@@ -43,6 +44,47 @@ test('keeps open as open (opened logic untouched)', () => {
 
   assert.ok(normalized);
   assert.equal(normalized?.event_type, 'open');
+});
+
+test('groups engagement by company and filters contacts with opens', () => {
+  const result = groupCampaignEngagement({
+    status: 'opened',
+    page: 1,
+    pageSize: 25,
+    contacts: [
+      {
+        campaign_lead_id: 'cl-1', lead_id: 'l-1', email: 'a@acme.test', first_name: 'A', last_name: null, company: 'Acme',
+        timeline: [
+          { id: 's-1', type: 'sent', occurred_at: '2026-10-10T10:00:00Z', sender_inbox_email: 'sales@test.com', source: 'email_log', detail: null },
+          { id: 'o-1', type: 'opened', occurred_at: '2026-10-10T11:00:00Z', sender_inbox_email: 'sales@test.com', source: 'pixel_fallback', detail: null },
+        ],
+      },
+      {
+        campaign_lead_id: 'cl-2', lead_id: 'l-2', email: 'b@acme.test', first_name: 'B', last_name: null, company: 'ACME',
+        timeline: [{ id: 's-2', type: 'sent', occurred_at: '2026-10-10T09:00:00Z', sender_inbox_email: null, source: 'email_log', detail: null }],
+      },
+    ],
+  });
+
+  assert.equal(result.total, 1);
+  assert.equal(result.rows[0]?.company, 'Acme');
+  assert.equal(result.rows[0]?.contact_count, 1);
+  assert.equal(result.rows[0]?.opens, 1);
+});
+
+test('groups missing companies and paginates company rows by latest activity', () => {
+  const contact = (id: string, company: string | null, occurredAt: string) => ({
+    campaign_lead_id: `cl-${id}`, lead_id: `l-${id}`, email: `${id}@test.com`, first_name: null, last_name: null, company,
+    timeline: [{ id: `s-${id}`, type: 'sent' as const, occurred_at: occurredAt, sender_inbox_email: null, source: 'email_log', detail: null }],
+  });
+  const result = groupCampaignEngagement({
+    status: 'all', query: 'company', page: 1, pageSize: 1,
+    contacts: [contact('1', null, '2026-10-10T10:00:00Z'), contact('2', 'New company', '2026-10-11T10:00:00Z')],
+  });
+
+  assert.equal(result.total, 2);
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0]?.company, 'New company');
 });
 
 test('classifies hard and soft bounce correctly', () => {

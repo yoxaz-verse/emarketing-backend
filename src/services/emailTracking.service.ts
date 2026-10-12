@@ -960,6 +960,210 @@ function bounce_rate(sent: number, bounced: number): number {
   return Number(((bounced / sent) * 100).toFixed(2));
 }
 
+export type CampaignEngagementStatus = 'opened' | 'replied' | 'bounced' | 'all';
+
+type EngagementTimelineEvent = {
+  id: string;
+  type: 'sent' | 'opened' | 'replied' | 'bounced';
+  occurred_at: string;
+  sender_inbox_email: string | null;
+  source: string;
+  detail: string | null;
+};
+
+type EngagementContact = {
+  campaign_lead_id: string;
+  lead_id: string;
+  email: string;
+  first_name: string | null;
+  last_name: string | null;
+  company: string | null;
+  timeline: EngagementTimelineEvent[];
+};
+
+export function groupCampaignEngagement(input: {
+  contacts: EngagementContact[];
+  status: CampaignEngagementStatus;
+  query?: string | null;
+  page: number;
+  pageSize: number;
+}) {
+  const query = String(input.query ?? '').trim().toLowerCase();
+  const matchesStatus = (contact: EngagementContact) => {
+    if (input.status === 'all') return contact.timeline.length > 0;
+    const expected = input.status === 'opened'
+      ? 'opened'
+      : input.status === 'replied'
+      ? 'replied'
+      : 'bounced';
+    return contact.timeline.some((event) => event.type === expected);
+  };
+
+  const groups = new Map<string, { company: string; contacts: EngagementContact[] }>();
+  for (const contact of input.contacts) {
+    if (!matchesStatus(contact)) continue;
+    const company = String(contact.company ?? '').trim() || 'Unknown company';
+    const searchable = `${company} ${contact.email} ${contact.first_name ?? ''} ${contact.last_name ?? ''}`.toLowerCase();
+    if (query && !searchable.includes(query)) continue;
+    const key = company.toLowerCase();
+    const group = groups.get(key) ?? { company, contacts: [] };
+    group.contacts.push(contact);
+    groups.set(key, group);
+  }
+
+  const rows = [...groups.values()].map((group) => {
+    const events = group.contacts.flatMap((contact) => contact.timeline);
+    const latestActivityAt = events.reduce<string | null>((latest, event) => (
+      !latest || event.occurred_at > latest ? event.occurred_at : latest
+    ), null);
+    const eventCount = (type: EngagementTimelineEvent['type']) => events.filter((event) => event.type === type).length;
+    return {
+      company: group.company,
+      contact_count: group.contacts.length,
+      opens: eventCount('opened'),
+      replies: eventCount('replied'),
+      bounces: eventCount('bounced'),
+      latest_activity_at: latestActivityAt,
+      contacts: group.contacts
+        .map((contact) => ({
+          ...contact,
+          timeline: [...contact.timeline].sort((a, b) => b.occurred_at.localeCompare(a.occurred_at)),
+        }))
+        .sort((a, b) => (b.timeline[0]?.occurred_at ?? '').localeCompare(a.timeline[0]?.occurred_at ?? '')),
+    };
+  }).sort((a, b) => (b.latest_activity_at ?? '').localeCompare(a.latest_activity_at ?? ''));
+
+  const start = (input.page - 1) * input.pageSize;
+  return {
+    rows: rows.slice(start, start + input.pageSize),
+    total: rows.length,
+    page: input.page,
+    page_size: input.pageSize,
+    status: input.status,
+  };
+}
+
+export async function getCampaignEngagement(input: {
+  campaignId: string;
+  status: CampaignEngagementStatus;
+  query?: string | null;
+  page: number;
+  pageSize: number;
+}) {
+  const [{ data: campaignLeads, error: leadError }, { data: sentRows, error: sentError }, { data: eventRows, error: eventError }] = await Promise.all([
+    supabase
+      .from('campaign_leads')
+      .select('id,lead_id,status,leads:lead_id(id,email,first_name,last_name,company,replied_at,reply_message)')
+      .eq('campaign_id', input.campaignId),
+    supabase
+      .from('email_logs')
+      .select('id,campaign_lead_id,lead_id,inbox_id,to_email,sent_at')
+      .eq('campaign_id', input.campaignId)
+      .eq('status', 'sent'),
+    supabase
+      .from('email_tracking_events')
+      .select('id,campaign_lead_id,event_type,event_at,inbox_id,raw_payload')
+      .eq('campaign_id', input.campaignId),
+  ]);
+  const firstError = leadError ?? sentError ?? eventError;
+  if (firstError) throw firstError;
+
+  const inboxIds = [...new Set([
+    ...(sentRows ?? []).map((row: any) => String(row?.inbox_id ?? '').trim()),
+    ...(eventRows ?? []).map((row: any) => String(row?.inbox_id ?? '').trim()),
+  ].filter(Boolean))];
+  const { data: inboxRows, error: inboxError } = inboxIds.length
+    ? await supabase.from('inboxes').select('id,email_address').in('id', inboxIds)
+    : { data: [] as any[], error: null };
+  if (inboxError) throw inboxError;
+  const inboxEmailById = new Map<string, string>((inboxRows ?? []).map((row: any) => [String(row.id), String(row.email_address ?? '')]));
+
+  const sentByLead = new Map<string, any[]>();
+  for (const row of sentRows ?? []) {
+    const key = String((row as any)?.campaign_lead_id ?? '');
+    if (!key) continue;
+    sentByLead.set(key, [...(sentByLead.get(key) ?? []), row]);
+  }
+  const eventsByLead = new Map<string, any[]>();
+  for (const row of eventRows ?? []) {
+    const key = String((row as any)?.campaign_lead_id ?? '');
+    if (!key) continue;
+    eventsByLead.set(key, [...(eventsByLead.get(key) ?? []), row]);
+  }
+
+  const contacts: EngagementContact[] = (campaignLeads ?? []).map((row: any) => {
+    const campaignLeadId = String(row?.id ?? '');
+    const lead = Array.isArray(row?.leads) ? row.leads[0] : row?.leads;
+    const sends = sentByLead.get(campaignLeadId) ?? [];
+    const tracked = eventsByLead.get(campaignLeadId) ?? [];
+    const timeline: EngagementTimelineEvent[] = sends.flatMap((sent: any) => {
+      const occurredAt = String(sent?.sent_at ?? '').trim();
+      if (!occurredAt) return [];
+      return [{
+        id: `sent:${String(sent?.id ?? occurredAt)}`,
+        type: 'sent' as const,
+        occurred_at: occurredAt,
+        sender_inbox_email: inboxEmailById.get(String(sent?.inbox_id ?? '')) || null,
+        source: 'email_log',
+        detail: null,
+      }];
+    });
+
+    for (const event of tracked) {
+      const raw = (event?.raw_payload ?? {}) as Record<string, any>;
+      const classified = classifyTrackingEventType(event?.event_type, raw.reason ?? raw.diagnostic);
+      if (!classified || classified === 'delivered') continue;
+      const type: EngagementTimelineEvent['type'] = classified === 'open'
+        ? 'opened'
+        : classified === 'reply'
+        ? 'replied'
+        : 'bounced';
+      timeline.push({
+        id: `event:${String(event?.id ?? `${type}:${event?.event_at}`)}`,
+        type,
+        occurred_at: String(event?.event_at ?? ''),
+        sender_inbox_email: inboxEmailById.get(String(event?.inbox_id ?? '')) || null,
+        source: String(raw.source ?? 'provider_webhook'),
+        detail: type === 'bounced'
+          ? String(raw.reason ?? raw.diagnostic ?? '').trim() || null
+          : type === 'replied'
+          ? String(lead?.reply_message ?? raw.message ?? '').trim() || null
+          : null,
+      });
+    }
+
+    if (String(row?.status ?? '').toLowerCase() === 'replied' && !timeline.some((event) => event.type === 'replied')) {
+      const occurredAt = String(lead?.replied_at ?? '').trim();
+      if (occurredAt) timeline.push({
+        id: `reply-fallback:${campaignLeadId}`,
+        type: 'replied',
+        occurred_at: occurredAt,
+        sender_inbox_email: null,
+        source: 'campaign_status_fallback',
+        detail: String(lead?.reply_message ?? '').trim() || null,
+      });
+    }
+
+    return {
+      campaign_lead_id: campaignLeadId,
+      lead_id: String(lead?.id ?? row?.lead_id ?? ''),
+      email: String(lead?.email ?? sends[0]?.to_email ?? ''),
+      first_name: String(lead?.first_name ?? '').trim() || null,
+      last_name: String(lead?.last_name ?? '').trim() || null,
+      company: String(lead?.company ?? '').trim() || null,
+      timeline,
+    };
+  });
+
+  return groupCampaignEngagement({
+    contacts,
+    status: input.status,
+    query: input.query,
+    page: input.page,
+    pageSize: input.pageSize,
+  });
+}
+
 export async function getCampaignRepliesFeed(campaignId: string) {
   const { data } = await supabase
     .from('campaign_leads')

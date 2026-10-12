@@ -11,7 +11,7 @@ import {
   pauseCampaign
 } from '../services/campaign.domain';
 import { getCampaignDeletePreview } from '../services/campaignDelete.service';
-import { getCampaignRepliesFeed, getCampaignReplyOpenAnalytics } from '../services/emailTracking.service.js';
+import { getCampaignEngagement, getCampaignRepliesFeed, getCampaignReplyOpenAnalytics, type CampaignEngagementStatus } from '../services/emailTracking.service.js';
 import { getSendingLimitsConfig } from '../services/sendingLimitsConfig.service';
 import { normalizePagination } from '../utils/pagination';
 import {
@@ -967,6 +967,30 @@ router.get('/:id/reply-open-analytics', async (req, res) => {
   } catch (err: any) {
     console.error('[CAMPAIGN REPLY OPEN ANALYTICS ERROR]', err);
     return res.status(resolveStatusCode(err)).json({ error: err.message ?? 'Failed to fetch campaign analytics' });
+  }
+});
+
+router.get('/:id/engagement', async (req, res) => {
+  try {
+    const campaignId = String(req.params.id ?? '');
+    await assertCampaignAccess(req, campaignId);
+    const { page, pageSize } = normalizePagination(req.query.page, req.query.page_size, 25, 100);
+    const requestedStatus = String(req.query.status ?? 'opened').toLowerCase();
+    const allowedStatuses = new Set<CampaignEngagementStatus>(['opened', 'replied', 'bounced', 'all']);
+    const status: CampaignEngagementStatus = allowedStatuses.has(requestedStatus as CampaignEngagementStatus)
+      ? requestedStatus as CampaignEngagementStatus
+      : 'opened';
+    const result = await getCampaignEngagement({
+      campaignId,
+      status,
+      query: String(req.query.q ?? '').trim() || null,
+      page,
+      pageSize,
+    });
+    return res.json(result);
+  } catch (err: any) {
+    console.error('[CAMPAIGN ENGAGEMENT ERROR]', err);
+    return res.status(resolveStatusCode(err)).json({ error: err?.message ?? 'Failed to load campaign engagement' });
   }
 });
 
