@@ -2,7 +2,15 @@ import { supabase } from '../supabase.js';
 import { decryptSecret } from '../utils/sendEncryption.js';
 import { ingestInboundReply } from '../services/replyIngestService.js';
 import { formatUnknownError } from '../utils/errorFormat.js';
-import { planUidFetch, ReplyCapturePhase, sanitizeImapError } from './replyCapture.utils.js';
+import {
+  classifyReplyCaptureInbox,
+  deriveReplyCaptureStatus,
+  planUidFetch,
+  ReplyCapturePhase,
+  ReplyCaptureStatus,
+  sanitizeImapError,
+  SkippedInboxReason,
+} from './replyCapture.utils.js';
 
 type InboxPollTarget = {
   inbox_id: string;
@@ -15,9 +23,12 @@ type InboxPollTarget = {
 };
 
 type ReplyCaptureHealth = {
+  status: ReplyCaptureStatus;
   enabled: boolean;
   running: boolean;
   started_at: string | null;
+  last_cycle_at: string | null;
+  last_cycle_error: string | null;
   last_poll_at: string | null;
   stale: boolean;
   stale_threshold_minutes: number;
@@ -26,8 +37,14 @@ type ReplyCaptureHealth = {
   ingested: number;
   unmatched: number;
   parser_failures: number;
+  configured_active_inbox_count: number;
+  eligible_inbox_count: number;
   active_inbox_count: number;
   failed_inbox_count: number;
+  skipped_inboxes: Array<{
+    inbox_email: string;
+    reason: SkippedInboxReason;
+  }>;
   inboxes: Array<{
     inbox_email: string;
     connect_ok: boolean;
@@ -79,9 +96,12 @@ const mailboxState = new Map<string, {
   didBackfill: boolean;
 }>();
 const health: ReplyCaptureHealth = {
+  status: ENABLED ? 'healthy' : 'disabled',
   enabled: ENABLED,
   running: false,
   started_at: null,
+  last_cycle_at: null,
+  last_cycle_error: null,
   last_poll_at: null,
   stale: false,
   stale_threshold_minutes: STALE_THRESHOLD_MINUTES,
@@ -90,8 +110,11 @@ const health: ReplyCaptureHealth = {
   ingested: 0,
   unmatched: 0,
   parser_failures: 0,
+  configured_active_inbox_count: 0,
+  eligible_inbox_count: 0,
   active_inbox_count: 0,
   failed_inbox_count: 0,
+  skipped_inboxes: [],
   inboxes: [],
 };
 
@@ -141,7 +164,11 @@ function backfillStartIso(): string {
   return new Date(Date.now() - (BACKFILL_DAYS * 24 * 60 * 60 * 1000)).toISOString();
 }
 
-async function getInboxTargets(): Promise<InboxPollTarget[]> {
+async function getInboxTargets(): Promise<{
+  configuredCount: number;
+  targets: InboxPollTarget[];
+  skipped: ReplyCaptureHealth['skipped_inboxes'];
+}> {
   const { data, error } = await supabase
     .from('inboxes')
     .select(`
@@ -161,12 +188,20 @@ async function getInboxTargets(): Promise<InboxPollTarget[]> {
   if (error) throw error;
 
   const targets: InboxPollTarget[] = [];
+  const skipped: ReplyCaptureHealth['skipped_inboxes'] = [];
   for (const row of data ?? []) {
     const smtp = (row as any)?.smtp_accounts;
+    const reason = classifyReplyCaptureInbox(row as any, DEFAULT_IMAP_HOST);
+    if (reason) {
+      skipped.push({
+        inbox_email: String((row as any).email_address ?? '').trim().toLowerCase(),
+        reason,
+      });
+      continue;
+    }
     const username = String(smtp?.username ?? '').trim();
     const encryptedPassword = String(smtp?.password ?? '').trim();
     const host = parseMailboxHost(String(smtp?.host ?? ''));
-    if (!username || !encryptedPassword || !host) continue;
     const password = decryptSecret(encryptedPassword);
     const encryption = String(smtp?.encryption ?? '').toLowerCase();
     targets.push({
@@ -179,7 +214,7 @@ async function getInboxTargets(): Promise<InboxPollTarget[]> {
       secure: encryption.includes('ssl') || encryption.includes('tls') || DEFAULT_IMAP_SECURE,
     });
   }
-  return targets;
+  return { configuredCount: (data ?? []).length, targets, skipped };
 }
 
 async function pollInbox(target: InboxPollTarget) {
@@ -366,9 +401,14 @@ async function pollInbox(target: InboxPollTarget) {
 async function runPollCycle() {
   if (!ENABLED || cycleRunning) return;
   cycleRunning = true;
+  health.last_cycle_error = null;
   try {
-    const targets = await getInboxTargets();
+    const discovery = await getInboxTargets();
+    const targets = discovery.targets;
+    health.configured_active_inbox_count = discovery.configuredCount;
+    health.eligible_inbox_count = targets.length;
     health.active_inbox_count = targets.length;
+    health.skipped_inboxes = discovery.skipped;
     for (const target of targets) {
       // eslint-disable-next-line no-await-in-loop
       await pollInbox(target);
@@ -376,7 +416,7 @@ async function runPollCycle() {
   const nowMs = Date.now();
   const staleCutoffMs = STALE_THRESHOLD_MINUTES * 60 * 1000;
   const lastPollMs = health.last_poll_at ? new Date(health.last_poll_at).getTime() : 0;
-  health.stale = !lastPollMs || (nowMs - lastPollMs) > staleCutoffMs;
+  health.stale = Boolean(lastPollMs) && (nowMs - lastPollMs) > staleCutoffMs;
   let failed = 0;
   health.inboxes = targets.map((target) => {
     const state = mailboxState.get(target.inbox_id);
@@ -402,6 +442,21 @@ async function runPollCycle() {
     };
   });
     health.failed_inbox_count = failed;
+    health.last_cycle_at = new Date().toISOString();
+    health.status = deriveReplyCaptureStatus({
+      enabled: ENABLED,
+      eligibleInboxCount: health.eligible_inbox_count,
+      failedInboxCount: failed,
+      lastCycleError: health.last_cycle_error,
+      lastCycleAt: health.last_cycle_at,
+      lastPollAt: health.last_poll_at,
+      stale: health.stale,
+    });
+  } catch (error) {
+    health.last_cycle_at = new Date().toISOString();
+    health.last_cycle_error = sanitizeImapError(error).message;
+    health.status = 'failed';
+    throw error;
   } finally {
     cycleRunning = false;
   }
@@ -427,7 +482,7 @@ export function getReplyCaptureHealth(): ReplyCaptureHealth {
   const lastPollMs = health.last_poll_at ? new Date(health.last_poll_at).getTime() : 0;
   return {
     ...health,
-    stale: !lastPollMs || (nowMs - lastPollMs) > staleCutoffMs,
+    stale: Boolean(lastPollMs) && (nowMs - lastPollMs) > staleCutoffMs,
     inboxes: [...health.inboxes],
   };
 }
@@ -440,7 +495,9 @@ export function getReplyCaptureHealth(): ReplyCaptureHealth {
  */
 export async function getReplyCaptureHealthSnapshot(): Promise<ReplyCaptureHealth> {
   const snapshot = getReplyCaptureHealth();
-  if (!ENABLED) return { ...snapshot, stale: false };
+  if (!ENABLED) return { ...snapshot, status: 'disabled', stale: false };
+
+  const discovery = await getInboxTargets();
 
   const { data: cursorRows, error } = await supabase
     .from('reply_capture_cursors')
@@ -463,6 +520,11 @@ export async function getReplyCaptureHealthSnapshot(): Promise<ReplyCaptureHealt
   }
 
   const activeRows = rows.filter((row: any) => emailByInboxId.has(String(row?.inbox_id ?? '')));
+  const latestCycleAt = activeRows
+    .map((row: any) => String(row?.updated_at ?? ''))
+    .filter(Boolean)
+    .sort()
+    .at(-1) ?? snapshot.last_cycle_at;
   const latestSuccess = activeRows
     .map((row: any) => String(row?.last_success_at ?? ''))
     .filter(Boolean)
@@ -470,9 +532,7 @@ export async function getReplyCaptureHealthSnapshot(): Promise<ReplyCaptureHealt
     .at(-1) ?? null;
   const nowMs = Date.now();
   const lastPollMs = latestSuccess ? new Date(latestSuccess).getTime() : 0;
-  const stale = activeRows.length > 0
-    ? (!lastPollMs || (nowMs - lastPollMs) > STALE_THRESHOLD_MINUTES * 60 * 1000)
-    : false;
+  const stale = Boolean(lastPollMs) && (nowMs - lastPollMs) > STALE_THRESHOLD_MINUTES * 60 * 1000;
 
   const durableInboxes = activeRows.map((row: any) => {
     const lastError = String(row?.last_error_message ?? '') || null;
@@ -499,13 +559,33 @@ export async function getReplyCaptureHealthSnapshot(): Promise<ReplyCaptureHealt
     };
   });
 
-  return {
+  const failedInboxCount = durableInboxes.filter((row) => Boolean(row.last_error)).length;
+  const latestFailedRow = activeRows
+    .filter((row: any) => row?.last_error_message && (!row?.last_success_at || !row?.last_error_at || new Date(row.last_error_at).getTime() > new Date(row.last_success_at).getTime()))
+    .sort((a: any, b: any) => String(a?.last_error_at ?? '').localeCompare(String(b?.last_error_at ?? '')))
+    .at(-1);
+  const result: ReplyCaptureHealth = {
     ...snapshot,
     running: snapshot.running || Boolean(latestSuccess),
+    last_cycle_at: latestCycleAt,
+    last_cycle_error: snapshot.last_cycle_error ?? (latestFailedRow ? String(latestFailedRow.last_error_message).slice(0, 500) : null),
     last_poll_at: latestSuccess ?? snapshot.last_poll_at,
     stale,
-    active_inbox_count: activeRows.length,
-    failed_inbox_count: durableInboxes.filter((row) => Boolean(row.last_error)).length,
+    configured_active_inbox_count: discovery.configuredCount,
+    eligible_inbox_count: discovery.targets.length,
+    active_inbox_count: discovery.targets.length,
+    failed_inbox_count: failedInboxCount,
+    skipped_inboxes: discovery.skipped,
     inboxes: durableInboxes,
   };
+  result.status = deriveReplyCaptureStatus({
+    enabled: ENABLED,
+    eligibleInboxCount: result.eligible_inbox_count,
+    failedInboxCount,
+    lastCycleError: result.last_cycle_error,
+    lastCycleAt: result.last_cycle_at,
+    lastPollAt: result.last_poll_at,
+    stale,
+  });
+  return result;
 }
